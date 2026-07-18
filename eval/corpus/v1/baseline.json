@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "corpus_version": "v1",
+  "macro_claim_recall": 1.0,
+  "macro_claim_precision": 1.0,
+  "macro_artifact_recall": 1.0,
+  "macro_artifact_precision": 1.0,
+  "epsilon": 0.0
+}

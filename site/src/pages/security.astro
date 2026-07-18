@@ -1,0 +1,21 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+---
+
+<SiteLayout title="Security — Memoree" description="Memoree's security model, network boundary, and reporting policy.">
+  <article class="page prose-page shell">
+    <p class="eyebrow"><span></span> SECURITY / VERIFY THE BOUNDARY</p>
+    <h1>Small enough<br /><em>to inspect.</em></h1>
+    <p class="lede">Memoree keeps its trusted core local and deliberately narrow. The public source, locked dependency graph, protocol schema, release checksums, and build provenance let you verify those boundaries instead of taking them on faith.</p>
+    <h2>No hidden network path</h2>
+    <p>The Memoree crate has no HTTP client. Normal daemon, storage, recall, search, context, checkpoint, verification, and backup operations do not contact this website or an update service. The binary never checks for updates automatically.</p>
+    <h2>Explicit model boundary</h2>
+    <p><code>memoree remember</code> is a caller-side convenience that shells out to the locally installed, already authenticated Codex CLI for one tool-free, schema-constrained compilation. Preview is the default. The daemon never invokes a model, reads a provider credential, or executes model output.</p>
+    <h2>Local transport</h2>
+    <p>The default Unix socket lives in an owner-only runtime directory and is mode <code>0600</code>. Loopback TCP is host-local but not user-private, and non-loopback TCP requires an intentionally alarming opt-in flag. Authorization is outside the local personal v0.1 scope.</p>
+    <h2>Release integrity</h2>
+    <p>The installer uses versioned <code>memoree.dev</code> URLs, backed by public GitHub Releases, and rejects an archive that does not match its published SHA-256 checksum. Release builds use a locked dependency graph and publish GitHub build provenance. The installer never uses <code>sudo</code> or starts the daemon.</p>
+    <h2>Report a vulnerability</h2>
+    <p>Please do not open a public issue for an undisclosed vulnerability. Follow the <a href="https://github.com/devcited/memoree/security/policy">security policy</a> or email <a href="mailto:security@devcited.cc">security@devcited.cc</a>. Include affected versions, impact, and a minimal reproduction when possible.</p>
+  </article>
+</SiteLayout>

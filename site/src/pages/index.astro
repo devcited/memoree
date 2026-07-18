@@ -1,0 +1,83 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+---
+
+<SiteLayout
+  title="Memoree — evidence-backed memory for agents"
+  description="A local, artifact-first memory service that returns claims with exact evidence and references."
+>
+  <section class="hero shell">
+    <div class="hero-copy">
+      <p class="eyebrow"><span></span> LOCAL / CITED / AGENT-NATIVE</p>
+      <h1>Your agent can remember.<br /><em>It can show the receipt.</em></h1>
+      <p class="lede">Memoree turns durable project knowledge into scoped claims with immutable evidence. Ask what it knows; get an honest answer, exact references, and every contradiction still attached.</p>
+      <div class="actions">
+        <a class="button primary" href="/install/">Install Memoree <span aria-hidden="true">→</span></a>
+        <a class="button secondary" href="/docs/">Read the docs</a>
+      </div>
+      <p class="install-line"><span>$</span> curl --proto '=https' --tlsv1.2 -sfL https://memoree.dev/install.sh | sh</p>
+    </div>
+
+    <div class="trace" aria-label="Example Memoree recall result">
+      <div class="trace-bar"><span>recall.trace</span><span>ambient · 18ms</span></div>
+      <pre><code><span class="dim">$</span> memoree recall <span class="string">"why SQLite?"</span>
+
+<span class="key">presence</span>  <span class="value">claims</span>
+<span class="key">claim</span>     SQLite is authoritative;
+          indexes stay rebuildable.
+<span class="key">status</span>    <span class="ok">current</span>
+<span class="key">evidence</span>  art_01K…@arev_01K…<span class="accent">#418-492</span>
+<span class="key">source</span>    docs/architecture.md
+
+<span class="rule">──────────────────────────────────</span>
+scope      project:memoree
+broadened  <span class="ok">false</span>
+conflicts  0</code></pre>
+      <div class="trace-foot"><span>CLAIM</span><i></i><span>REVISION</span><i></i><span>BYTES</span></div>
+    </div>
+  </section>
+
+  <section class="proof-strip">
+    <div class="shell proof-grid">
+      <div><strong>01</strong><span>Keep the source</span><p>Original artifacts remain immutable evidence, not disposable chunks.</p></div>
+      <div><strong>02</strong><span>State the claim</span><p>Current, disputed, superseded, and retracted are different things.</p></div>
+      <div><strong>03</strong><span>Return the reference</span><p>Every grounded claim resolves to the exact revision and byte span.</p></div>
+    </div>
+  </section>
+
+  <section class="manifesto shell">
+    <div class="section-label">THE MEMORY CONTRACT</div>
+    <div class="manifesto-copy">
+      <h2>Useful memory is not a pile of embeddings.</h2>
+      <p>It is a small, inspectable contract between an agent and the work that came before.</p>
+    </div>
+    <div class="principles">
+      <article><span>Scoped by default</span><h3>No accidental global recall.</h3><p>Ambient project and task context is automatic. Broader workspace or personal search requires an explicit request and a reason.</p></article>
+      <article><span>Honest about absence</span><h3>“None” means none.</h3><p>Recall reports <code>claims</code>, <code>artifacts_only</code>, or <code>none</code>. It does not invent an answer or silently widen scope.</p></article>
+      <article><span>Local by construction</span><h3>Your memory stays yours.</h3><p>SQLite and a filesystem content store run on your machine. The daemon has no model provider, telemetry path, or hidden update check.</p></article>
+      <article><span>Contradictions survive</span><h3>Revision is not erasure.</h3><p>Conflicting claims remain visible with frozen evidence and lifecycle history, so a newer sentence cannot quietly rewrite the past.</p></article>
+    </div>
+  </section>
+
+  <section class="flow">
+    <div class="shell">
+      <div class="section-label">ONE SMALL LOCAL SYSTEM</div>
+      <div class="flow-line" aria-label="Memoree data flow">
+        <div><b>ARTIFACT</b><span>source bytes</span></div><i>→</i>
+        <div><b>REVISION</b><span>immutable digest</span></div><i>→</i>
+        <div><b>CLAIM</b><span>grounded statement</span></div><i>→</i>
+        <div><b>RECALL</b><span>answer + references</span></div>
+      </div>
+      <p class="flow-note">The index is replaceable. The evidence is not.</p>
+    </div>
+  </section>
+
+  <section class="closing shell">
+    <p class="eyebrow"><span></span> START WITH ONE PROJECT</p>
+    <h2>Give the next agent<br />something it can verify.</h2>
+    <div class="actions">
+      <a class="button primary" href="/install/">Install v0.2.0 <span aria-hidden="true">→</span></a>
+      <a class="button secondary" href="https://github.com/devcited/memoree">View the source</a>
+    </div>
+  </section>
+</SiteLayout>

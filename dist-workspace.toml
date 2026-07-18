@@ -1,0 +1,29 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
+# Path that installers should place binaries in
+install-path = ["$CARGO_HOME/bin", "~/.local/bin"]
+# Keep release archives friendly to curl/tar users and generate checksums for each one.
+unix-archive = ".tar.gz"
+checksum = "sha256"
+# Where to host releases
+hosting = "github"
+# Upload to an existing draft, then publish only after every artifact is present.
+# This is required for GitHub immutable releases.
+create-release = false
+# Publish verifiable GitHub build provenance for every release artifact.
+github-attestations = true
+# Whether to install an updater program
+install-updater = false
+# A resident daemon keeps running the old executable until explicitly restarted.
+install-success-msg = "Memoree is installed. If a daemon is already running, run: memoree daemon restart"

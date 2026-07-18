@@ -1,0 +1,58 @@
+---
+title: Documentation
+description: Install, integrate, and reason about Memoree's evidence-backed memory contract.
+template: splash
+hero:
+  tagline: Local, artifact-first memory with scoped claims and exact evidence references.
+  actions:
+    - text: Install Memoree
+      link: /install/
+      icon: right-arrow
+    - text: View source
+      link: https://github.com/devcited/memoree
+      variant: minimal
+---
+
+## Start with the agent-facing path
+
+<div className="memoree-doc-grid">
+  <a className="memoree-doc-card" href="/install/">
+    <span>01 / START</span>
+    <strong>Install and initialize</strong>
+    <p>Install one binary, initialize a project, and inspect the ambient context your agent will inherit.</p>
+  </a>
+  <a className="memoree-doc-card" href="/docs/protocol/">
+    <span>02 / RECALL</span>
+    <strong>Recall claims with references</strong>
+    <p>Ask whether Memoree has something and receive claims, exact evidence revisions, byte spans, and open conflicts.</p>
+  </a>
+  <a className="memoree-doc-card" href="/docs/model-integration/">
+    <span>03 / CONTEXT</span>
+    <strong>Give an agent bounded context</strong>
+    <p>Build a citation-rich packet within a byte budget while keeping retrieved content explicitly untrusted.</p>
+  </a>
+  <a className="memoree-doc-card" href="/docs/checkpoints/">
+    <span>04 / PRESERVE</span>
+    <strong>Preserve a deliberate checkpoint</strong>
+    <p>Stage a small handoff note outside recall, then review and promote it through the normal grounding boundary.</p>
+  </a>
+</div>
+
+## The shortest useful workflow
+
+```sh
+cd /path/to/project
+memoree init --name my-project
+memoree recall "what do we know about the deployment decision?"
+memoree context build "deployment constraints" --max-bytes 4096
+memoree remember --apply "Production deploys require a clean migration check."
+```
+
+Normal retrieval stays within ambient project/task context. A `none` result is honest absence at that horizon, not permission to widen the search. Broaden to workspace or personal scope only for a separate request with a reason.
+
+## Understand the boundaries
+
+- [Architecture](/docs/architecture/) explains local storage, immutable revisions, scope, and why indexes remain disposable.
+- [Context and configuration](/docs/configuration/) defines markers, task-local sessions, personal fallback, and application paths.
+- [Quality gates](/docs/quality/) records the claims the project is willing to make and the evidence required before making stronger ones.
+- [Retrieval evaluation](/docs/evaluation/) separates deterministic correctness checks from downstream model quality.

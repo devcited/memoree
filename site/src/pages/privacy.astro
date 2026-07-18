@@ -1,0 +1,20 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+---
+
+<SiteLayout title="Privacy — Memoree" description="Memoree privacy and network behavior.">
+  <article class="page prose-page shell">
+    <p class="eyebrow"><span></span> PRIVACY / PLAIN LANGUAGE</p>
+    <h1>Local means<br /><em>local.</em></h1>
+    <p class="lede">Memoree stores memory on the machine where you run it. The project website is static. There are no accounts, analytics, advertising scripts, or hosted memory service.</p>
+    <h2>What the CLI sends</h2>
+    <p>Normal daemon, storage, recall, search, context, and checkpoint operations make no network requests. The CLI does not automatically check for updates.</p>
+    <h2>The explicit model-assisted command</h2>
+    <p><code>memoree remember</code> can invoke the locally installed Codex CLI when you ask it to compile natural language into grounded claims. The source is sent only as part of that explicit command. Preview is the default; persistence requires <code>--apply</code>. See <a href="/docs/model-integration/">agent integration</a> for the exact boundary.</p>
+    <h2>Downloads and updates</h2>
+    <p>The install script contacts this domain for the release pointer and versioned archive/checksum URLs. Those download URLs redirect to the matching public GitHub Release. Running the installer is the update action. Memoree performs no background download.</p>
+    <h2>Website logs</h2>
+    <p>As with most websites, the infrastructure providers may process ordinary request metadata needed to deliver and secure the site. Memoree adds no visitor tracking.</p>
+    <p class="updated">Effective 18 July 2026 · Questions and security reports: <a href="mailto:security@devcited.cc">security@devcited.cc</a></p>
+  </article>
+</SiteLayout>

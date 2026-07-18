@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Memoree">
+  <rect width="64" height="64" rx="13" fill="#11130f"/>
+  <path d="M17 18h30v8H25v8h18v8H25v12h-8V18Z" fill="#d8ff6a"/>
+  <path d="M39 18h8v36h-8V42h-7v-8h7V18Z" fill="#f1eee4"/>
+</svg>

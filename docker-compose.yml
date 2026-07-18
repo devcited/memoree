@@ -1,0 +1,36 @@
+name: memoree-local
+
+services:
+  memoree:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      MEMOREE_HOME: /data
+      RUST_LOG: ${RUST_LOG:-info}
+    # The process must listen on the container interface for port publishing.
+    # Host exposure remains loopback-only below; the dangerous flag makes this
+    # unauthenticated non-loopback exception deliberate and reviewable.
+    command:
+      [
+        "serve",
+        "--listen",
+        "tcp://0.0.0.0:17878",
+        "--dangerously-allow-non-loopback-tcp",
+      ]
+    ports:
+      - "127.0.0.1:${MEMOREE_PORT:-17878}:17878"
+    volumes:
+      - memoree-data:/data
+    healthcheck:
+      test: ["CMD", "memoree", "--endpoint", "tcp://127.0.0.1:17878", "--no-autostart", "doctor"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    init: true
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+
+volumes:
+  memoree-data:

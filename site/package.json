@@ -1,0 +1,25 @@
+{
+  "name": "@memoree/site",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.15.1",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "check": "astro check",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "3.7.3",
+    "@astrojs/starlight": "0.41.3",
+    "@fontsource-variable/instrument-sans": "5.2.8",
+    "@fontsource/jetbrains-mono": "5.2.8",
+    "astro": "7.1.1",
+    "sharp": "0.34.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.9",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,5214 @@
+{
+  "operation_inputs": {
+    "artifact.forget": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "reason"
+      ],
+      "title": "ArtifactForgetInput",
+      "type": "object"
+    },
+    "artifact.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "include_content": {
+          "default": true,
+          "type": "boolean"
+        },
+        "revision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "title": "ArtifactGetInput",
+      "type": "object"
+    },
+    "artifact.history": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "before_revision_number": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "title": "ArtifactHistoryInput",
+      "type": "object"
+    },
+    "artifact.put": {
+      "$defs": {
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/ArtifactContent"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "default": "text/plain; charset=utf-8",
+          "type": "string"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "content"
+      ],
+      "title": "ArtifactPutInput",
+      "type": "object"
+    },
+    "artifact.revise": {
+      "$defs": {
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ArtifactContent"
+        },
+        "if_revision": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id",
+        "if_revision",
+        "content"
+      ],
+      "title": "ArtifactReviseInput",
+      "type": "object"
+    },
+    "backup.create": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "destination": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination"
+      ],
+      "title": "BackupCreateInput",
+      "type": "object"
+    },
+    "capabilities": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyInput",
+      "type": "object"
+    },
+    "claim.assert": {
+      "$defs": {
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "statement": {
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_type",
+        "statement"
+      ],
+      "title": "ClaimAssertInput",
+      "type": "object"
+    },
+    "claim.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "type": "string"
+        },
+        "revision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_id"
+      ],
+      "title": "ClaimGetInput",
+      "type": "object"
+    },
+    "claim.history": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_revision_number": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "claim_id"
+      ],
+      "title": "ClaimHistoryInput",
+      "type": "object"
+    },
+    "claim.retract": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "reason"
+      ],
+      "title": "ClaimRetractInput",
+      "type": "object"
+    },
+    "claim.revise": {
+      "$defs": {
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "if_revision": {
+          "type": "string"
+        },
+        "statement": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "if_revision",
+        "statement"
+      ],
+      "title": "ClaimReviseInput",
+      "type": "object"
+    },
+    "conflict.list": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_case_sequence": {
+          "description": "Exclusive cursor over the durable conflict-case creation order.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "include_stale": {
+          "default": false,
+          "description": "Include cases made stale by a claim revision. Resolved cases are\nterminal audit history and are not actionable list results.",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "ConflictListInput",
+      "type": "object"
+    },
+    "context.build": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyBiasInput": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "include_historical": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 10,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 16384,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recency": {
+          "$ref": "#/$defs/RecencyBiasInput",
+          "default": {
+            "enabled": true
+          },
+          "description": "Apply the bounded, deterministic recency policy after lexical top-K\nmembership has been selected. The default keeps recency enabled while\npreserving ambient scope and every lexical candidate."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "ContextBuildInput",
+      "type": "object"
+    },
+    "context.resolve": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyInput",
+      "type": "object"
+    },
+    "doctor": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyInput",
+      "type": "object"
+    },
+    "instructions": {
+      "$defs": {
+        "InstructionsFormat": {
+          "enum": [
+            "markdown",
+            "json",
+            "agents-md",
+            "claude-md"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/InstructionsFormat",
+          "default": "markdown"
+        }
+      },
+      "title": "InstructionsInput",
+      "type": "object"
+    },
+    "memory.recall": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyBiasInput": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "max_artifact_refs": {
+          "default": 3,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_claims": {
+          "default": 5,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_excerpt_bytes": {
+          "default": 320,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recency": {
+          "$ref": "#/$defs/RecencyBiasInput",
+          "default": {
+            "enabled": true
+          }
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "RecallInput",
+      "type": "object"
+    },
+    "relation.list": {
+      "$defs": {
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RelationDirection": {
+          "enum": [
+            "incoming",
+            "outgoing",
+            "both"
+          ],
+          "type": "string"
+        },
+        "RelationType": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "contradicts",
+            "supersedes",
+            "references",
+            "duplicates"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "direction": {
+          "$ref": "#/$defs/RelationDirection",
+          "default": "both"
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_type": {
+          "$ref": "#/$defs/EntityType"
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "entity_type",
+        "entity_id"
+      ],
+      "title": "RelationListInput",
+      "type": "object"
+    },
+    "relation.put": {
+      "$defs": {
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        },
+        "RelationType": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "contradicts",
+            "supersedes",
+            "references",
+            "duplicates"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "relation": {
+          "$ref": "#/$defs/RelationType"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/EntityType"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "target_type": {
+          "$ref": "#/$defs/EntityType"
+        }
+      },
+      "required": [
+        "source_type",
+        "source_id",
+        "relation",
+        "target_type",
+        "target_id"
+      ],
+      "title": "RelationPutInput",
+      "type": "object"
+    },
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyInput",
+      "type": "object"
+    },
+    "search": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyBiasInput": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "include_historical": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 10,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recency": {
+          "$ref": "#/$defs/RecencyBiasInput",
+          "default": {
+            "enabled": true
+          },
+          "description": "Apply the bounded, deterministic recency policy after lexical top-K\nmembership has been selected. The default keeps recency enabled while\npreserving ambient scope and every lexical candidate."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "SearchInput",
+      "type": "object"
+    },
+    "verify": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyInput",
+      "type": "object"
+    }
+  },
+  "protocol_version": 1,
+  "request": {
+    "$defs": {
+      "AmbientContext": {
+        "additionalProperties": false,
+        "properties": {
+          "component": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pins": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "project_id"
+        ],
+        "type": "object"
+      },
+      "ContextSource": {
+        "enum": [
+          "explicit",
+          "session",
+          "marker",
+          "personal",
+          "none"
+        ],
+        "type": "string"
+      },
+      "Operation": {
+        "enum": [
+          "context.resolve",
+          "capabilities",
+          "instructions",
+          "schema",
+          "artifact.put",
+          "artifact.get",
+          "artifact.revise",
+          "artifact.history",
+          "artifact.forget",
+          "claim.assert",
+          "claim.get",
+          "claim.history",
+          "claim.revise",
+          "claim.retract",
+          "relation.put",
+          "relation.list",
+          "conflict.list",
+          "search",
+          "memory.recall",
+          "context.build",
+          "doctor",
+          "verify",
+          "backup.create"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AmbientContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "context_source": {
+        "$ref": "#/$defs/ContextSource",
+        "default": "none"
+      },
+      "idempotency_key": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "input": {
+        "default": null
+      },
+      "op": {
+        "$ref": "#/$defs/Operation"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "v": {
+        "default": 1,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "request_id",
+      "op"
+    ],
+    "title": "Request",
+    "type": "object"
+  },
+  "response": {
+    "$defs": {
+      "ContextSource": {
+        "enum": [
+          "explicit",
+          "session",
+          "marker",
+          "personal",
+          "none"
+        ],
+        "type": "string"
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "$ref": "#/$defs/ErrorCode"
+          },
+          "details": {
+            "default": null
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "ErrorCode": {
+        "enum": [
+          "NO_AMBIENT_CONTEXT",
+          "INVALID_REQUEST",
+          "NOT_FOUND",
+          "REVISION_CONFLICT",
+          "IDEMPOTENCY_CONFLICT",
+          "INDEX_NOT_READY",
+          "SCOPE_VIOLATION",
+          "CONFIG_ERROR",
+          "CONTENT_TOO_LARGE",
+          "INTEGRITY_ERROR",
+          "UNSUPPORTED_VERSION",
+          "TRANSPORT_ERROR",
+          "REASONER_ERROR",
+          "INTERNAL_ERROR"
+        ],
+        "type": "string"
+      },
+      "Horizon": {
+        "enum": [
+          "ambient",
+          "workspace",
+          "personal"
+        ],
+        "type": "string"
+      },
+      "ResolvedContext": {
+        "properties": {
+          "broadened": {
+            "type": "boolean"
+          },
+          "component": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "horizon": {
+            "$ref": "#/$defs/Horizon"
+          },
+          "pins": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "resolved_from": {
+            "$ref": "#/$defs/ContextSource"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "project_id",
+          "resolved_from",
+          "horizon",
+          "broadened"
+        ],
+        "type": "object"
+      },
+      "Warning": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "commit_seq": {
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ResolvedContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "error": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ErrorBody"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "ok": {
+        "type": "boolean"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "result": true,
+      "v": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "warnings": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/Warning"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "v",
+      "request_id",
+      "ok"
+    ],
+    "title": "Response",
+    "type": "object"
+  },
+  "result_types": {
+    "artifact.forget": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "blob_hash": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "forgotten_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id",
+        "revision_number",
+        "kind",
+        "title",
+        "media_type",
+        "blob_hash",
+        "size_bytes",
+        "status",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "artifact.get": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "blob_hash": {
+          "type": "string"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "forgotten_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id",
+        "revision_number",
+        "kind",
+        "title",
+        "media_type",
+        "blob_hash",
+        "size_bytes",
+        "status",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq"
+      ],
+      "title": "ArtifactRecord",
+      "type": "object"
+    },
+    "artifact.history": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ArtifactRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifact_id": {
+              "type": "string"
+            },
+            "blob_hash": {
+              "type": "string"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactContent"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "forgotten_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "revision_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "revision_created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_number": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "size_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "revision_number",
+            "kind",
+            "title",
+            "media_type",
+            "blob_hash",
+            "size_bytes",
+            "status",
+            "context",
+            "created_at",
+            "revision_created_at",
+            "revision_commit_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "next_before_revision_number": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revisions": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRecord"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revisions",
+        "truncated"
+      ],
+      "title": "ArtifactHistoryPage",
+      "type": "object"
+    },
+    "artifact.put": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "blob_hash": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "forgotten_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id",
+        "revision_number",
+        "kind",
+        "title",
+        "media_type",
+        "blob_hash",
+        "size_bytes",
+        "status",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "artifact.revise": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "blob_hash": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "forgotten_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id",
+        "revision_number",
+        "kind",
+        "title",
+        "media_type",
+        "blob_hash",
+        "size_bytes",
+        "status",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "backup.create": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "blobs": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "copied_external_blobs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "database": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination",
+        "database",
+        "blobs",
+        "commit_seq",
+        "copied_external_blobs",
+        "created_at"
+      ],
+      "title": "BackupReport",
+      "type": "object"
+    },
+    "capabilities": {
+      "$defs": {
+        "Operation": {
+          "enum": [
+            "context.resolve",
+            "capabilities",
+            "instructions",
+            "schema",
+            "artifact.put",
+            "artifact.get",
+            "artifact.revise",
+            "artifact.history",
+            "artifact.forget",
+            "claim.assert",
+            "claim.get",
+            "claim.history",
+            "claim.revise",
+            "claim.retract",
+            "relation.put",
+            "relation.list",
+            "conflict.list",
+            "search",
+            "memory.recall",
+            "context.build",
+            "doctor",
+            "verify",
+            "backup.create"
+          ],
+          "type": "string"
+        },
+        "OperationCapability": {
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "mutating": {
+              "type": "boolean"
+            },
+            "needs_context": {
+              "type": "boolean"
+            },
+            "operation": {
+              "$ref": "#/$defs/Operation"
+            },
+            "requires_idempotency_key": {
+              "type": "boolean"
+            },
+            "side_effecting": {
+              "type": "boolean"
+            },
+            "supports_explicit_horizon": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "operation",
+            "available",
+            "mutating",
+            "side_effecting",
+            "needs_context",
+            "requires_idempotency_key",
+            "supports_explicit_horizon"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Machine-readable declaration of the v1 protocol contract.\n\nThis reports implemented v1 storage modes only. Planned backends do not\nappear here, so callers can use it for feature negotiation.",
+      "properties": {
+        "ambient_context_sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "authoritative_store": {
+          "type": "string"
+        },
+        "authorization": {
+          "type": "boolean"
+        },
+        "blob_store": {
+          "type": "string"
+        },
+        "broader_horizons_require_reason": {
+          "type": "boolean"
+        },
+        "default_horizon": {
+          "type": "string"
+        },
+        "guarantees": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "instruction_set_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_personal_mode": {
+          "type": "boolean"
+        },
+        "max_artifact_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_claim_statement_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_concurrent_connections": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_conflict_list_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_encoded_content_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_evidence_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_frame_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_history_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_metadata_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_query_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recall_artifact_refs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recall_claims": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recall_evidence_excerpts_per_claim": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recall_excerpt_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_relation_list_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_search_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_title_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/OperationCapability"
+          },
+          "type": "array"
+        },
+        "product": {
+          "type": "string"
+        },
+        "prompt_injection_signals": {
+          "type": "boolean"
+        },
+        "protocol_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retrieval": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supported_horizons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "product",
+        "protocol_version",
+        "instruction_set_version",
+        "local_personal_mode",
+        "authorization",
+        "default_horizon",
+        "supported_horizons",
+        "ambient_context_sources",
+        "broader_horizons_require_reason",
+        "prompt_injection_signals",
+        "max_frame_bytes",
+        "max_concurrent_connections",
+        "max_artifact_bytes",
+        "max_encoded_content_bytes",
+        "max_query_bytes",
+        "max_title_bytes",
+        "max_claim_statement_bytes",
+        "max_metadata_bytes",
+        "max_evidence_items",
+        "max_search_items",
+        "max_recall_claims",
+        "max_recall_artifact_refs",
+        "max_recall_excerpt_bytes",
+        "max_recall_evidence_excerpts_per_claim",
+        "max_history_items",
+        "max_relation_list_items",
+        "max_conflict_list_items",
+        "authoritative_store",
+        "blob_store",
+        "retrieval",
+        "guarantees",
+        "operations"
+      ],
+      "title": "CapabilitiesDocument",
+      "type": "object"
+    },
+    "claim.assert": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "retraction_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "statement": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ClaimStatus"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_id",
+        "revision_id",
+        "revision_number",
+        "claim_type",
+        "status",
+        "statement",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "claim.get": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "retraction_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "statement": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ClaimStatus"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_id",
+        "revision_id",
+        "revision_number",
+        "claim_type",
+        "status",
+        "statement",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq"
+      ],
+      "title": "ClaimRecord",
+      "type": "object"
+    },
+    "claim.history": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "$ref": "#/$defs/ClaimType"
+            },
+            "confidence": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "evidence": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/EvidenceLocator"
+              },
+              "type": "array"
+            },
+            "retraction_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "revision_created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_number": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "statement": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/ClaimStatus"
+            },
+            "valid_from": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "valid_until": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "claim_id",
+            "revision_id",
+            "revision_number",
+            "claim_type",
+            "status",
+            "statement",
+            "context",
+            "created_at",
+            "revision_created_at",
+            "revision_commit_seq"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "next_before_revision_number": {
+          "description": "Exclusive cursor for the next older page. Present only when truncated.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revisions": {
+          "description": "Immutable claim revisions in newest-first order. Revision fields such as\nstatement, evidence, actor, and `revision_commit_seq` are historical;\nlifecycle fields such as status and retraction reason describe the\nlogical claim's current state on every item.",
+          "items": {
+            "$ref": "#/$defs/ClaimRecord"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "True when older revisions exist beyond this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revisions",
+        "truncated"
+      ],
+      "title": "ClaimHistoryPage",
+      "type": "object"
+    },
+    "claim.retract": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "retraction_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "statement": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ClaimStatus"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_id",
+        "revision_id",
+        "revision_number",
+        "claim_type",
+        "status",
+        "statement",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "claim.revise": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "confidence": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceLocator"
+          },
+          "type": "array"
+        },
+        "retraction_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision_created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "revision_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "statement": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ClaimStatus"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "claim_id",
+        "revision_id",
+        "revision_number",
+        "claim_type",
+        "status",
+        "statement",
+        "context",
+        "created_at",
+        "revision_created_at",
+        "revision_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "conflict.list": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ClaimRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "$ref": "#/$defs/ClaimType"
+            },
+            "confidence": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "evidence": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/EvidenceLocator"
+              },
+              "type": "array"
+            },
+            "retraction_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "revision_created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_number": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "statement": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/ClaimStatus"
+            },
+            "valid_from": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "valid_until": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "claim_id",
+            "revision_id",
+            "revision_number",
+            "claim_type",
+            "status",
+            "statement",
+            "context",
+            "created_at",
+            "revision_created_at",
+            "revision_commit_seq"
+          ],
+          "type": "object"
+        },
+        "ClaimStatus": {
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "conflicted"
+          ],
+          "type": "string"
+        },
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "ConflictClaimSnapshot": {
+          "properties": {
+            "claim_id": {
+              "type": "string"
+            },
+            "current": {
+              "$ref": "#/$defs/ClaimRecord",
+              "description": "The claim's current revision and lifecycle presentation."
+            },
+            "frozen": {
+              "$ref": "#/$defs/ClaimRecord",
+              "description": "The immutable revision that participated in the contradiction."
+            },
+            "frozen_is_current": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "claim_id",
+            "frozen",
+            "current",
+            "frozen_is_current"
+          ],
+          "type": "object"
+        },
+        "ConflictListItem": {
+          "properties": {
+            "case_id": {
+              "type": "string"
+            },
+            "case_sequence": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "opened_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "opened_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "relation_id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/ConflictClaimSnapshot"
+            },
+            "state": {
+              "$ref": "#/$defs/ConflictState"
+            },
+            "state_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/ConflictClaimSnapshot"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "case_id",
+            "relation_id",
+            "state",
+            "source",
+            "target",
+            "context",
+            "opened_at",
+            "updated_at",
+            "opened_commit_seq",
+            "case_sequence"
+          ],
+          "type": "object"
+        },
+        "ConflictState": {
+          "enum": [
+            "open",
+            "stale",
+            "resolved"
+          ],
+          "type": "string"
+        },
+        "EvidenceLocator": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id"
+          ],
+          "type": "object"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broaden_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/ConflictListItem"
+          },
+          "type": "array"
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon"
+        },
+        "include_stale": {
+          "type": "boolean"
+        },
+        "next_before_case_sequence": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "horizon",
+        "include_stale",
+        "conflicts",
+        "truncated"
+      ],
+      "title": "ConflictListResult",
+      "type": "object"
+    },
+    "context.build": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "BundleManifestItem": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "entity_id": {
+              "type": "string"
+            },
+            "entity_type": {
+              "$ref": "#/$defs/EntityType"
+            },
+            "excerpt_available": {
+              "type": "boolean"
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "included_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "risk_signals": {
+              "default": [],
+              "description": "Deterministic heuristic signals found in the retrieved text. Absence of\nsignals never changes the content's untrusted status.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_excerpt_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "citation",
+            "entity_type",
+            "entity_id",
+            "revision_id",
+            "status",
+            "context",
+            "source_excerpt_bytes",
+            "included_bytes",
+            "excerpt_available",
+            "excerpt_truncated",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "ConflictSummary": {
+          "properties": {
+            "left_id": {
+              "type": "string"
+            },
+            "relation_id": {
+              "type": "string"
+            },
+            "right_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "left_id",
+            "right_id",
+            "relation_id"
+          ],
+          "type": "object"
+        },
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broaden_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/ConflictSummary"
+          },
+          "type": "array"
+        },
+        "content_is_untrusted": {
+          "type": "boolean"
+        },
+        "manifest": {
+          "items": {
+            "$ref": "#/$defs/BundleManifestItem"
+          },
+          "type": "array"
+        },
+        "max_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        },
+        "refine_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rendered_markdown": {
+          "type": "string"
+        },
+        "retrieval_truncated": {
+          "description": "Search had more matches than its retrieval limit. This is independent\nfrom `omitted_count`, which only reports byte-budget omissions.",
+          "type": "boolean"
+        },
+        "used_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "content_is_untrusted",
+        "query",
+        "max_bytes",
+        "used_bytes",
+        "rendered_markdown",
+        "manifest",
+        "retrieval_truncated",
+        "omitted_count",
+        "conflicts"
+      ],
+      "title": "ContextBundle",
+      "type": "object"
+    },
+    "context.resolve": {
+      "$defs": {
+        "ContextSource": {
+          "enum": [
+            "explicit",
+            "session",
+            "marker",
+            "personal",
+            "none"
+          ],
+          "type": "string"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "ResolvedContext": {
+          "properties": {
+            "broadened": {
+              "type": "boolean"
+            },
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "horizon": {
+              "$ref": "#/$defs/Horizon"
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "resolved_from": {
+              "$ref": "#/$defs/ContextSource"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id",
+            "resolved_from",
+            "horizon",
+            "broadened"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "resolved"
+      ],
+      "title": "ContextResolveResult",
+      "type": "object"
+    },
+    "doctor": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authoritative_store": {
+          "type": "string"
+        },
+        "daemon_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "retrieval_mode": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "running",
+        "daemon_pid",
+        "authoritative_store",
+        "retrieval_mode",
+        "last_commit_seq"
+      ],
+      "title": "DoctorResult",
+      "type": "object"
+    },
+    "instructions": {
+      "$defs": {
+        "ConceptInstruction": {
+          "properties": {
+            "meaning": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "meaning"
+          ],
+          "type": "object"
+        },
+        "InstructionDocument": {
+          "description": "Structured form of the normative model instructions.",
+          "properties": {
+            "concepts": {
+              "items": {
+                "$ref": "#/$defs/ConceptInstruction"
+              },
+              "type": "array"
+            },
+            "instruction_set_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "invocation": {
+              "$ref": "#/$defs/InvocationInstructions"
+            },
+            "product": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "rules": {
+              "items": {
+                "$ref": "#/$defs/InstructionRule"
+              },
+              "type": "array"
+            },
+            "workflow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "product",
+            "instruction_set_version",
+            "protocol_version",
+            "purpose",
+            "invocation",
+            "workflow",
+            "rules",
+            "concepts"
+          ],
+          "type": "object"
+        },
+        "InstructionRule": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/$defs/RuleLevel"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "level",
+            "text"
+          ],
+          "type": "object"
+        },
+        "InvocationInstructions": {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "diagnostics_stream": {
+              "type": "string"
+            },
+            "request_stream": {
+              "type": "string"
+            },
+            "response_stream": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "request_stream",
+            "response_stream",
+            "diagnostics_stream"
+          ],
+          "type": "object"
+        },
+        "RuleLevel": {
+          "enum": [
+            "must",
+            "should"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Exact result shape of the `instructions` operation. The tagged variants\nlet JSON Schema distinguish rendered text from the structured document.",
+      "oneOf": [
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "format": {
+              "const": "markdown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/InstructionDocument"
+            },
+            "format": {
+              "const": "json",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "format": {
+              "const": "agents-md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "format": {
+              "const": "claude-md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "content"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "InstructionsResult"
+    },
+    "memory.recall": {
+      "$defs": {
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "ConflictSummary": {
+          "properties": {
+            "left_id": {
+              "type": "string"
+            },
+            "relation_id": {
+              "type": "string"
+            },
+            "right_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "left_id",
+            "right_id",
+            "relation_id"
+          ],
+          "type": "object"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecallArtifactReference": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "excerpt": {
+              "type": "string"
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "matched_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "risk_signals": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "score": {
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "citation",
+            "title",
+            "status",
+            "excerpt",
+            "excerpt_truncated",
+            "score",
+            "matched_by"
+          ],
+          "type": "object"
+        },
+        "RecallClaim": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "$ref": "#/$defs/ClaimType"
+            },
+            "conflict_relation_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "evidence": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RecallEvidenceReference"
+              },
+              "type": "array"
+            },
+            "matched_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "score": {
+              "format": "double",
+              "type": "number"
+            },
+            "statement": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/RecallClaimStatus"
+            }
+          },
+          "required": [
+            "claim_id",
+            "revision_id",
+            "claim_type",
+            "status",
+            "statement",
+            "citation",
+            "score",
+            "matched_by"
+          ],
+          "type": "object"
+        },
+        "RecallClaimStatus": {
+          "enum": [
+            "current",
+            "disputed"
+          ],
+          "type": "string"
+        },
+        "RecallEvidenceReference": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "citation",
+            "title",
+            "media_type",
+            "excerpt_truncated"
+          ],
+          "type": "object"
+        },
+        "RecallPresence": {
+          "enum": [
+            "claims",
+            "artifacts_only",
+            "none"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/RecallArtifactReference"
+          },
+          "type": "array"
+        },
+        "artifact_refs_refine_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_refs_truncated": {
+          "type": "boolean"
+        },
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/RecallClaim"
+          },
+          "type": "array"
+        },
+        "claims_refine_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claims_truncated": {
+          "type": "boolean"
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/ConflictSummary"
+          },
+          "type": "array"
+        },
+        "content_is_untrusted": {
+          "type": "boolean"
+        },
+        "presence": {
+          "$ref": "#/$defs/RecallPresence"
+        },
+        "query": {
+          "type": "string"
+        },
+        "searched_horizons": {
+          "items": {
+            "$ref": "#/$defs/Horizon"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "content_is_untrusted",
+        "query",
+        "searched_horizons",
+        "presence",
+        "claims",
+        "conflicts",
+        "artifact_refs",
+        "claims_truncated",
+        "artifact_refs_truncated"
+      ],
+      "title": "RecallResult",
+      "type": "object"
+    },
+    "relation.list": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RelationDirection": {
+          "enum": [
+            "incoming",
+            "outgoing",
+            "both"
+          ],
+          "type": "string"
+        },
+        "RelationListItem": {
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "relation": {
+              "$ref": "#/$defs/RelationType"
+            },
+            "relation_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "relation_id": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "source_type": {
+              "$ref": "#/$defs/EntityType"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "target_type": {
+              "$ref": "#/$defs/EntityType"
+            }
+          },
+          "required": [
+            "relation_id",
+            "source_type",
+            "source_id",
+            "relation",
+            "target_type",
+            "target_id",
+            "context",
+            "created_at",
+            "relation_commit_seq"
+          ],
+          "type": "object"
+        },
+        "RelationType": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "contradicts",
+            "supersedes",
+            "references",
+            "duplicates"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broaden_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "direction": {
+          "$ref": "#/$defs/RelationDirection"
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_type": {
+          "$ref": "#/$defs/EntityType"
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon"
+        },
+        "next_before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "relation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/RelationListItem"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entity_type",
+        "entity_id",
+        "direction",
+        "horizon",
+        "relations",
+        "truncated"
+      ],
+      "title": "RelationListResult",
+      "type": "object"
+    },
+    "relation.put": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        },
+        "RelationType": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "contradicts",
+            "supersedes",
+            "references",
+            "duplicates"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "relation": {
+          "$ref": "#/$defs/RelationType"
+        },
+        "relation_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "relation_id": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/EntityType"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "target_type": {
+          "$ref": "#/$defs/EntityType"
+        }
+      },
+      "required": [
+        "relation_id",
+        "source_type",
+        "source_id",
+        "relation",
+        "target_type",
+        "target_id",
+        "context",
+        "created_at",
+        "relation_commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON Schema bundle for the common envelopes and every typed v1 operation\ninput. Each entry is an independent JSON Schema 2020-12 root schema.",
+      "properties": {
+        "operation_inputs": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "protocol_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request": true,
+        "response": true,
+        "result_types": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "schema_bundle_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "supporting_types": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_bundle_version",
+        "protocol_version",
+        "request",
+        "response",
+        "operation_inputs",
+        "result_types",
+        "supporting_types"
+      ],
+      "title": "ProtocolSchemaBundle",
+      "type": "object"
+    },
+    "search": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "EntityType": {
+          "enum": [
+            "artifact",
+            "claim"
+          ],
+          "type": "string"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyDecayClass": {
+          "enum": [
+            "ephemeral",
+            "observation",
+            "general",
+            "preference",
+            "procedure",
+            "decision",
+            "constraint"
+          ],
+          "type": "string"
+        },
+        "RecencyTimestampBasis": {
+          "enum": [
+            "revision_created_at",
+            "valid_from"
+          ],
+          "type": "string"
+        },
+        "SearchHit": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "entity_id": {
+              "type": "string"
+            },
+            "entity_type": {
+              "$ref": "#/$defs/EntityType"
+            },
+            "excerpt": {
+              "type": "string"
+            },
+            "matched_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "ranking": {
+              "$ref": "#/$defs/SearchRanking"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "score": {
+              "description": "Final ranking score after the bounded recency policy. See `ranking` for\nthe original lexical score and every applied component.",
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity_type",
+            "entity_id",
+            "revision_id",
+            "status",
+            "title",
+            "excerpt",
+            "citation",
+            "context",
+            "score",
+            "ranking",
+            "matched_by"
+          ],
+          "type": "object"
+        },
+        "SearchRanking": {
+          "properties": {
+            "decay_class": {
+              "$ref": "#/$defs/RecencyDecayClass"
+            },
+            "effective_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "effective_at_basis": {
+              "$ref": "#/$defs/RecencyTimestampBasis"
+            },
+            "evaluated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "final_position": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "lexical_position": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "lexical_score": {
+              "format": "double",
+              "type": "number"
+            },
+            "max_promotion": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "recency_bonus": {
+              "format": "double",
+              "type": "number"
+            },
+            "recency_eligible": {
+              "type": "boolean"
+            },
+            "recency_enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "policy_version",
+            "recency_enabled",
+            "recency_eligible",
+            "lexical_score",
+            "recency_bonus",
+            "lexical_position",
+            "final_position",
+            "max_promotion",
+            "effective_at",
+            "effective_at_basis",
+            "evaluated_at",
+            "decay_class"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broaden_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hits": {
+          "items": {
+            "$ref": "#/$defs/SearchHit"
+          },
+          "type": "array"
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon"
+        },
+        "query": {
+          "type": "string"
+        },
+        "refine_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retrieval_mode": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "query",
+        "horizon",
+        "retrieval_mode",
+        "hits",
+        "truncated"
+      ],
+      "title": "SearchResult",
+      "type": "object"
+    },
+    "verify": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "checked_artifact_revisions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "checked_claim_revisions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "checked_external_blobs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "last_commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ok",
+        "schema_version",
+        "last_commit_seq",
+        "checked_artifact_revisions",
+        "checked_claim_revisions",
+        "checked_external_blobs",
+        "issues",
+        "warnings"
+      ],
+      "title": "VerifyReport",
+      "type": "object"
+    }
+  },
+  "schema_bundle_version": 1,
+  "supporting_types": {
+    "evidence_locator": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "end_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "start_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id"
+      ],
+      "title": "EvidenceLocator",
+      "type": "object"
+    }
+  }
+}

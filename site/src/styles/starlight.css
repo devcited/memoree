@@ -1,0 +1,91 @@
+@import '@fontsource-variable/instrument-sans';
+@import '@fontsource/jetbrains-mono/400.css';
+
+:root {
+  --sl-font: 'Instrument Sans Variable', system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sl-color-accent-low: #303b16;
+  --sl-color-accent: #d8ff6a;
+  --sl-color-accent-high: #f0ffc8;
+  --sl-color-white: #f1eee4;
+  --sl-color-gray-1: #ddded5;
+  --sl-color-gray-2: #b7b9af;
+  --sl-color-gray-3: #85887e;
+  --sl-color-gray-4: #55594e;
+  --sl-color-gray-5: #34372f;
+  --sl-color-gray-6: #20231d;
+  --sl-color-black: #11130f;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e5f7ae;
+  --sl-color-accent: #3f5b00;
+  --sl-color-accent-high: #1b2900;
+  --sl-color-white: #11130f;
+  --sl-color-gray-1: #282b25;
+  --sl-color-gray-2: #464a41;
+  --sl-color-gray-3: #666a61;
+  --sl-color-gray-4: #9b9e95;
+  --sl-color-gray-5: #d6d4cb;
+  --sl-color-gray-6: #e8e5dc;
+  --sl-color-gray-7: #f1eee4;
+  --sl-color-black: #faf8f2;
+}
+
+header.header { border-bottom-color: var(--sl-color-gray-5); }
+.site-title { font-family: var(--sl-font-mono); letter-spacing: -.05em; }
+.sl-markdown-content h1, .sl-markdown-content h2, .sl-markdown-content h3 { letter-spacing: -.035em; }
+.sl-markdown-content code { border-radius: 0; }
+.sl-markdown-content a { text-underline-offset: 3px; }
+
+.sl-markdown-content .memoree-doc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  background: var(--sl-color-gray-5);
+}
+
+.sl-markdown-content .memoree-doc-card {
+  display: grid;
+  gap: .8rem;
+  min-height: 12rem;
+  padding: 1.25rem;
+  color: var(--sl-color-white);
+  text-decoration: none;
+  background: var(--sl-color-black);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.sl-markdown-content .memoree-doc-card:hover {
+  color: var(--sl-color-black);
+  background: var(--sl-color-accent);
+}
+
+.sl-markdown-content .memoree-doc-card span {
+  color: var(--sl-color-gray-3);
+  font: 400 .68rem/1.4 var(--sl-font-mono);
+  letter-spacing: .08em;
+}
+
+.sl-markdown-content .memoree-doc-card:hover span { color: currentColor; }
+
+.sl-markdown-content .memoree-doc-card strong {
+  max-width: 19ch;
+  font-size: 1.15rem;
+  line-height: 1.1;
+  letter-spacing: -.025em;
+}
+
+.sl-markdown-content .memoree-doc-card p {
+  margin-top: auto;
+  color: var(--sl-color-gray-2);
+  font-size: .88rem;
+  line-height: 1.45;
+}
+
+.sl-markdown-content .memoree-doc-card:hover p { color: currentColor; }
+
+@media (max-width: 36rem) {
+  .sl-markdown-content .memoree-doc-grid { grid-template-columns: 1fr; }
+}

@@ -1,0 +1,20 @@
+title = "Memoree secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known fake AWS key used to test checkpoint secret detection"
+targetRules = ["aws-access-token"]
+condition = "AND"
+regexTarget = "match"
+regexes = ['''AKIAABCDEFGHIJKLMNOP''']
+paths = ['''^src/checkpoint\.rs$''']
+
+[[allowlists]]
+description = "Private-key delimiter literals used by checkpoint secret detection"
+targetRules = ["private-key"]
+condition = "AND"
+regexTarget = "line"
+regexes = ['''lower\.contains\("-----begin.*private key-----"\)''']
+paths = ['''^src/checkpoint\.rs$''']

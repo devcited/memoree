@@ -1,0 +1,66 @@
+[package]
+name = "memoree"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Local, artifact-first memory for machine agents"
+license-file = "LICENSE"
+readme = "README.md"
+homepage = "https://memoree.dev"
+documentation = "https://memoree.dev"
+repository = "https://github.com/devcited/memoree"
+publish = false
+keywords = ["agents", "memory", "cli", "local-first"]
+categories = ["command-line-utilities", "database"]
+default-run = "memoree"
+exclude = [
+    ".github/",
+    ".memoree.toml",
+    "docker-compose.yml",
+    "Dockerfile",
+    "docs/",
+    "eval/",
+    "scripts/",
+    "site/",
+]
+
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "memoree"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+blake3 = "1.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+directories = "6.0"
+fs2 = "0.4"
+libc = "0.2"
+mime_guess = "2.0"
+parking_lot = "0.12"
+rusqlite = { version = "0.39.0", features = ["backup", "bundled", "chrono"] }
+schemars = { version = "1.2.1", features = ["chrono04"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.20"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ulid = { version = "2.0.1", features = ["serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -1,0 +1,63 @@
+---
+import '@fontsource-variable/instrument-sans';
+import '@fontsource/jetbrains-mono/400.css';
+import '../styles/site.css';
+
+interface Props {
+  title: string;
+  description: string;
+  canonical?: string;
+}
+
+const { title, description, canonical = Astro.url.pathname } = Astro.props;
+const canonicalUrl = new URL(canonical, Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#11130f" />
+    <link rel="canonical" href={canonicalUrl} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Memoree" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={new URL('/og.svg', Astro.site)} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Memoree home">
+        <img src="/favicon.svg" alt="" width="34" height="34" />
+        <span>memoree</span>
+      </a>
+      <nav aria-label="Primary">
+        <a href="/docs/">Docs</a>
+        <a href="/install/">Install</a>
+        <a href="/releases/">Releases</a>
+        <a href="https://github.com/devcited/memoree">GitHub</a>
+      </nav>
+    </header>
+    <main id="content"><slot /></main>
+    <footer class="site-footer">
+      <div>
+        <a class="brand footer-brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28" /><span>memoree</span></a>
+        <p>Local memory for agents that need to show their work.</p>
+      </div>
+      <nav aria-label="Footer">
+        <a href="/docs/">Documentation</a>
+        <a href="/privacy/">Privacy</a>
+        <a href="/security/">Security</a>
+        <a href="/license/">License</a>
+      </nav>
+    </footer>
+  </body>
+</html>

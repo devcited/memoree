@@ -1,0 +1,5 @@
+Contact: mailto:security@devcited.cc
+Preferred-Languages: en
+Canonical: https://memoree.dev/.well-known/security.txt
+Policy: https://github.com/devcited/memoree/security/policy
+Expires: 2027-07-18T00:00:00Z

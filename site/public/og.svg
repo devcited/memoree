@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#11130f"/>
+  <path d="M0 555h1200v75H0z" fill="#d8ff6a"/>
+  <path d="M82 76h62v62H82z" fill="#d8ff6a"/>
+  <path d="M98 92h30v8h-22v8h18v8h-18v12h-8V92Z" fill="#11130f"/>
+  <text x="168" y="123" fill="#f1eee4" font-size="42" font-family="monospace" font-weight="700">memoree</text>
+  <text x="82" y="274" fill="#f1eee4" font-size="70" font-family="sans-serif" font-weight="650">Memory for agents</text>
+  <text x="82" y="357" fill="#d8ff6a" font-size="70" font-family="sans-serif" font-weight="650">that can show its work.</text>
+  <text x="82" y="450" fill="#969990" font-size="25" font-family="monospace">LOCAL  /  CITED  /  AGENT-NATIVE</text>
+  <text x="82" y="603" fill="#11130f" font-size="23" font-family="monospace" font-weight="700">MEMOREE.DEV</text>
+</svg>
