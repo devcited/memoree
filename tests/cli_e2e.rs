@@ -423,7 +423,7 @@ fn checkpoints_are_private_last_write_wins_and_absent_from_recall() {
 }
 
 #[test]
-fn failed_codex_login_path_never_writes_or_enables_api_key_fallback() {
+fn missing_compiler_logins_fail_loudly_without_writing_or_using_api_keys() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().join("client");
     let home = root.path().join("home");
@@ -454,19 +454,25 @@ fn failed_codex_login_path_never_writes_or_enables_api_key_fallback() {
         .output()
         .unwrap();
     let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(output.status.code(), Some(1), "{envelope}");
-    assert_eq!(envelope["error"]["code"], "REASONER_ERROR");
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "CONFIG_ERROR");
     assert!(
-        envelope["error"]["hint"]
+        envelope["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("explicit permission")
+            .contains("codex login")
     );
     assert!(
-        envelope["error"]["hint"]
+        envelope["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("--allow-api-key")
+            .contains("claude auth login")
+    );
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("memoree compiler configure")
     );
 
     let (status, stopped) = invoke_local(&cwd, &home, &["daemon", "status"]);

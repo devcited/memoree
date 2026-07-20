@@ -1,5 +1,5 @@
-//! Bounded Codex/Luna claim compilation for the human- and machine-friendly
-//! `memoree remember` command.
+//! Bounded Codex or Claude claim compilation for the human- and
+//! machine-friendly `memoree remember` command.
 //!
 //! This module is intentionally a caller-side adapter. The daemon remains a
 //! deterministic, credential-free authority. A model may propose typed claims
@@ -25,8 +25,9 @@ use crate::{
     protocol::{ClaimType, MAX_CLAIM_STATEMENT_BYTES},
 };
 
-pub const REMEMBER_MODEL: &str = "gpt-5.6-luna";
-pub const REMEMBER_SCHEMA_VERSION: u32 = 2;
+pub const CODEX_REMEMBER_MODEL: &str = "gpt-5.6-luna";
+pub const CLAUDE_REMEMBER_MODEL: &str = "sonnet";
+pub const REMEMBER_SCHEMA_VERSION: u32 = 3;
 pub const MAX_REMEMBER_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_REMEMBER_CLAIMS: usize = 12;
 pub const MAX_EVIDENCE_QUOTES_PER_CLAIM: usize = 4;
@@ -34,9 +35,10 @@ const MAX_COMPILER_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_COMPILER_DIAGNOSTIC_BYTES: usize = 256 * 1024;
 const MAX_EVIDENCE_QUOTE_BYTES: usize = 16 * 1024;
 const DEFAULT_COMPILER_TIMEOUT: Duration = Duration::from_secs(120);
-const CODEX_ENV_ALLOWLIST: [&str; 9] = [
+const COMPILER_ENV_ALLOWLIST: [&str; 10] = [
     "HOME",
     "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
     "PATH",
     "TMPDIR",
     "LANG",
@@ -84,8 +86,15 @@ pub struct ValidatedCompilation {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProviderCompilation {
+    pub compilation: ValidatedCompilation,
+    pub resolved_model_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CodexCompiler {
     binary: PathBuf,
+    model: String,
     timeout: Duration,
     allow_api_key: bool,
 }
@@ -94,6 +103,7 @@ impl Default for CodexCompiler {
     fn default() -> Self {
         Self {
             binary: PathBuf::from("codex"),
+            model: CODEX_REMEMBER_MODEL.to_owned(),
             timeout: DEFAULT_COMPILER_TIMEOUT,
             allow_api_key: false,
         }
@@ -101,10 +111,24 @@ impl Default for CodexCompiler {
 }
 
 impl CodexCompiler {
-    pub fn new(allow_api_key: bool) -> Self {
+    pub fn new(model: impl Into<String>, allow_api_key: bool) -> Self {
         Self {
+            model: model.into(),
             allow_api_key,
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_binary(
+        binary: impl Into<PathBuf>,
+        model: impl Into<String>,
+        allow_api_key: bool,
+    ) -> Self {
+        Self {
+            binary: binary.into(),
+            model: model.into(),
+            timeout: DEFAULT_COMPILER_TIMEOUT,
+            allow_api_key,
         }
     }
 
@@ -112,12 +136,13 @@ impl CodexCompiler {
     fn with_binary_and_timeout(binary: impl Into<PathBuf>, timeout: Duration) -> Self {
         Self {
             binary: binary.into(),
+            model: CODEX_REMEMBER_MODEL.to_owned(),
             timeout,
             allow_api_key: false,
         }
     }
 
-    pub async fn compile(&self, source: &str) -> Result<ValidatedCompilation> {
+    pub async fn compile(&self, source: &str) -> Result<ProviderCompilation> {
         validate_source(source)?;
         let temporary = tempfile::Builder::new()
             .prefix("memory-remember-")
@@ -141,6 +166,7 @@ impl CodexCompiler {
                 &schema_path,
                 &output_path,
                 temporary.path(),
+                &self.model,
             ))
             .env_clear()
             .envs(sanitized_environment(self.allow_api_key)?)
@@ -227,8 +253,197 @@ impl CodexCompiler {
                 false,
             )
         })?;
-        validate_compilation(source, proposal)
+        Ok(ProviderCompilation {
+            compilation: validate_compilation(source, proposal)?,
+            resolved_model_ids: vec![self.model.clone()],
+        })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeCompiler {
+    binary: PathBuf,
+    model: String,
+    timeout: Duration,
+}
+
+impl ClaudeCompiler {
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            binary: PathBuf::from("claude"),
+            model: model.into(),
+            timeout: DEFAULT_COMPILER_TIMEOUT,
+        }
+    }
+
+    pub(crate) fn with_binary(binary: impl Into<PathBuf>, model: impl Into<String>) -> Self {
+        Self {
+            binary: binary.into(),
+            model: model.into(),
+            timeout: DEFAULT_COMPILER_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_binary_and_timeout(
+        binary: impl Into<PathBuf>,
+        model: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            binary: binary.into(),
+            model: model.into(),
+            timeout,
+        }
+    }
+
+    pub async fn compile(&self, source: &str) -> Result<ProviderCompilation> {
+        validate_source(source)?;
+        let mut schema = serde_json::to_value(schema_for!(ClaimCompilation))?;
+        // Claude Code's bundled validator accepts the schema vocabulary but
+        // rejects the draft URI emitted by schemars as an unresolved ref.
+        if let Some(object) = schema.as_object_mut() {
+            object.remove("$schema");
+        }
+        let schema = serde_json::to_string(&schema)?;
+        let prompt = compiler_prompt(source)?;
+        let mut command = Command::new(&self.binary);
+        command
+            .args(claude_arguments(&schema, &self.model))
+            .env_clear()
+            .envs(sanitized_environment(false)?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = command.spawn().map_err(|error| {
+            reasoner(
+                format!(
+                    "could not start Claude CLI (`{}`): {error}",
+                    self.binary.display()
+                ),
+                true,
+            )
+        })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| reasoner("Claude CLI stdin was unavailable".to_owned(), true))?;
+        stdin.write_all(prompt.as_bytes()).await.map_err(|error| {
+            reasoner(
+                format!("could not send source to Claude CLI: {error}"),
+                true,
+            )
+        })?;
+        stdin.shutdown().await.map_err(|error| {
+            reasoner(format!("could not close Claude CLI stdin: {error}"), true)
+        })?;
+        drop(stdin);
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| reasoner("Claude CLI stdout was unavailable".to_owned(), true))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| reasoner("Claude CLI stderr was unavailable".to_owned(), true))?;
+        let execution = async {
+            let status = child.wait();
+            let stdout = read_bounded(stdout, MAX_COMPILER_OUTPUT_BYTES);
+            let stderr = read_bounded(stderr, MAX_COMPILER_DIAGNOSTIC_BYTES);
+            tokio::try_join!(status, stdout, stderr)
+        };
+        let (status, stdout, stderr) = timeout(self.timeout, execution)
+            .await
+            .map_err(|_| {
+                reasoner(
+                    format!(
+                        "Claude CLI exceeded the {} second claim-compilation limit",
+                        self.timeout.as_secs()
+                    ),
+                    true,
+                )
+            })?
+            .map_err(|error| reasoner(format!("Claude CLI execution failed: {error}"), true))?;
+        if !status.success() {
+            let diagnostic = serde_json::from_slice::<ClaudeResultEnvelope>(&stdout)
+                .ok()
+                .filter(|envelope| envelope.is_error)
+                .and_then(|envelope| envelope.result)
+                .map(|message| format!(": {}", truncate_utf8(&message, 300)))
+                .or_else(|| {
+                    String::from_utf8_lossy(&stderr)
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(|line| format!(": {}", truncate_utf8(line, 300)))
+                })
+                .unwrap_or_default();
+            let login_failed = diagnostic.to_ascii_lowercase().contains("not logged in");
+            let suffix = if login_failed {
+                "; run `claude auth login` and retry"
+            } else {
+                ""
+            };
+            return Err(reasoner(
+                format!(
+                    "Claude CLI claim compilation failed with status {}{diagnostic}{suffix}",
+                    status,
+                ),
+                login_failed,
+            ));
+        }
+
+        let envelope: ClaudeResultEnvelope = serde_json::from_slice(&stdout).map_err(|error| {
+            reasoner(
+                format!("Claude CLI returned an invalid result envelope: {error}"),
+                false,
+            )
+        })?;
+        if envelope.is_error {
+            return Err(reasoner(
+                "Claude CLI reported a failed claim compilation".to_owned(),
+                true,
+            ));
+        }
+        let proposal = match envelope.structured_output {
+            Some(value) => serde_json::from_value(value),
+            None => envelope
+                .result
+                .as_deref()
+                .ok_or_else(|| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "missing structured_output and result",
+                    ))
+                })
+                .and_then(serde_json::from_str),
+        }
+        .map_err(|error| {
+            reasoner(
+                format!("Claude CLI returned an invalid claim compilation: {error}"),
+                false,
+            )
+        })?;
+        Ok(ProviderCompilation {
+            compilation: validate_compilation(source, proposal)?,
+            resolved_model_ids: envelope.model_usage.into_keys().collect(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeResultEnvelope {
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    structured_output: Option<serde_json::Value>,
+    #[serde(default, rename = "modelUsage")]
+    model_usage: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn validate_source(source: &str) -> Result<()> {
@@ -433,12 +648,12 @@ fn compiler_prompt(source: &str) -> Result<String> {
     ))
 }
 
-fn codex_arguments(schema: &Path, output: &Path, workdir: &Path) -> Vec<OsString> {
+fn codex_arguments(schema: &Path, output: &Path, workdir: &Path, model: &str) -> Vec<OsString> {
     [
         OsString::from("exec"),
         OsString::from("--strict-config"),
         OsString::from("--model"),
-        OsString::from(REMEMBER_MODEL),
+        OsString::from(model),
         OsString::from("--sandbox"),
         OsString::from("read-only"),
         OsString::from("--ephemeral"),
@@ -486,9 +701,32 @@ fn codex_arguments(schema: &Path, output: &Path, workdir: &Path) -> Vec<OsString
     .into()
 }
 
+fn claude_arguments(schema: &str, model: &str) -> Vec<OsString> {
+    [
+        OsString::from("--print"),
+        OsString::from("--model"),
+        OsString::from(model),
+        OsString::from("--effort"),
+        OsString::from("low"),
+        OsString::from("--safe-mode"),
+        OsString::from("--no-session-persistence"),
+        OsString::from("--disable-slash-commands"),
+        OsString::from("--no-chrome"),
+        OsString::from("--tools"),
+        OsString::new(),
+        OsString::from("--permission-mode"),
+        OsString::from("dontAsk"),
+        OsString::from("--output-format"),
+        OsString::from("json"),
+        OsString::from("--json-schema"),
+        OsString::from(schema),
+    ]
+    .into()
+}
+
 fn sanitized_environment(allow_api_key: bool) -> Result<BTreeMap<OsString, OsString>> {
     let mut sanitized = BTreeMap::new();
-    for key in CODEX_ENV_ALLOWLIST {
+    for key in COMPILER_ENV_ALLOWLIST {
         if let Some(value) = env::var_os(key) {
             sanitized.insert(OsString::from(key), value);
         }
@@ -561,7 +799,7 @@ async fn read_bounded(
     if bytes.len() > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Codex CLI diagnostics exceeded the output limit",
+            "compiler CLI output exceeded the configured limit",
         ));
     }
     Ok(bytes)
@@ -696,11 +934,14 @@ mod tests {
 
     #[test]
     fn codex_environment_allowlist_excludes_api_credentials() {
-        assert!(CODEX_ENV_ALLOWLIST.contains(&"HOME"));
-        assert!(CODEX_ENV_ALLOWLIST.contains(&"CODEX_HOME"));
-        assert!(!CODEX_ENV_ALLOWLIST.contains(&"OPENAI_API_KEY"));
-        assert!(!CODEX_ENV_ALLOWLIST.contains(&"CODEX_API_KEY"));
-        assert!(!CODEX_ENV_ALLOWLIST.contains(&"CODEX_ACCESS_TOKEN"));
+        assert!(COMPILER_ENV_ALLOWLIST.contains(&"HOME"));
+        assert!(COMPILER_ENV_ALLOWLIST.contains(&"CODEX_HOME"));
+        assert!(COMPILER_ENV_ALLOWLIST.contains(&"CLAUDE_CONFIG_DIR"));
+        assert!(!COMPILER_ENV_ALLOWLIST.contains(&"OPENAI_API_KEY"));
+        assert!(!COMPILER_ENV_ALLOWLIST.contains(&"CODEX_API_KEY"));
+        assert!(!COMPILER_ENV_ALLOWLIST.contains(&"CODEX_ACCESS_TOKEN"));
+        assert!(!COMPILER_ENV_ALLOWLIST.contains(&"ANTHROPIC_API_KEY"));
+        assert!(!COMPILER_ENV_ALLOWLIST.contains(&"CLAUDE_CODE_OAUTH_TOKEN"));
         let environment = sanitized_environment(false).unwrap();
         assert!(!environment.contains_key(&OsString::from("OPENAI_API_KEY")));
         assert!(!environment.contains_key(&OsString::from("CODEX_API_KEY")));
@@ -718,7 +959,12 @@ mod tests {
 
     #[test]
     fn codex_invocation_is_ephemeral_read_only_and_tool_free() {
-        let args = codex_arguments(Path::new("schema"), Path::new("output"), Path::new("work"));
+        let args = codex_arguments(
+            Path::new("schema"),
+            Path::new("output"),
+            Path::new("work"),
+            CODEX_REMEMBER_MODEL,
+        );
         let rendered = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -730,6 +976,22 @@ mod tests {
         assert!(rendered.contains("--ignore-user-config"));
         assert!(rendered.contains("features.shell_tool=false"));
         assert!(rendered.contains("web_search=\"disabled\""));
+    }
+
+    #[test]
+    fn claude_invocation_is_low_effort_tool_free_and_schema_constrained() {
+        let args = claude_arguments("{\"type\":\"object\"}", CLAUDE_REMEMBER_MODEL);
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(rendered.contains("--model sonnet"));
+        assert!(rendered.contains("--effort low"));
+        assert!(rendered.contains("--safe-mode"));
+        assert!(rendered.contains("--no-session-persistence"));
+        assert!(rendered.contains("--tools  --permission-mode dontAsk"));
+        assert!(rendered.contains("--json-schema"));
     }
 
     #[tokio::test]
@@ -756,8 +1018,34 @@ printf '%s' '{"claims":[{"claim_type":"decision","statement":"Use SQLite.","evid
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let compiler = CodexCompiler::with_binary_and_timeout(binary, Duration::from_secs(5));
         let result = compiler.compile("Use SQLite.").await.unwrap();
-        assert_eq!(result.claims.len(), 1);
-        assert_eq!(result.claims[0].evidence[0].start_byte, 0);
-        assert_eq!(result.claims[0].evidence[0].end_byte, 11);
+        assert_eq!(result.compilation.claims.len(), 1);
+        assert_eq!(result.compilation.claims[0].evidence[0].start_byte, 0);
+        assert_eq!(result.compilation.claims[0].evidence[0].end_byte, 11);
+        assert_eq!(result.resolved_model_ids, [CODEX_REMEMBER_MODEL]);
+    }
+
+    #[tokio::test]
+    async fn compiler_accepts_structured_output_from_a_fake_claude_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("claude");
+        fs::write(
+            &binary,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"is_error":false,"result":"ignored","structured_output":{"claims":[{"claim_type":"decision","statement":"Use SQLite.","evidence_quotes":["Use SQLite."]}]},"modelUsage":{"claude-sonnet-5":{}}}'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let compiler = ClaudeCompiler::with_binary_and_timeout(
+            binary,
+            CLAUDE_REMEMBER_MODEL,
+            Duration::from_secs(5),
+        );
+        let result = compiler.compile("Use SQLite.").await.unwrap();
+        assert_eq!(result.compilation.claims.len(), 1);
+        assert_eq!(result.compilation.claims[0].evidence[0].start_byte, 0);
+        assert_eq!(result.compilation.claims[0].evidence[0].end_byte, 11);
+        assert_eq!(result.resolved_model_ids, ["claude-sonnet-5"]);
     }
 }

@@ -17,7 +17,7 @@ The project is intentionally not an agent framework and does not require MCP or 
 - **Session continuity is quarantined.** `memoree checkpoint` stages one bounded, agent-authored note per session outside the database and every retrieval surface. `memoree pending preview|apply` reuses the explicit remember flow; no transcript hook or background process can silently create memory.
 - **Model context is bounded.** `context.build` returns provenance-rich excerpts within a byte budget, keeps source lines in labelled blockquotes, reports heuristic prompt-injection signals, and always marks retrieved content as untrusted.
 - **Freshness is bounded.** Search keeps the lexical top-K candidate set, then applies a deterministic, type-aware recency bonus that can promote a current item by at most two positions. Recency never broadens scope, hides contradictions, or makes historical/future content current.
-- **Reasoning stays outside the daemon.** `context.build` returns a scoped, byte-bounded, citation-rich packet for any model. The optional caller-side `memoree remember` wrapper makes one isolated Codex CLI invocation using Luna to structure natural language; the daemon never invokes a model, receives an API key, or executes generated output.
+- **Reasoning stays outside the daemon.** `context.build` returns a scoped, byte-bounded, citation-rich packet for any model. The optional caller-side `memoree remember` wrapper makes one isolated invocation through a selected authenticated Codex or Claude CLI; the daemon never invokes a model, receives a credential, or executes generated output.
 - **The local default stays small.** SQLite is authoritative, SQLite FTS5 plus deterministic trigram matching provides retrieval, and larger content lives in a filesystem content-addressed store. A pinned local dense projection and claim-only cross-encoder ordering are explicit installs, remain disposable, and fail open to deterministic retrieval.
 
 The v0.1 resource envelope accepts artifacts up to 8 MiB, encoded content up to 12 MiB, transport frames up to 24 MiB, and at most four concurrent connections. These conservative bounds limit JSON/base64 memory amplification until a streaming artifact transport exists. Query `capabilities` for the running binary's exact values instead of hard-coding them.
@@ -118,6 +118,8 @@ Human-friendly wrappers produce the same JSON envelopes:
 ```sh
 memoree remember "SQLite is authoritative; keep the daemon credential-free."
 memoree remember --apply "SQLite is authoritative; keep the daemon credential-free."
+memoree compiler status
+memoree compiler configure
 memoree checkpoint --session SESSION_ID --task TASK_NAME "bounded continuity note"
 memoree pending list
 memoree pending preview CHECKPOINT_ID
@@ -151,15 +153,19 @@ Dense similarity cannot qualify an answer. Exact-tier ordering is model-independ
 
 Recall, search, and context construction apply the bounded recency policy by default. The `memoree recall`, `memoree search`, and `memoree context build` wrappers accept `--no-recency` for one retrieval; raw `memoree call` clients can send `"recency":{"enabled":false}` on `memory.recall`, `search`, or `context.build`.
 
-`memoree remember` is the one bounded reasoning convenience in this release. It previews by default. With `--apply`, it preserves the original UTF-8 source as an ambient-scoped artifact and asserts only claims whose one or more exact evidence quotes Rust can locate uniquely in that immutable revision. Multiple spans let a claim retain a non-contiguous caveat or scope condition. The plan includes machine-readable quality findings for inline/stdin self-attestation, mutable observations without validity, and the deliberate absence of automatic graph relations. These findings expose epistemic limits; they do not let Luna certify source authority. Luna cannot choose scope, confidence, relations, conflicts, lifecycle, supersession, deletion, or whether a write occurs. Use `--raw` to bypass Codex and preserve only the artifact.
+`memoree remember` is the one bounded reasoning convenience in this release. It previews by default. With `--apply`, it preserves the original UTF-8 source as an ambient-scoped artifact and asserts only claims whose one or more exact evidence quotes Rust can locate uniquely in that immutable revision. Multiple spans let a claim retain a non-contiguous caveat or scope condition. The plan includes machine-readable quality findings for inline/stdin self-attestation, mutable observations without validity, and the deliberate absence of automatic graph relations. These findings expose epistemic limits; they do not let the selected compiler certify source authority. The compiler cannot choose scope, confidence, relations, conflicts, lifecycle, supersession, deletion, or whether a write occurs. Use `--raw` to bypass compilation and preserve only the artifact.
 
 An inline synthesis is useful operating context, but its claims prove only what that stored note says. When long-term auditability matters, preserve the smallest relevant primary artifacts or excerpts and connect the synthesis with explicit `derived-from`, `references`, or `supports` links. Do not dump an entire repository for provenance. For mutable observations, use explicit `claim assert --valid-from/--valid-until` when a real validity window is known, or revise, retract, or supersede the claim when verified state changes.
 
-Authentication defaults strictly to the existing ChatGPT-authenticated `codex` CLI session from `codex login`. In this mode the child receives no API key or access-token environment variables and never reads `~/.openai_env`. If CLI authentication fails, the command performs no write and tells the caller to ask the human. Only the explicit `--allow-api-key` flag permits a one-run API-key fallback: it reads `CODEX_API_KEY`, `OPENAI_API_KEY`, or a safely parsed `~/.openai_env`, then supplies the value to `codex exec` as `CODEX_API_KEY`. There is no direct HTTP API client, and no credential enters the daemon or stored provenance.
+`memoree compiler status` discovers both local CLIs, verifies `codex login status` and `claude auth status --json`, and requests each account's live model catalog from `codex debug models` or Claude's zero-turn `/model` command. API-key and third-party auth are excluded from automatic discovery. If exactly one eligible login exists, Memoree persists its recommended compiler automatically. If both exist, the first interactive `remember` or `memoree compiler configure` asks for a provider and model; a non-interactive call fails loudly with exact configure commands. A missing login for both providers also fails without invoking a model or writing memory. The private selection is atomically stored beside local data and revalidated against the live catalog on every compilation.
+
+Codex recommends `gpt-5.6-luna`; Claude recommends `sonnet`. Both run at low effort with tools disabled and strict structured output. Floating Claude aliases such as `best` and `default` are reported but refused for durable selection. Successful output records provider, selected alias, CLI version, selection origin, and resolved model IDs in the remember result and source-artifact provenance. Existing installations preserve the former implicit Codex/Luna default during upgrade when that authenticated model remains available; users can change it with `memoree compiler configure`.
+
+Compiler subprocesses receive only a small environment allowlist needed for cached CLI login. API keys and access tokens are stripped. Only the explicit `--allow-api-key` flag permits a one-run, Codex-only fallback: it reads `CODEX_API_KEY`, `OPENAI_API_KEY`, or a safely parsed `~/.openai_env`, then supplies the value to `codex exec` as `CODEX_API_KEY`. There is no direct HTTP API client, no Claude API-key fallback, and no credential enters the daemon or stored provenance.
 
 A preview and a later apply are independent model calls, so the applied response—not an earlier preview—is authoritative. Automated callers that already intend to persist should call `--apply` directly and inspect its returned plan and stored records. Claim mutation identity is anchored to the exact source span, so a changed compilation for the same passage conflicts instead of creating a duplicate.
 
-The compiler is deliberately fixed to `gpt-5.6-luna` at low reasoning effort for this repeatable extraction task. General answering, planning, claim qualification, and conflict resolution remain outside the daemon. Optional pinned local models may add candidates or advisory ordering only. A companion can still call `context.build`, use any suitable model, and submit explicit protocol mutations.
+The compiler selection is deliberately limited to live models reported by an authenticated local CLI, with Luna and Sonnet as the task-specific recommendations. General answering, planning, claim qualification, and conflict resolution remain outside the daemon. Optional pinned local models may add candidates or advisory ordering only. A companion can still call `context.build`, use any suitable model, and submit explicit protocol mutations.
 
 Mutation wrappers generate a fresh idempotency key when one is omitted. Pass `--idempotency-key` when an automated logical action may need an exact retry; reusing that key with changed input is rejected.
 
@@ -208,7 +214,7 @@ agent or human
       |
       | memoree call / memoree remember
       v
-caller-side CLI (optional isolated Luna claim compilation)
+caller-side CLI (optional isolated Codex or Claude claim compilation)
       |
       | validated protocol mutations / framed transport
       v
@@ -226,7 +232,7 @@ Read [Architecture](https://memoree.dev/docs/architecture/) for context resoluti
 
 ## Project status
 
-This repository is a usable local vertical slice. Query `capabilities` rather than assuming a roadmap feature is available; `remember` is a CLI composition and intentionally is not advertised as a daemon operation. Evidence-first recall, exact long-document citations, deterministic lexical/trigram fusion, optional local dense candidate retrieval, guarded claim-only cross-encoder ordering, bounded recency, and Luna claim compilation are implemented. Authorization, generic S3 storage, and a SeaweedFS Compose profile are not implemented.
+This repository is a usable local vertical slice. Query `capabilities` rather than assuming a roadmap feature is available; `remember` is a CLI composition and intentionally is not advertised as a daemon operation. Evidence-first recall, exact long-document citations, deterministic lexical/trigram fusion, optional local dense candidate retrieval, guarded claim-only cross-encoder ordering, bounded recency, and selected Codex or Claude claim compilation are implemented. Authorization, generic S3 storage, and a SeaweedFS Compose profile are not implemented.
 
 ## License
 

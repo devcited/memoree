@@ -15,6 +15,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
 use memoree::{
     checkpoint::{CheckpointStore, MAX_CHECKPOINT_INPUT_BYTES},
+    compiler::{
+        CompilerProvider, CompilerRegistry, SelectionOrigin, interactive_selection_available,
+    },
     context::{
         AppPaths, ContextResolver, MARKER_FILE, MEMOREE_CONTEXT_ENV, encode_memory_context,
         init_marker, task_context,
@@ -31,8 +34,8 @@ use memoree::{
         RelationType, Request, Response, SearchInput, Warning,
     },
     remember::{
-        CodexCompiler, REMEMBER_MODEL, REMEMBER_SCHEMA_VERSION, ValidatedClaim,
-        ValidatedCompilation, deterministic_title, input_digest,
+        REMEMBER_SCHEMA_VERSION, ValidatedClaim, ValidatedCompilation, deterministic_title,
+        input_digest,
     },
     reranker_eval::evaluate_reranker_pairs,
     service::MemoryService,
@@ -105,6 +108,11 @@ enum Commands {
         #[command(subcommand)]
         command: SkillsCommands,
     },
+    /// Inspect or choose the authenticated CLI used for claim compilation.
+    Compiler {
+        #[command(subcommand)]
+        command: CompilerCommands,
+    },
     /// Inspect ambient context or build a bounded context bundle.
     Context {
         #[command(subcommand)]
@@ -173,10 +181,10 @@ struct RememberArgs {
     /// Read UTF-8 text from a file instead of the command line.
     #[arg(long, value_name = "PATH", conflicts_with = "text")]
     file: Option<PathBuf>,
-    /// Store the source without invoking Codex or creating claims.
+    /// Store the source without invoking a compiler CLI or creating claims.
     #[arg(long)]
     raw: bool,
-    /// Explicitly permit API-key auth for this Codex invocation if CLI login is unavailable.
+    /// Explicitly use Codex with one-run API-key auth instead of a persisted CLI selection.
     #[arg(long, conflicts_with = "raw")]
     allow_api_key: bool,
     /// Apply the displayed plan. Without this flag, the command is read-only.
@@ -323,6 +331,36 @@ enum UpgradeCommands {
 enum SkillsCommands {
     /// Atomically synchronize the embedded use-memoree skill to installed agent homes.
     Sync,
+}
+
+#[derive(Debug, Subcommand)]
+enum CompilerCommands {
+    /// Discover installed CLIs, login state, live models, and the saved selection.
+    Status,
+    /// Validate and persist the preferred compiler provider and model.
+    Configure {
+        /// Authenticated CLI provider. Prompted when omitted in a terminal.
+        #[arg(long, value_enum)]
+        provider: Option<CompilerProviderArg>,
+        /// Live model id or alias reported by the selected CLI.
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompilerProviderArg {
+    Codex,
+    Claude,
+}
+
+impl From<CompilerProviderArg> for CompilerProvider {
+    fn from(value: CompilerProviderArg) -> Self {
+        match value {
+            CompilerProviderArg::Codex => Self::Codex,
+            CompilerProviderArg::Claude => Self::Claude,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -741,9 +779,17 @@ struct MaterializeTarget {
 
 #[derive(Debug, Serialize)]
 struct RememberCompilerReport {
-    mode: &'static str,
+    mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'static str>,
+    provider: Option<CompilerProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cli_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection_origin: Option<SelectionOrigin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resolved_model_ids: Vec<String>,
     schema_version: u32,
 }
 
@@ -794,6 +840,7 @@ struct UpgradeApplyReport {
     daemon: Value,
     semantic: Value,
     reranker: Value,
+    compiler: Value,
     skills: Option<SkillSyncReport>,
     state: UpgradeState,
     warnings: Vec<String>,
@@ -878,6 +925,7 @@ async fn run(cli: Cli) -> Result<i32> {
             upgrade_command(command, cli.endpoint.as_deref(), &paths, cli.pretty).await
         }
         Commands::Skills { command } => skills_command(command, &paths, cli.pretty),
+        Commands::Compiler { command } => compiler_command(command, &paths, cli.pretty).await,
         Commands::Semantic { command } => semantic_command(command, &paths, cli.pretty).await,
         Commands::Eval(args) => {
             let report = run_retrieval_eval_with_models(
@@ -1237,6 +1285,7 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         | Commands::Daemon { .. }
         | Commands::Upgrade { .. }
         | Commands::Skills { .. }
+        | Commands::Compiler { .. }
         | Commands::Semantic { .. }
         | Commands::Eval(_)
         | Commands::Context {
@@ -1322,6 +1371,31 @@ fn skills_command(command: SkillsCommands, paths: &AppPaths, pretty: bool) -> Re
             Ok(0)
         }
     }
+}
+
+async fn compiler_command(
+    command: CompilerCommands,
+    paths: &AppPaths,
+    pretty: bool,
+) -> Result<i32> {
+    let registry = CompilerRegistry::default();
+    let result = match command {
+        CompilerCommands::Status => serde_json::to_value(registry.status(paths).await?)?,
+        CompilerCommands::Configure { provider, model } => serde_json::to_value(
+            registry
+                .configure(
+                    paths,
+                    provider.map(Into::into),
+                    model,
+                    interactive_selection_available(),
+                )
+                .await?,
+        )?,
+    };
+    let request = Request::new(Operation::ContextResolve, json!({}))?;
+    let response = Response::success(&request, result)?;
+    print_json(&response, pretty);
+    Ok(0)
 }
 
 async fn upgrade_command(
@@ -1426,6 +1500,18 @@ async fn apply_upgrade(
     write_upgrade_state(paths, &state)?;
 
     let mut warnings = Vec::new();
+    let compiler = match CompilerRegistry::default()
+        .reconcile_upgrade(paths, previous_daemon_version.as_deref())
+        .await
+    {
+        Ok(report) => serde_json::to_value(report)?,
+        Err(error) => {
+            warnings.push(format!(
+                "compiler preference reconciliation failed; `memoree remember` will require `memoree compiler configure`: {error}"
+            ));
+            json!({"state": "error", "reason": error.to_string()})
+        }
+    };
     if endpoint_override.is_some() {
         state.set_phase("external_daemon_action_required");
         write_upgrade_state(paths, &state)?;
@@ -1448,6 +1534,7 @@ async fn apply_upgrade(
             }),
             semantic: json!({"state": "deferred", "downloaded": false}),
             reranker: json!({"state": "deferred", "downloaded": false}),
+            compiler: compiler.clone(),
             skills,
             state,
             warnings,
@@ -1487,6 +1574,7 @@ async fn apply_upgrade(
                 }),
                 semantic: json!({"state": "deferred", "downloaded": false}),
                 reranker: json!({"state": "deferred", "downloaded": false}),
+                compiler: compiler.clone(),
                 skills,
                 state,
                 warnings,
@@ -1527,6 +1615,7 @@ async fn apply_upgrade(
             }),
             semantic: json!({"state": "deferred", "downloaded": false}),
             reranker: json!({"state": "deferred", "downloaded": false}),
+            compiler: compiler.clone(),
             skills,
             state,
             warnings,
@@ -1571,6 +1660,7 @@ async fn apply_upgrade(
                 daemon: json!({"state": "stopped", "running_before": state.prior_daemon_running}),
                 semantic,
                 reranker,
+                compiler: compiler.clone(),
                 skills: None,
                 state,
                 warnings,
@@ -1645,6 +1735,7 @@ async fn apply_upgrade(
                 }),
                 semantic,
                 reranker,
+                compiler: compiler.clone(),
                 skills,
                 state,
                 warnings,
@@ -1698,6 +1789,7 @@ async fn apply_upgrade(
         daemon,
         semantic,
         reranker,
+        compiler,
         skills,
         state,
         warnings,
@@ -1911,24 +2003,33 @@ async fn remember_command(
         (
             ValidatedCompilation { claims: vec![] },
             RememberCompilerReport {
-                mode: "raw",
+                mode: "raw".to_owned(),
+                provider: None,
                 model: None,
+                cli_version: None,
+                selection_origin: None,
+                resolved_model_ids: Vec::new(),
                 schema_version: REMEMBER_SCHEMA_VERSION,
             },
         )
     } else {
-        let compilation = CodexCompiler::new(args.allow_api_key)
-            .compile(&source)
+        let execution = CompilerRegistry::default()
+            .compile(
+                paths,
+                &source,
+                args.allow_api_key,
+                interactive_selection_available(),
+            )
             .await?;
         (
-            compilation,
+            execution.compilation,
             RememberCompilerReport {
-                mode: if args.allow_api_key {
-                    "codex_cli_api_key_permitted"
-                } else {
-                    "codex_cli_chatgpt"
-                },
-                model: Some(REMEMBER_MODEL),
+                mode: execution.report.mode,
+                provider: Some(execution.report.provider),
+                model: Some(execution.report.model),
+                cli_version: Some(execution.report.cli_version),
+                selection_origin: Some(execution.report.selection_origin),
+                resolved_model_ids: execution.report.resolved_model_ids,
                 schema_version: REMEMBER_SCHEMA_VERSION,
             },
         )
@@ -1977,12 +2078,30 @@ async fn remember_command(
             "remember_schema_version".to_owned(),
             Value::from(REMEMBER_SCHEMA_VERSION),
         );
-        provenance.insert(
-            "compiler".to_owned(),
-            Value::String(compiler.mode.to_owned()),
-        );
-        if compiler.model.is_some() {
-            provenance.insert("model".to_owned(), Value::String(REMEMBER_MODEL.to_owned()));
+        provenance.insert("compiler".to_owned(), Value::String(compiler.mode.clone()));
+        if let Some(provider) = compiler.provider {
+            provenance.insert(
+                "compiler_provider".to_owned(),
+                Value::String(provider.as_str().to_owned()),
+            );
+        }
+        if let Some(model) = &compiler.model {
+            provenance.insert("model".to_owned(), Value::String(model.clone()));
+        }
+        if let Some(cli_version) = &compiler.cli_version {
+            provenance.insert(
+                "compiler_cli_version".to_owned(),
+                Value::String(cli_version.clone()),
+            );
+        }
+        if let Some(origin) = compiler.selection_origin {
+            provenance.insert("compiler_selection_origin".to_owned(), json!(origin));
+        }
+        if !compiler.resolved_model_ids.is_empty() {
+            provenance.insert(
+                "resolved_model_ids".to_owned(),
+                serde_json::to_value(&compiler.resolved_model_ids)?,
+            );
         }
 
         let mut artifact_request = Request::new(

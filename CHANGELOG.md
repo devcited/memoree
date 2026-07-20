@@ -15,12 +15,14 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - A realistic v2 retrieval corpus covering paraphrase, typos, long documents, honest abstention, scope, temporal behavior, explicit broadening, and conflicts.
 - An idempotent upgrade reconciler with daemon version/ownership checks, durable phase state, and automatic synchronization of the canonical Codex/Claude skill.
 - Private, verified pre-migration snapshots for every schema 1–3 store before schema 4 is committed.
+- Authenticated Codex/Claude compiler discovery with live CLI model catalogs, private provider/model selection, Claude Sonnet compilation, and auditable compiler provenance.
 
 ### Changed
 
 - Retrieval authority now filters scope, currentness, and lifecycle before any model work; exact-tier qualification and order remain model-independent.
 - The generated machine instructions and Codex/Claude skills now teach agents to fetch and corroborate candidate citations rather than treating suggestions as facts.
 - The stable installer now preserves running/stopped daemon state, reconciles existing local projections without downloading models, and rolls binaries back after a pre-migration failure.
+- Existing installations retain the former Codex/Luna compiler default when it remains eligible; fresh dual-login setups prompt once, while non-interactive ambiguity and missing logins fail loudly.
 
 ## [0.2.0] - 2026-07-18
 

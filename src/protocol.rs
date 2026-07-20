@@ -309,7 +309,7 @@ fn error_hint(error: &crate::error::MemoryError) -> Option<String> {
                 .to_owned(),
         ),
         crate::error::MemoryError::Reasoner { .. } => Some(
-            "Run `codex login` and retry. If ChatGPT login cannot be used, ask the user for explicit permission before retrying `memoree remember --allow-api-key`; use `--raw` only when preserving without claims is intended."
+            "Run `memoree compiler status`, authenticate with `codex login` or `claude auth login`, and choose with `memoree compiler configure`. API-key fallback remains Codex-only and requires explicit permission for `memoree remember --allow-api-key`; use `--raw` only when preserving without claims is intended."
                 .to_owned(),
         ),
         _ => None,

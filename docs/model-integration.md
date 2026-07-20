@@ -28,17 +28,23 @@ memoree remember "The API uses SQLite for local tests."
 memoree remember --apply "The API uses SQLite for local tests."
 printf '%s' "Prefer Rust for system components." | memoree remember --apply -
 memoree remember --raw --apply --file ./large-note.txt
+memoree compiler status
+memoree compiler configure
 ```
 
-The wrapper fixes the use-case model to `gpt-5.6-luna`, makes one low-effort isolated Codex CLI call, and accepts only typed statements plus one to four exact source quotes per claim. Multiple quotes preserve non-contiguous qualifiers such as “planning range” or an optional scope condition. Rust—not the model—computes and validates every citation byte span and performs every mutation. It never sends workspace/project/task scope to Luna. The command is a CLI composition, so it does not appear in protocol `capabilities` or `schema`.
+The wrapper makes one low-effort isolated call through a selected authenticated Codex or Claude CLI and accepts only typed statements plus one to four exact source quotes per claim. Codex recommends `gpt-5.6-luna`; Claude recommends `sonnet`. Multiple quotes preserve non-contiguous qualifiers such as “planning range” or an optional scope condition. Rust—not the model—computes and validates every citation byte span and performs every mutation. It never sends workspace/project/task scope to the compiler. The command is a CLI composition, so it does not appear in protocol `capabilities` or `schema`.
 
 Every plan contains a structured `quality` report. `REMEMBER_SELF_ATTESTED_SOURCE` means inline/stdin claims are grounded only to the new note; it does not prove an external audit or repository supported them. `REMEMBER_MUTABLE_OBSERVATION` identifies observations that `remember` cannot safely time-bound on the model's authority. `REMEMBER_RELATIONS_NOT_CREATED` records the deliberate graph boundary. Agents should inspect these findings after both preview and apply.
 
 Use `--file` on an actual durable source when that file is the authority. For a synthesis across multiple sources, store the concise synthesis, preserve only the relevant primary artifacts or excerpts, and add explicit `derived-from`, `references`, or `supports` relations. Do not dump a repository. A summary-only claim remains useful operating context, but must not be described as independently verified evidence.
 
-Authentication is Codex CLI login by default. Run `codex login` with ChatGPT and confirm it with `codex login status`. The wrapper preserves `HOME`/`CODEX_HOME` so Codex can reuse that cached session, but strips API-key and access-token environment variables and does not read `~/.openai_env`.
+`memoree compiler status` probes `codex login status` and `claude auth status --json`, rejecting API-key or third-party auth as an automatic login. It requests the current model lists from `codex debug models` and Claude's zero-token `/model` command. A single eligible provider is selected and persisted automatically. With two eligible providers and no preference, a terminal prompts for provider and model; non-interactive use fails with explicit `memoree compiler configure --provider ... --model ...` remediation. With neither logged in, the command names both login commands and performs no compilation or write.
 
-If login is unavailable, do not choose a different credential automatically. The failed command performs no write and returns an instruction to ask the human. Only after explicit permission may a caller add `--allow-api-key`; that flag permits one-run key loading and still invokes `codex exec` rather than a direct HTTP API. Never persist this permission as a default.
+The selection is private, mode `0600`, atomically replaced, and validated against the live catalog on every call. Catalog transport/parse failures are retryable and never invalidate a stored preference; a successfully fetched catalog that no longer contains the selected model requires deliberate reconfiguration. The compiler report and artifact provenance record provider, alias, CLI version, selection origin, and resolved model IDs. Claims cite exact spans in that artifact, preserving the same compiler audit path.
+
+The wrapper preserves only the minimal `HOME`, provider config-directory, locale, path, and temporary-directory environment needed for cached CLI sessions. It strips API-key and access-token variables and does not read `~/.openai_env` during normal discovery or compilation.
+
+If login is unavailable, do not choose a credential automatically. Only after explicit permission may a caller add `--allow-api-key`; that flag selects a one-run Codex/Luna key path and still invokes `codex exec` rather than a direct HTTP API. Claude has no API-key fallback, and this permission is never persisted.
 
 Preview and apply are independent compilations; treat the applied response as authoritative rather than assuming it will reproduce a previous preview byte-for-byte. A retry identity is tied to the ordered set of exact source spans rather than model-selected wording or type, so changed output for the same evidence fails closed as an idempotency conflict instead of creating a second claim.
 

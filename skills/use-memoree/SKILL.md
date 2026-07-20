@@ -92,7 +92,7 @@ Prefer primary evidence. When synthesizing sources, preserve only the relevant e
 
 Inspect `result.plan.quality` and envelope warnings. Preserve caveats and scope; do not turn estimates, mutable observations, or drafts into timeless facts. Never store routine progress, chatter, speculation, chain-of-thought, credentials, secrets, or incidental logs.
 
-`memoree remember` uses the ChatGPT-authenticated Codex CLI session. If authentication fails, perform no substitute write and ask the human to run `codex login`. Never add `--allow-api-key` without explicit permission for that invocation.
+`memoree remember` uses a private provider/model preference chosen from live authenticated Codex and Claude CLI catalogs. Codex recommends Luna; Claude recommends Sonnet. If exactly one subscription login is available, Memoree selects it automatically. If both are available and no preference exists, interactive use prompts once; an agent/non-interactive call fails and must ask the human to run `memoree compiler configure` (or specify `--provider codex --model gpt-5.6-luna` / `--provider claude --model sonnet`). Inspect `memoree compiler status` when authentication, model availability, or selection is unclear. Never guess a replacement for an unavailable configured model, and never add `--allow-api-key` without explicit permission for that one Codex invocation. Claude API-key fallback is unavailable.
 
 After a write, pass its `commit_seq` to a dependent read:
 

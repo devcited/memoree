@@ -28,7 +28,7 @@ memoree pending apply CHECKPOINT_ID
 memoree pending drop CHECKPOINT_ID
 ```
 
-`list` omits staged text and, by default, items older than the 14-day review window; `list --all` includes them. The review window is not automatic deletion. `show` reveals the text. `preview` runs the normal isolated Luna claim compiler without writing. `apply` is the deliberate write boundary and runs the same compiler through `memoree remember --apply`; the resulting checkpoint artifact is the exact evidence source for accepted claims. Successful preview/apply leaves the pending item available for inspection and exact retry. Only `drop` deletes it, and deletion is not recoverable.
+`list` omits staged text and, by default, items older than the 14-day review window; `list --all` includes them. The review window is not automatic deletion. `show` reveals the text. `preview` runs the selected isolated claim compiler without writing. `apply` is the deliberate write boundary and runs the same compiler through `memoree remember --apply`; the resulting checkpoint artifact is the exact evidence source for accepted claims. Successful preview/apply leaves the pending item available for inspection and exact retry. Only `drop` deletes it, and deletion is not recoverable.
 
 Checkpointing performs a deterministic warning scan for common AWS access-key shapes, bearer tokens, private-key blocks, and named credential assignments. Flagged notes remain quarantined and `preview`/`apply` refuse them unless the caller explicitly passes `--allow-flagged` after inspection. This is a warning net, not a secret classifier; agents must not checkpoint credentials, transcript dumps, prompt bodies, tool payloads, chain-of-thought, or routine progress.
 
