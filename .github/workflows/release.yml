@@ -229,6 +229,7 @@ jobs:
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MEMOREE_UPDATE_SIGNING_KEY_B64: ${{ secrets.MEMOREE_UPDATE_SIGNING_KEY_B64 }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
@@ -253,7 +254,12 @@ jobs:
       - id: host
         shell: bash
         run: |
-          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          sh scripts/build-signed-release-manifest.sh target/distrib "${{ needs.plan.outputs.tag }}"
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --output-format=json > upload-dist-manifest.json
+          gh release upload "${{ needs.plan.outputs.tag }}" \
+            target/distrib/memoree-release.json \
+            target/distrib/memoree-release.json.sig
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=release --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"

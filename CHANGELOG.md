@@ -4,6 +4,21 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-20
+
+### Added
+
+- An out-of-process source synchronization contract with stable external identities, revision-safe ingestion, cursor and health checkpoints, and honest logical withdrawal.
+- Evidence-linked derived retrieval projections that can discover cited artifact candidates without qualifying recall presence or entering context bundles by themselves.
+- Explicit privacy-aware retrieval feedback with keyed query fingerprints by default and opt-in raw-query retention for offline evaluation.
+- Signed release manifests and confirmation-based automatic updates for installer-managed copies, with bounded checks, per-version deferral, full reconciliation, and exact command re-execution.
+
+### Changed
+
+- Store schema 5 is created automatically, with a private verified pre-migration snapshot for schema 4 installations and the existing full migration chain for earlier stores.
+- Every normal data-touching command now fails fast while a signed update or schema reconciliation owns the local upgrade lock.
+- Release CI signs the installer digest and every target archive checksum before an immutable GitHub Release is published.
+
 ## [0.3.0] - 2026-07-20
 
 ### Added
@@ -38,6 +53,7 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/devcited/memoree/releases/tag/v0.4.0
 [0.3.0]: https://github.com/devcited/memoree/releases/tag/v0.3.0
 [0.2.0]: https://github.com/devcited/memoree/releases/tag/v0.2.0

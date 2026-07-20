@@ -12,6 +12,7 @@ pub mod semantic;
 pub mod service;
 pub mod store;
 pub mod transport;
+pub mod update;
 pub mod upgrade;
 
 pub use error::{MemoryError, Result};

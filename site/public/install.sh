@@ -50,6 +50,8 @@ fi
 
 archive="memoree-$target.tar.gz"
 download_root="$release_root/download/$version"
+archive_url="${MEMOREE_ARCHIVE_URL:-$download_root/$archive}"
+signed_expected="${MEMOREE_EXPECTED_ARCHIVE_SHA256:-}"
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/memoree-install.XXXXXXXX")"
 archive_path="$temp_dir/$archive"
 checksum_path="$archive_path.sha256"
@@ -73,10 +75,13 @@ if [ -x "$install_dir/memoree" ]; then
 fi
 
 printf 'Downloading memoree %s for %s...\n' "$version" "$target"
-curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive_path" "$download_root/$archive"
-curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$checksum_path" "$download_root/$archive.sha256"
-
-expected="$(awk 'NR == 1 { print $1 }' "$checksum_path")"
+curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive_path" "$archive_url"
+if [ -n "$signed_expected" ]; then
+  expected="$signed_expected"
+else
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$checksum_path" "$download_root/$archive.sha256"
+  expected="$(awk 'NR == 1 { print $1 }' "$checksum_path")"
+fi
 printf '%s' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || fail "invalid SHA-256 checksum file"
 if command -v sha256sum >/dev/null 2>&1; then
   actual="$(sha256sum "$archive_path" | awk '{ print $1 }')"
@@ -108,14 +113,17 @@ fi
 
 upgrade_status=0
 if [ "$previous_daemon_running" -eq 1 ]; then
-  "$install_dir/memoree" upgrade apply \
+  MEMOREE_MANAGED_INSTALL=1 MEMOREE_INSTALL_PREFIX="$install_dir" \
+    "$install_dir/memoree" upgrade apply \
     --previous-version "$previous_version" \
     --legacy-default-was-running || upgrade_status=$?
 elif [ -n "$previous_version" ]; then
-  "$install_dir/memoree" upgrade apply \
+  MEMOREE_MANAGED_INSTALL=1 MEMOREE_INSTALL_PREFIX="$install_dir" \
+    "$install_dir/memoree" upgrade apply \
     --previous-version "$previous_version" || upgrade_status=$?
 else
-  "$install_dir/memoree" upgrade apply || upgrade_status=$?
+  MEMOREE_MANAGED_INSTALL=1 MEMOREE_INSTALL_PREFIX="$install_dir" \
+    "$install_dir/memoree" upgrade apply || upgrade_status=$?
 fi
 
 if [ "$upgrade_status" -ne 0 ] && [ "$upgrade_status" -ne 20 ]; then

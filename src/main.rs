@@ -43,6 +43,10 @@ use memoree::{
         ArtifactRecord, ClaimRecord, MEMOREE_DATABASE_FILE, MutationResult, SCHEMA_VERSION, Store,
     },
     transport::{self, Endpoint},
+    update::{
+        AutoUpdateOutcome, apply_available_update, check_for_update, check_report,
+        maybe_auto_update, record_managed_install, reexec_current_process, update_status,
+    },
     upgrade::{
         SkillSyncReport, UpgradeLock, UpgradeState, ensure_upgrade_not_in_progress,
         load_upgrade_state, sync_skills, write_upgrade_state,
@@ -54,6 +58,7 @@ use serde_json::{Value, json};
 const ENDPOINT_ENV: &str = "MEMOREE_ENDPOINT";
 const ACTOR_ENV: &str = "MEMOREE_ACTOR";
 const NO_AUTOSTART_ENV: &str = "MEMOREE_NO_AUTOSTART";
+const DAEMON_CHILD_ENV: &str = "MEMOREE_DAEMON_CHILD";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -102,6 +107,11 @@ enum Commands {
     Upgrade {
         #[command(subcommand)]
         command: UpgradeCommands,
+    },
+    /// Inspect or apply signed Memoree releases.
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommands,
     },
     /// Install or refresh Memoree's canonical agent integrations.
     Skills {
@@ -325,6 +335,16 @@ enum UpgradeCommands {
     /// Installer-only downgrade guard after a failed reconciliation.
     #[command(hide = true)]
     RollbackSafe,
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdateCommands {
+    /// Show local automatic-update eligibility and cached state without network I/O.
+    Status,
+    /// Fetch and verify the latest signed release manifest without installing it.
+    Check,
+    /// Install and reconcile the latest signed release; invoking this is confirmation.
+    Apply,
 }
 
 #[derive(Debug, Subcommand)]
@@ -873,6 +893,34 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<i32> {
     let paths = AppPaths::discover()?;
+    let upgrade_apply = matches!(
+        &cli.command,
+        Commands::Upgrade {
+            command: UpgradeCommands::Apply { .. } | UpgradeCommands::RollbackSafe
+        }
+    );
+    let update_command = matches!(&cli.command, Commands::Update { .. });
+    let internal_daemon_child =
+        env::var_os(DAEMON_CHILD_ENV).is_some() && matches!(&cli.command, Commands::Serve(_));
+    if !upgrade_apply && !update_command && !internal_daemon_child {
+        ensure_upgrade_not_in_progress(&paths)?;
+    }
+    let auto_update_eligible = cli.endpoint.is_none()
+        && !cli.no_autostart
+        && !matches!(
+            &cli.command,
+            Commands::Call
+                | Commands::Serve(_)
+                | Commands::Daemon { .. }
+                | Commands::Upgrade { .. }
+                | Commands::Update { .. }
+                | Commands::Eval(_)
+                | Commands::Session { .. }
+        );
+    if let AutoUpdateOutcome::Reexec(executable) = maybe_auto_update(&paths, auto_update_eligible)?
+    {
+        return reexec_current_process(&executable);
+    }
     match cli.command {
         Commands::Init(args) => {
             let directory = fs::canonicalize(args.directory)?;
@@ -924,6 +972,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Commands::Upgrade { command } => {
             upgrade_command(command, cli.endpoint.as_deref(), &paths, cli.pretty).await
         }
+        Commands::Update { command } => update_command_handler(command, &paths, cli.pretty),
         Commands::Skills { command } => skills_command(command, &paths, cli.pretty),
         Commands::Compiler { command } => compiler_command(command, &paths, cli.pretty).await,
         Commands::Semantic { command } => semantic_command(command, &paths, cli.pretty).await,
@@ -1284,6 +1333,7 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         | Commands::Serve(_)
         | Commands::Daemon { .. }
         | Commands::Upgrade { .. }
+        | Commands::Update { .. }
         | Commands::Skills { .. }
         | Commands::Compiler { .. }
         | Commands::Semantic { .. }
@@ -1453,6 +1503,35 @@ async fn upgrade_command(
     }
 }
 
+fn update_command_handler(command: UpdateCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
+    let request = Request::new(Operation::ContextResolve, json!({}))?;
+    let result = match command {
+        UpdateCommands::Status => serde_json::to_value(update_status(paths)?)?,
+        UpdateCommands::Check => serde_json::to_value(check_report(paths)?)?,
+        UpdateCommands::Apply => match check_for_update(paths, true)? {
+            Some(update) => {
+                let version = update.manifest.version.clone();
+                let target = update.target.triple.clone();
+                let _ = apply_available_update(paths, &update)?;
+                json!({
+                    "updated": true,
+                    "version": version,
+                    "target": target,
+                    "reconciled": true,
+                    "next_command_uses_new_binary": true,
+                })
+            }
+            None => json!({
+                "updated": false,
+                "version": memoree::update::current_version(),
+                "reason": "already_current",
+            }),
+        },
+    };
+    print_json(&Response::success(&request, result)?, pretty);
+    Ok(0)
+}
+
 async fn apply_upgrade(
     paths: &AppPaths,
     endpoint_override: Option<&str>,
@@ -1461,6 +1540,7 @@ async fn apply_upgrade(
     pretty: bool,
 ) -> Result<i32> {
     let _upgrade_lock = UpgradeLock::acquire(paths)?;
+    record_managed_install(paths)?;
     let endpoint = resolve_endpoint(endpoint_override, paths)?;
     let observed = match probe_daemon(&endpoint).await {
         Ok(response) => Some(doctor_result(&response)?),
@@ -2398,6 +2478,7 @@ fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<()> {
         .arg(&paths.data_dir)
         .arg("--lifecycle-owner")
         .arg("memoree")
+        .env(DAEMON_CHILD_ENV, "1")
         .current_dir(&paths.data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))

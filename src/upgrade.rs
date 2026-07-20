@@ -105,17 +105,27 @@ impl Drop for UpgradeLock {
 }
 
 pub fn ensure_upgrade_not_in_progress(paths: &AppPaths) -> Result<()> {
-    let path = paths.data_dir.join(UPGRADE_LOCK_FILE);
-    if !path.exists() {
-        return Ok(());
+    for (path, activity) in [
+        (
+            paths.data_dir.join(UPGRADE_LOCK_FILE),
+            "upgrade reconciliation",
+        ),
+        (
+            paths.data_dir.join(crate::update::UPDATE_LOCK_FILE),
+            "signed automatic update",
+        ),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        let file = open_private_file(&path, false)?;
+        file.try_lock_shared().map_err(|_| {
+            MemoryError::Transport(format!(
+                "a Memoree {activity} is in progress; retry after it completes"
+            ))
+        })?;
+        file.unlock()?;
     }
-    let file = open_private_file(&path, false)?;
-    file.try_lock_shared().map_err(|_| {
-        MemoryError::Transport(
-            "a Memoree upgrade is reconciling the local store; retry after it completes".into(),
-        )
-    })?;
-    file.unlock()?;
     Ok(())
 }
 

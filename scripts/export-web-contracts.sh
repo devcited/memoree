@@ -25,15 +25,20 @@ done
 mkdir -p "$schema_dir" "$agents_dir"
 temp_dir="$(mktemp -d "$public_dir/.memoree-contracts.XXXXXXXX")"
 
-cargo run --quiet --locked --manifest-path "$repo_dir/Cargo.toml" --bin memoree -- schema \
+MEMOREE_HOME="$temp_dir/home" MEMOREE_AUTO_UPDATE=off \
+  cargo run --quiet --locked --manifest-path "$repo_dir/Cargo.toml" --bin memoree -- schema \
   > "$temp_dir/schema-envelope.json"
 jq -e 'select(.ok == true) | .result | select(type == "object")' \
   "$temp_dir/schema-envelope.json" > "$temp_dir/v1.json"
 
-cargo run --quiet --locked --manifest-path "$repo_dir/Cargo.toml" --bin memoree -- \
+MEMOREE_HOME="$temp_dir/home" MEMOREE_AUTO_UPDATE=off \
+  cargo run --quiet --locked --manifest-path "$repo_dir/Cargo.toml" --bin memoree -- \
   instructions --format markdown > "$temp_dir/instructions-envelope.json"
 jq -e -j 'select(.ok == true) | .result.content | select(type == "string")' \
   "$temp_dir/instructions-envelope.json" > "$temp_dir/instructions.md"
 
 mv -f "$temp_dir/v1.json" "$schema_dir/v1.json"
 mv -f "$temp_dir/instructions.md" "$agents_dir/instructions.md"
+MEMOREE_HOME="$temp_dir/home" MEMOREE_AUTO_UPDATE=off \
+  cargo run --quiet --locked --manifest-path "$repo_dir/Cargo.toml" --bin memoree -- \
+  daemon stop >/dev/null

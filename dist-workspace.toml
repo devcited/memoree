@@ -7,6 +7,9 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
+# The generated workflow is intentionally extended with signed update-manifest
+# publication before an immutable GitHub Release is finalized.
+allow-dirty = ["ci"]
 # memoree.dev/install.sh owns upgrade reconciliation; do not publish a second
 # binary-only installer that can leave an old daemon or schema behind.
 installers = []
