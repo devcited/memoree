@@ -20,6 +20,7 @@ use memoree::{
         init_marker, task_context,
     },
     error::{MemoryError, Result},
+    eval::run_retrieval_eval_with_models,
     protocol::{
         AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput,
         ArtifactHistoryInput, ArtifactPutInput, ArtifactReviseInput, BackupCreateInput,
@@ -33,6 +34,7 @@ use memoree::{
         CodexCompiler, REMEMBER_MODEL, REMEMBER_SCHEMA_VERSION, ValidatedClaim,
         ValidatedCompilation, deterministic_title, input_digest,
     },
+    reranker_eval::evaluate_reranker_pairs,
     service::MemoryService,
     store::{ArtifactRecord, ClaimRecord, MEMOREE_DATABASE_FILE, MutationResult, Store},
     transport::{self, Endpoint},
@@ -92,6 +94,11 @@ enum Commands {
         #[command(subcommand)]
         command: ContextCommands,
     },
+    /// Install, inspect, or rebuild the optional local semantic index.
+    Semantic {
+        #[command(subcommand)]
+        command: SemanticCommands,
+    },
     /// Run a child process with an inherited task context.
     Session {
         #[command(subcommand)]
@@ -129,6 +136,8 @@ enum Commands {
     Schema,
     /// Print implemented protocol capabilities.
     Capabilities,
+    /// Run a versioned retrieval corpus in an isolated temporary store.
+    Eval(EvalArgs),
     /// Check daemon/database health.
     Doctor,
     /// Verify database, index, and blob integrity.
@@ -166,6 +175,19 @@ struct RememberArgs {
     /// Stable logical-operation key for exact retries.
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct EvalArgs {
+    /// Corpus directory containing seed.jsonl, cases.jsonl, and baseline.json.
+    #[arg(value_name = "CORPUS_DIRECTORY")]
+    corpus: PathBuf,
+    /// Verified local semantic model directory; enables dense evaluation without downloads.
+    #[arg(long, value_name = "DIRECTORY")]
+    semantic_model: Option<PathBuf>,
+    /// Verified local ordering-only reranker directory; no downloads or qualification.
+    #[arg(long, value_name = "DIRECTORY")]
+    reranker_model: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -251,6 +273,46 @@ enum ContextCommands {
     Show,
     Explain,
     Build(ContextBuildArgs),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum SemanticCommands {
+    /// Explicitly download and verify the pinned local model, then index memory.
+    Enable {
+        /// Install a previously downloaded model directory without network I/O.
+        #[arg(long, value_name = "DIRECTORY")]
+        from_directory: Option<PathBuf>,
+    },
+    /// Rebuild the semantic projection from local authority without network I/O.
+    Rebuild,
+    /// Inspect the installed model, projection coverage, and freshness.
+    Status,
+    /// Install the pinned local cross-encoder for ordering only.
+    EnableReranker {
+        /// Install previously downloaded pinned model bytes without network I/O.
+        #[arg(long, value_name = "DIRECTORY")]
+        from_directory: Option<PathBuf>,
+    },
+    /// Inspect the ordering-only reranker and latency breaker.
+    RerankerStatus,
+    /// Calibrate and evaluate a local reranker against disjoint pair corpora.
+    EvaluateReranker {
+        /// Verified local reranker model directory; no downloads are performed.
+        #[arg(long, value_name = "DIRECTORY")]
+        model_directory: PathBuf,
+        /// JSONL pair corpus used to choose raw-logit thresholds.
+        #[arg(long, value_name = "JSONL")]
+        calibration: PathBuf,
+        /// Disjoint JSONL pair corpus evaluated only after threshold selection.
+        #[arg(long, value_name = "JSONL")]
+        heldout: PathBuf,
+        /// Exact upstream model identifier recorded in calibration output.
+        #[arg(long, default_value = memoree::semantic::RERANKER_MODEL_ID)]
+        model_id: String,
+        /// Exact immutable upstream model revision recorded in calibration output.
+        #[arg(long, default_value = memoree::semantic::RERANKER_MODEL_REVISION)]
+        model_revision: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -503,6 +565,12 @@ struct RecallArgs {
     max_artifact_refs: usize,
     #[arg(long, default_value_t = 320)]
     max_excerpt_bytes: usize,
+    /// Maximum unqualified claim suggestions (0 disables, hard maximum 5).
+    #[arg(long, default_value_t = 3)]
+    max_candidate_claims: usize,
+    /// Maximum unqualified artifact suggestions (0 disables, hard maximum 5).
+    #[arg(long, default_value_t = 3)]
+    max_candidate_artifact_refs: usize,
     #[arg(long)]
     min_commit_seq: Option<i64>,
     /// Disable the small deterministic recency rerank for this retrieval.
@@ -733,6 +801,17 @@ async fn run(cli: Cli) -> Result<i32> {
         Commands::Serve(args) => serve_daemon(args, &paths).await,
         Commands::Daemon { command } => {
             daemon_command(command, cli.endpoint.as_deref(), &paths, cli.pretty).await
+        }
+        Commands::Semantic { command } => semantic_command(command, &paths, cli.pretty),
+        Commands::Eval(args) => {
+            let report = run_retrieval_eval_with_models(
+                &args.corpus,
+                args.semantic_model.as_deref(),
+                args.reranker_model.as_deref(),
+            )
+            .await?;
+            print_json(&report, cli.pretty);
+            Ok(i32::from(!report.passed))
         }
         Commands::Context {
             command: ContextCommands::Show,
@@ -1044,6 +1123,8 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
                 max_claims: args.max_claims,
                 max_artifact_refs: args.max_artifact_refs,
                 max_excerpt_bytes: args.max_excerpt_bytes,
+                max_candidate_claims: args.max_candidate_claims,
+                max_candidate_artifact_refs: args.max_candidate_artifact_refs,
                 min_commit_seq: args.min_commit_seq,
                 recency: RecencyBiasInput {
                     enabled: !args.no_recency,
@@ -1078,6 +1159,8 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         | Commands::Pending { .. }
         | Commands::Serve(_)
         | Commands::Daemon { .. }
+        | Commands::Semantic { .. }
+        | Commands::Eval(_)
         | Commands::Context {
             command: ContextCommands::Show | ContextCommands::Explain,
         }
@@ -1093,6 +1176,50 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         materialize,
         auto_idempotency,
     })
+}
+
+fn semantic_command(command: SemanticCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
+    if let SemanticCommands::EvaluateReranker {
+        model_directory,
+        calibration,
+        heldout,
+        model_id,
+        model_revision,
+    } = &command
+    {
+        let report = evaluate_reranker_pairs(
+            model_directory,
+            calibration,
+            heldout,
+            model_id,
+            model_revision,
+        )?;
+        print_json(&serde_json::to_value(&report)?, pretty);
+        return Ok(if report.passed { 0 } else { 1 });
+    }
+    let store = Store::open(&paths.data_dir)?;
+    let output = match command {
+        SemanticCommands::Enable { from_directory } => {
+            let report = match from_directory {
+                Some(directory) => store.semantic_enable_from_directory(&directory)?,
+                None => store.semantic_enable()?,
+            };
+            serde_json::to_value(report)?
+        }
+        SemanticCommands::Rebuild => serde_json::to_value(store.semantic_rebuild()?)?,
+        SemanticCommands::Status => serde_json::to_value(store.semantic_status()?)?,
+        SemanticCommands::EnableReranker { from_directory } => {
+            let report = match from_directory {
+                Some(directory) => store.reranker_enable_from_directory(&directory)?,
+                None => store.reranker_enable()?,
+            };
+            serde_json::to_value(report)?
+        }
+        SemanticCommands::RerankerStatus => serde_json::to_value(store.reranker_status()?)?,
+        SemanticCommands::EvaluateReranker { .. } => unreachable!("handled above"),
+    };
+    print_json(&output, pretty);
+    Ok(0)
 }
 
 fn checkpoint_command(args: CheckpointArgs, paths: &AppPaths, pretty: bool) -> Result<i32> {

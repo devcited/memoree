@@ -24,6 +24,8 @@ pub const MAX_CLAIM_STATEMENT_BYTES: usize = 128 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_EVIDENCE_ITEMS: usize = 128;
 pub const MAX_SEARCH_ITEMS: usize = 100;
+pub const MAX_RECALL_CANDIDATE_CLAIMS: usize = 5;
+pub const MAX_RECALL_CANDIDATE_ARTIFACT_REFS: usize = 5;
 pub const MAX_RECALL_CLAIMS: usize = 10;
 pub const MAX_RECALL_ARTIFACT_REFS: usize = 20;
 pub const MAX_RECALL_EXCERPT_BYTES: usize = 1024;
@@ -347,7 +349,7 @@ pub struct ErrorBody {
     pub details: Value,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     NoAmbientContext,
@@ -540,7 +542,7 @@ pub struct ClaimRetractInput {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
     Artifact,
@@ -698,6 +700,14 @@ pub struct RecallInput {
     pub max_artifact_refs: usize,
     #[serde(default = "default_recall_excerpt_bytes")]
     pub max_excerpt_bytes: usize,
+    /// Unqualified retrieval suggestions to expose separately from claims.
+    /// Zero disables candidate claim suggestions.
+    #[serde(default = "default_recall_candidate_claims")]
+    pub max_candidate_claims: usize,
+    /// Unqualified retrieval suggestions to expose separately from artifact
+    /// references. Zero disables candidate artifact suggestions.
+    #[serde(default = "default_recall_candidate_artifact_refs")]
+    pub max_candidate_artifact_refs: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_commit_seq: Option<i64>,
     #[serde(default)]
@@ -714,6 +724,14 @@ fn default_recall_artifact_refs() -> usize {
 
 fn default_recall_excerpt_bytes() -> usize {
     320
+}
+
+fn default_recall_candidate_claims() -> usize {
+    3
+}
+
+fn default_recall_candidate_artifact_refs() -> usize {
+    3
 }
 
 fn default_search_limit() -> usize {
@@ -774,6 +792,31 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchRanking {
     pub policy_version: String,
+    pub lexical_policy_version: String,
+    pub trigram_policy_version: String,
+    pub fusion_policy_version: String,
+    pub query_unit_count: usize,
+    pub matched_unit_count: usize,
+    pub required_matches: usize,
+    pub lexical_coverage: f64,
+    pub phrase_group_count: usize,
+    pub matched_phrase_group_count: usize,
+    pub lexical_qualified: bool,
+    pub trigram_qualified: bool,
+    pub semantic_qualified: bool,
+    pub qualified: bool,
+    #[serde(default)]
+    pub matched_terms: Vec<String>,
+    #[serde(default)]
+    pub matched_phrase_groups: Vec<String>,
+    #[serde(default)]
+    pub trigram_matched_terms: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigram_similarity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_similarity: Option<f64>,
+    pub exact_tier: bool,
+    pub fusion_score: f64,
     pub recency_enabled: bool,
     pub recency_eligible: bool,
     pub lexical_score: f64,
@@ -785,6 +828,19 @@ pub struct SearchRanking {
     pub effective_at_basis: RecencyTimestampBasis,
     pub evaluated_at: DateTime<Utc>,
     pub decay_class: RecencyDecayClass,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct QueryAnalysis {
+    pub policy_version: String,
+    pub normalized_query: String,
+    #[serde(default)]
+    pub content_units: Vec<String>,
+    #[serde(default)]
+    pub phrase_groups: Vec<String>,
+    #[serde(default)]
+    pub dropped_stopwords: Vec<String>,
+    pub required_matches: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -807,11 +863,79 @@ pub enum RecencyDecayClass {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticRetrievalStatus {
+    pub state: String,
+    pub policy_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+    pub indexed_commit_seq: i64,
+    pub current_commit_seq: i64,
+    pub eligible_revision_count: usize,
+    pub indexed_revision_count: usize,
+    pub coverage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RerankerCircuitBreakerStatus {
+    pub state: String,
+    pub budget_ms: f64,
+    pub trip_threshold: usize,
+    pub consecutive_over_budget: usize,
+    pub probe_after_skips: usize,
+    pub skipped_since_open: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RerankerRetrievalStatus {
+    pub state: String,
+    pub policy_version: String,
+    pub role: String,
+    /// Retrieval surface governed by this status: `claim`, `artifact`, or
+    /// `control_plane` for a status-only request.
+    pub surface: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+    pub candidate_count: usize,
+    pub scored_candidate_count: usize,
+    pub ordering_applied: bool,
+    pub candidate_limit: usize,
+    pub candidate_limit_reached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_load_latency_ms: Option<f64>,
+    pub breaker: RerankerCircuitBreakerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchResult {
     pub query: String,
+    pub query_analysis: QueryAnalysis,
     pub horizon: Horizon,
     pub retrieval_mode: String,
+    pub semantic: SemanticRetrievalStatus,
+    pub reranker: RerankerRetrievalStatus,
+    pub qualification_applied: bool,
+    pub unqualified_candidate_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_unqualified_coverage: Option<f64>,
     pub hits: Vec<SearchHit>,
+    /// Internal single-snapshot partition consumed by `recall`; never emitted
+    /// from the search protocol surface.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub candidate_hits: Vec<SearchHit>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub candidate_hits_truncated: bool,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refine_hint: Option<String>,
@@ -882,14 +1006,76 @@ pub struct RecallArtifactReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CandidateRankingSignals {
+    pub lexical_coverage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigram_similarity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_similarity: Option<f64>,
+    /// Advisory ordering signal only. No qualification threshold exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker_raw_logit: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecallCandidateClaim {
+    /// Always `unqualified_candidate`; serialized per item so the warning
+    /// survives extraction from the surrounding recall response.
+    pub retrieval_tier: String,
+    pub claim_id: String,
+    pub revision_id: String,
+    pub claim_type: ClaimType,
+    pub statement: String,
+    pub statement_truncated: bool,
+    pub citation: String,
+    pub matched_by: Vec<String>,
+    pub ranking_signals: CandidateRankingSignals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecallCandidateArtifactReference {
+    /// Always `unqualified_candidate`; this is a suggestion, not remembered
+    /// fact or qualified evidence.
+    pub retrieval_tier: String,
+    pub artifact_id: String,
+    pub revision_id: String,
+    pub title: String,
+    pub citation: String,
+    pub excerpt: String,
+    pub excerpt_truncated: bool,
+    pub matched_by: Vec<String>,
+    #[serde(default)]
+    pub risk_signals: Vec<String>,
+    pub ranking_signals: CandidateRankingSignals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecallResult {
     pub content_is_untrusted: bool,
     pub query: String,
+    pub query_analysis: QueryAnalysis,
     pub searched_horizons: Vec<Horizon>,
+    pub semantic_claims: SemanticRetrievalStatus,
+    pub semantic_artifacts: SemanticRetrievalStatus,
+    pub reranker_claims: RerankerRetrievalStatus,
+    pub reranker_artifacts: RerankerRetrievalStatus,
+    /// Qualified results only. Candidate lists never affect presence.
     pub presence: RecallPresence,
     pub claims: Vec<RecallClaim>,
     pub conflicts: Vec<ConflictSummary>,
     pub artifact_refs: Vec<RecallArtifactReference>,
+    pub candidate_claims: Vec<RecallCandidateClaim>,
+    pub candidate_artifact_refs: Vec<RecallCandidateArtifactReference>,
+    pub candidate_claims_truncated: bool,
+    pub candidate_artifact_refs_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates_hint: Option<String>,
+    pub unqualified_claim_candidates: usize,
+    pub unqualified_artifact_candidates: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_unqualified_claim_coverage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_unqualified_artifact_coverage: Option<f64>,
     pub claims_truncated: bool,
     pub artifact_refs_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -905,6 +1091,8 @@ pub struct ContextBundle {
     pub max_bytes: usize,
     pub used_bytes: usize,
     pub rendered_markdown: String,
+    pub semantic: SemanticRetrievalStatus,
+    pub reranker: RerankerRetrievalStatus,
     pub manifest: Vec<BundleManifestItem>,
     /// Search had more matches than its retrieval limit. This is independent
     /// from `omitted_count`, which only reports byte-budget omissions.
@@ -1072,6 +1260,8 @@ mod tests {
         assert_eq!(input.max_claims, 5);
         assert_eq!(input.max_artifact_refs, 3);
         assert_eq!(input.max_excerpt_bytes, 320);
+        assert_eq!(input.max_candidate_claims, 3);
+        assert_eq!(input.max_candidate_artifact_refs, 3);
         assert!(input.recency.enabled);
         assert!(!Operation::MemoryRecall.is_mutating());
         assert!(Operation::MemoryRecall.needs_context());

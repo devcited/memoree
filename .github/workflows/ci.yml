@@ -43,7 +43,7 @@ jobs:
       - name: Test
         run: cargo test --locked
       - name: Retrieval regression suite
-        run: cargo run --locked --bin memoree-eval -- eval/corpus/v1
+        run: cargo run --locked --bin memoree-eval -- eval/corpus/v2
       - name: Verify generated web contracts
         if: runner.os == 'Linux'
         run: |

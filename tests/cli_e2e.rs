@@ -633,9 +633,12 @@ fn cli_round_trip_context_isolation_and_explicit_broadening() {
     );
     assert!(status.status.success(), "{search}");
     assert_eq!(search["result"]["hits"][0]["entity_id"], artifact_id);
-    assert_eq!(
-        search["result"]["hits"][0]["citation"],
-        format!("memoree://artifact/{artifact_id}@{revision_id}")
+    let citation = search["result"]["hits"][0]["citation"]
+        .as_str()
+        .expect("search citation");
+    assert!(
+        citation.starts_with(&format!("memoree://artifact/{artifact_id}@{revision_id}#")),
+        "artifact body matches must expose an exact immutable byte span: {citation}"
     );
     let (status, bundle) = invoke(
         &first,

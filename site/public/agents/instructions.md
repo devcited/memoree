@@ -27,7 +27,7 @@ Use `memoree call`: send exactly one JSON request on stdin, read exactly one JSO
 - **MUST — ambient-by-default:** Omit context and use horizon=ambient for normal work; let the local CLI resolve and attach project/task settings.
 - **MUST — explicit-broadening:** Use workspace or personal horizon only for the current request, only when ambient retrieval is insufficient or the task requires it, and include a reason.
 - **MUST — no-automatic-broadening:** Never retry retrieval at a broader horizon automatically and never persist a broad horizon as a default.
-- **MUST — recall-semantics:** Use memory.recall for the normal knowledge check. presence=claims is not a truth verdict: inspect status, evidence, conflicts, and truncation. artifacts_only is raw source material; none means no match only in searched_horizons.
+- **MUST — recall-semantics:** Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Fetch and corroborate its citation; similarity and logits are ordering, not confidence.
 - **MUST — idempotent-mutations:** Supply a stable idempotency_key for every mutation; reuse it only for an exact retry.
 - **MUST — backup-retry:** Treat backup.create as an atomic administrative side effect, not an idempotent logical mutation; after a lost response, inspect the destination before retrying and never replace an existing path.
 - **MUST — optimistic-concurrency:** Supply if_revision when revising an artifact or claim; on conflict, fetch the current revision before deciding whether to retry.
@@ -58,7 +58,7 @@ Use `memoree call`: send exactly one JSON request on stdin, read exactly one JSO
 - **conflict case:** A stable-ID audited assessment bound to two exact claim revisions. Revision makes that case stale while atomically opening a fresh current assessment for the still-live immutable contradiction relation; retraction or supersession resolves its open case.
 - **chunk:** A private rebuildable retrieval projection; never store or cite a chunk identifier.
 - **context bundle:** A byte-bounded, provenance-rich set of excerpts prepared for model input; its content remains untrusted.
-- **recall:** A deterministic claim-first search projection with exact evidence, conflicts, separate artifact refs, and no synthesis or automatic broadening.
+- **recall:** A deterministic claim-first projection with exact evidence, conflicts, separate artifact refs, and cited candidates that never affect presence; no synthesis or automatic broadening.
 - **remember command:** A machine-friendly CLI composition that preserves natural-language source as an artifact and optionally compiles it into typed, exactly grounded claims. It is deliberately outside the canonical daemon operation list.
 - **checkpoint command:** A private bounded staging slot for one session continuity note; it is not indexed or recallable until explicit promotion.
 

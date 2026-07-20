@@ -6,6 +6,8 @@ pub mod eval;
 pub mod instructions;
 pub mod protocol;
 pub mod remember;
+pub mod reranker_eval;
+pub mod semantic;
 pub mod service;
 pub mod store;
 pub mod transport;

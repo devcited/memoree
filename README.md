@@ -11,14 +11,14 @@ The project is intentionally not an agent framework and does not require MCP or 
 - **Context is ambient.** Normal calls inherit the current workspace, project, and optional task from settings or the process session. Agents do not repeat project identifiers in every command.
 - **Broader retrieval is explicit.** Search and relation listing default to the ambient project/task horizon. A caller must request `workspace` or `personal` for that request and explain why.
 - **Write scope stays ambient.** Exact gets and pins can read an entity from elsewhere, but revise, forget, retract, and relation operations cannot mutate or link outside the resolved project/task.
-- **Artifacts are stable evidence, not index identities.** Artifacts have stable identities and immutable revisions. Claims can cite a whole artifact revision or an exact byte range. The v0.1 FTS projection indexes each revision as one row; future sub-revision chunks will remain private and disposable.
+- **Artifacts are stable evidence, not index identities.** Artifacts have stable identities and immutable revisions. Claims can cite a whole artifact revision or an exact byte range. Private lexical, trigram, chunk, and vector projections are disposable; returned spans always resolve to immutable authority bytes.
 - **Correctness is part of the protocol.** Mutations are idempotent, revisions use optimistic concurrency, dependent reads can carry a commit sequence, and citations remain revision-stable.
-- **Recall is claim-first and honest.** `memory.recall` answers “do we know anything about this?” with current or disputed claims, their exact evidence revisions and byte spans, open conflicts, and a separate bounded list of raw artifact references. Its `presence` is `claims`, `artifacts_only`, or `none`; it never synthesizes an answer or broadens scope.
+- **Recall is claim-first and honest.** `memory.recall` answers “do we know anything about this?” with current or disputed claims, exact evidence spans, open conflicts, and separate artifact references. Plausible near-matches appear only in bounded `unqualified_candidate` arrays: they carry citations and ranking diagnostics but never change `presence`, become facts, or enter model context automatically.
 - **Session continuity is quarantined.** `memoree checkpoint` stages one bounded, agent-authored note per session outside the database and every retrieval surface. `memoree pending preview|apply` reuses the explicit remember flow; no transcript hook or background process can silently create memory.
 - **Model context is bounded.** `context.build` returns provenance-rich excerpts within a byte budget, keeps source lines in labelled blockquotes, reports heuristic prompt-injection signals, and always marks retrieved content as untrusted.
 - **Freshness is bounded.** Search keeps the lexical top-K candidate set, then applies a deterministic, type-aware recency bonus that can promote a current item by at most two positions. Recency never broadens scope, hides contradictions, or makes historical/future content current.
 - **Reasoning stays outside the daemon.** `context.build` returns a scoped, byte-bounded, citation-rich packet for any model. The optional caller-side `memoree remember` wrapper makes one isolated Codex CLI invocation using Luna to structure natural language; the daemon never invokes a model, receives an API key, or executes generated output.
-- **The local default stays small.** SQLite is authoritative, SQLite FTS5 provides lexical retrieval, and larger content lives in a filesystem content-addressed store.
+- **The local default stays small.** SQLite is authoritative, SQLite FTS5 plus deterministic trigram matching provides retrieval, and larger content lives in a filesystem content-addressed store. A pinned local dense projection and claim-only cross-encoder ordering are explicit installs, remain disposable, and fail open to deterministic retrieval.
 
 The v0.1 resource envelope accepts artifacts up to 8 MiB, encoded content up to 12 MiB, transport frames up to 24 MiB, and at most four concurrent connections. These conservative bounds limit JSON/base64 memory amplification until a streaming artifact transport exists. Query `capabilities` for the running binary's exact values instead of hard-coding them.
 
@@ -126,6 +126,19 @@ The final command materializes text or binary content atomically and reports the
 
 Recall is the normal agent-facing lookup. It keeps claims and raw source matches in separate arrays, attaches immutable evidence citations such as `memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END`, marks conflicted claims as `disputed`, and reports only the horizon it actually searched. `artifacts_only` means useful source material matched but no current claim did; `none` means no match at that horizon, not permission to broaden automatically.
 
+Recall also returns up to three candidate claims and artifact references by default. Every item is labelled `retrieval_tier=unqualified_candidate`; candidates never affect `presence`, omit claim status/evidence hydration, and are excluded from `context.build`. Use them as cited leads: fetch the exact revision, inspect artifact risk signals, and corroborate with a refined query before relying on one. Set either candidate limit to `0` to suppress that channel; the bounded maximum is five.
+
+Optional local semantic retrieval is candidate-only. It is installed and rebuilt deliberately; query paths never download model bytes:
+
+```sh
+memoree semantic enable
+memoree semantic status
+memoree semantic enable-reranker   # opt-in, claim ordering only
+memoree semantic reranker-status
+```
+
+Dense similarity cannot qualify an answer. Exact-tier ordering is model-independent. The cross-encoder cannot qualify or suppress evidence, is disabled for artifacts and mixed searches, warms at daemon startup, and trips open after three consecutive inference calls above its 500 ms budget. An open breaker skips later model ordering and preserves deterministic fused results; it is not a per-query latency guarantee.
+
 Recall, search, and context construction apply the bounded recency policy by default. The `memoree recall`, `memoree search`, and `memoree context build` wrappers accept `--no-recency` for one retrieval; raw `memoree call` clients can send `"recency":{"enabled":false}` on `memory.recall`, `search`, or `context.build`.
 
 `memoree remember` is the one bounded reasoning convenience in this release. It previews by default. With `--apply`, it preserves the original UTF-8 source as an ambient-scoped artifact and asserts only claims whose one or more exact evidence quotes Rust can locate uniquely in that immutable revision. Multiple spans let a claim retain a non-contiguous caveat or scope condition. The plan includes machine-readable quality findings for inline/stdin self-attestation, mutable observations without validity, and the deliberate absence of automatic graph relations. These findings expose epistemic limits; they do not let Luna certify source authority. Luna cannot choose scope, confidence, relations, conflicts, lifecycle, supersession, deletion, or whether a write occurs. Use `--raw` to bypass Codex and preserve only the artifact.
@@ -136,7 +149,7 @@ Authentication defaults strictly to the existing ChatGPT-authenticated `codex` C
 
 A preview and a later apply are independent model calls, so the applied response—not an earlier preview—is authoritative. Automated callers that already intend to persist should call `--apply` directly and inspect its returned plan and stored records. Claim mutation identity is anchored to the exact source span, so a changed compilation for the same passage conflicts instead of creating a duplicate.
 
-The compiler is deliberately fixed to `gpt-5.6-luna` at low reasoning effort for this repeatable extraction task. General answering, planning, tool use, retrieval reranking, and conflict resolution remain outside the daemon. A companion can still call `context.build`, use any suitable model, and submit explicit protocol mutations.
+The compiler is deliberately fixed to `gpt-5.6-luna` at low reasoning effort for this repeatable extraction task. General answering, planning, claim qualification, and conflict resolution remain outside the daemon. Optional pinned local models may add candidates or advisory ordering only. A companion can still call `context.build`, use any suitable model, and submit explicit protocol mutations.
 
 Mutation wrappers generate a fresh idempotency key when one is omitted. Pass `--idempotency-key` when an automated logical action may need an exact retry; reusing that key with changed input is rejected.
 
@@ -188,8 +201,9 @@ caller-side CLI (optional isolated Luna claim compilation)
       | validated protocol mutations / framed transport
       v
   memoree daemon
-      |-- SQLite: metadata, revisions, claims, relations, FTS
-      `-- filesystem CAS: content bytes addressed by BLAKE3
+      |-- SQLite: authoritative metadata, revisions, claims, relations, FTS
+      |-- filesystem CAS: content bytes addressed by BLAKE3
+      `-- optional private semantic/reranker projections (rebuildable)
 ```
 
 The SQLite database is authoritative; retrieval indexes are rebuildable. Every artifact revision is addressed and verified by digest without collapsing distinct logical artifacts. External CAS objects are physically deduplicated; small inline content may be repeated in immutable revision rows.
@@ -200,7 +214,7 @@ Read [Architecture](https://memoree.dev/docs/architecture/) for context resoluti
 
 ## Project status
 
-This repository is a usable local vertical slice. Query `capabilities` rather than assuming a roadmap feature is available; `remember` is a CLI composition and intentionally is not advertised as a daemon operation. Deterministic recency reranking and bounded Luna claim compilation are implemented; semantic retrieval, authorization, generic S3 storage, and a SeaweedFS Compose profile are not implemented yet.
+This repository is a usable local vertical slice. Query `capabilities` rather than assuming a roadmap feature is available; `remember` is a CLI composition and intentionally is not advertised as a daemon operation. Evidence-first recall, exact long-document citations, deterministic lexical/trigram fusion, optional local dense candidate retrieval, guarded claim-only cross-encoder ordering, bounded recency, and Luna claim compilation are implemented. Authorization, generic S3 storage, and a SeaweedFS Compose profile are not implemented.
 
 ## License
 

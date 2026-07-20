@@ -68,7 +68,9 @@ Recency is enabled by default for recall/search/context requests and can be disa
 
 ## Model boundary
 
-`memory.recall` is the default agent-facing knowledge check. It owns no index, embedding, model call, or alternate ranker: it projects the existing current-only search path into separate claim and artifact-reference lists. Claims carry immutable evidence spans and open contradiction IDs; `presence` distinguishes claims, artifact-only material, and no match without asserting truth or broadening scope. This moves repetitive result assembly out of every agent while keeping reasoning outside the daemon.
+`memory.recall` is the default agent-facing knowledge check. It projects one authority-filtered retrieval snapshot into separate claim and artifact-reference lists plus a separately labelled candidate channel. Claims carry immutable evidence spans and open contradiction IDs; `presence` is derived only from deterministic qualification and distinguishes claims, artifact-only material, and no qualified match without asserting truth or broadening scope. Candidates never become facts or model context automatically.
+
+SQLite authority and exact lexical/trigram tiers remain sufficient on their own. An explicitly installed Snowflake Arctic Embed S projection can add private candidate windows; cosine never qualifies an answer. A separately installed MiniLM-L12 cross-encoder may order non-exact claim candidates only. It never touches exact-tier order, artifact/mixed surfaces, qualification, scope, lifecycle, or citations. Model bytes are revision/digest pinned, installed deliberately, warmed before queries, and never downloaded by a retrieval call. Missing/error/slow ordering fails open to the deterministic fused order.
 
 `memoree checkpoint` is also caller-side. It stores one private, bounded, last-write-wins continuity note per session under a pending directory that the daemon, database, CAS, search index, recall, and context builder never inspect. Review and compiler preview remain local; only explicit `memoree pending apply` crosses the normal remember write boundary. This prevents lifecycle capture from becoming background self-mutation or artifact-only retrieval noise.
 
@@ -102,11 +104,11 @@ An explicit `derived_from`, `supports`, `contradicts`, `supersedes`, `references
 
 ### Chunk
 
-The v0.1 lexical index uses one private, rebuildable FTS row per complete artifact or claim revision; sub-revision chunking is not implemented yet. If chunk projections are added, their identifiers will remain private. Search excerpts always cite a stable artifact/claim revision, and durable evidence locators additionally carry an exact byte span. An agent fetches the cited revision before turning an excerpt into evidence, so changing the retrieval projection cannot invalidate stored claims.
+The schema-v4 lexical projection keeps private exact artifact chunks and immutable byte offsets for long content; the semantic projection uses overlapping, bounded windows no larger than 384 bytes. Projection identities never escape as authority. Search excerpts always cite a stable artifact/claim revision and, when derived from an artifact body span, the exact `[start_byte, end_byte)` bytes. Title-only matches reset to the revision citation rather than retaining a stale body span. Durable evidence locators remain exact artifact-revision spans, so rebuilding either projection cannot invalidate stored claims.
 
 ### Recall result
 
-A deterministic claim-first read for “does memory have something about this?” It returns current or disputed claims with exact evidence revisions and byte spans, open contradiction summaries, and a separate bounded list of raw artifact references. It never generates prose, assigns truth confidence, searches history, or broadens the horizon.
+A deterministic claim-first read for “does memory have something about this?” It returns current or disputed claims with exact evidence revisions and byte spans, open contradiction summaries, and a separate bounded list of raw artifact references. Up to five per-type `unqualified_candidate` suggestions may expose useful near-matches from the same snapshot without affecting `presence`; they carry exact citations but are not remembered facts. Recall never generates prose, assigns truth confidence, searches history, or broadens the horizon.
 
 ### Context bundle
 
@@ -134,4 +136,4 @@ The storage boundary is intended to admit a generic S3-compatible blob adapter l
 
 When added, SeaweedFS should remain opt-in and non-authoritative. A usable profile must include deterministic credentials, idempotent bucket creation, authenticated put/get/delete readiness checks, disk-headroom reporting, and backups that pair a database checkpoint with a blob manifest at the same commit sequence. Merely seeing a healthy SeaweedFS process is not sufficient.
 
-Postgres, external search, semantic embeddings, and model-based reranking are also deferred until measured workloads justify their additional processes and resource use. The implemented deterministic recency adjustment is deliberately not semantic reranking and adds no service or model dependency.
+Postgres and external search remain deferred. Local semantic embeddings and ordering-only reranking are optional, pinned projections admitted only behind evidence-first boundaries: authority filtering precedes model work, exact qualification remains deterministic, context bundles stay qualified-only, and resource/quality promotion gates are evaluated separately.
