@@ -6,13 +6,14 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use schemars::JsonSchema;
@@ -30,13 +31,22 @@ use crate::protocol::{
     EntityType, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES, MAX_CLAIM_STATEMENT_BYTES,
     MAX_CONFLICT_LIST_ITEMS, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS, MAX_ENCODED_CONTENT_BYTES,
     MAX_EVIDENCE_ITEMS, MAX_HISTORY_ITEMS, MAX_METADATA_BYTES, MAX_PIN_BYTES, MAX_QUERY_BYTES,
-    MAX_RELATION_LIST_ITEMS, MAX_SEARCH_ITEMS, MAX_TITLE_BYTES, RecencyDecayClass,
-    RecencyTimestampBasis, RelationListInput, RelationListItem, RelationListResult,
-    RelationPutInput, RelationType, SearchHit, SearchInput, SearchRanking, SearchResult,
+    MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RELATION_LIST_ITEMS,
+    MAX_SEARCH_ITEMS, MAX_TITLE_BYTES, QueryAnalysis, RecencyDecayClass, RecencyTimestampBasis,
+    RelationListInput, RelationListItem, RelationListResult, RelationPutInput, RelationType,
+    RerankerRetrievalStatus, SearchHit, SearchInput, SearchRanking, SearchResult,
+    SemanticRetrievalStatus,
+};
+use crate::semantic::{
+    EligibleSemanticRevision, RERANKER_ORDERING_CANDIDATE_LIMIT, RERANKER_POLICY_VERSION,
+    RerankerInstallReport, RerankerManager, SEMANTIC_POLICY_VERSION, SemanticDocument, SemanticHit,
+    SemanticInstallReport, SemanticManager,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 pub const MEMOREE_DATABASE_FILE: &str = "memoree.sqlite3";
+const SCHEMA_MIGRATION_LOCK_FILE: &str = "schema-migration.lock";
+const MIGRATION_BACKUP_DIRECTORY: &str = "migration-backups";
 const MAX_KIND_BYTES: usize = 128;
 const MAX_MEDIA_TYPE_BYTES: usize = 512;
 const MAX_ACTOR_BYTES: usize = 1024;
@@ -45,6 +55,24 @@ const MAX_RELATION_LIST_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONFLICT_LIST_ENCODED_BYTES: usize = 12 * 1024 * 1024;
 const RECENCY_POLICY_VERSION: &str = "bounded_recency_v1";
 const RECENCY_MAX_PROMOTION: usize = 2;
+const LEXICAL_POLICY_VERSION: &str = "lexical_qualification_v1";
+const TRIGRAM_POLICY_VERSION: &str = "trigram_typo_v1";
+const FUSION_POLICY_VERSION: &str = "tiered_rrf_v2";
+const RRF_K: f64 = 60.0;
+const ARTIFACT_CHUNKER_VERSION: i64 = 1;
+const ARTIFACT_CHUNK_TARGET_BYTES: usize = 2 * 1024;
+const ARTIFACT_CHUNK_MAX_BYTES: usize = 4 * 1024;
+const ARTIFACT_CHUNK_MIN_TAIL_BYTES: usize = 256;
+const SEMANTIC_WINDOW_MAX_BYTES: usize = 384;
+const SEMANTIC_WINDOW_PREFERRED_MIN_BYTES: usize = 324;
+const SEMANTIC_WINDOW_OVERLAP_BYTES: usize = 64;
+const SEMANTIC_MIN_CANDIDATE_POOL: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchQualificationPolicy {
+    Broad,
+    Qualified,
+}
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -52,7 +80,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 ) STRICT;
 INSERT OR IGNORE INTO meta(key, value) VALUES
-    ('schema_version', '3'),
+    ('schema_version', '4'),
     ('commit_seq', '0');
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -220,6 +248,38 @@ CREATE VIRTUAL TABLE IF NOT EXISTS claim_fts USING fts5(
     statement,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS artifact_trigram_fts USING fts5(
+    revision_id UNINDEXED,
+    artifact_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'trigram case_sensitive 0 remove_diacritics 1'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS claim_trigram_fts USING fts5(
+    revision_id UNINDEXED,
+    claim_id UNINDEXED,
+    statement,
+    tokenize = 'trigram case_sensitive 0 remove_diacritics 1'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS artifact_trigram_vocab
+USING fts5vocab(artifact_trigram_fts, 'row');
+CREATE VIRTUAL TABLE IF NOT EXISTS claim_trigram_vocab
+USING fts5vocab(claim_trigram_fts, 'row');
+-- This is a private, rebuildable projection. Body rows contain exact slices
+-- of the immutable artifact bytes; title rows are deliberately spanless so a
+-- title-only match can never manufacture an arbitrary body citation.
+CREATE VIRTUAL TABLE IF NOT EXISTS artifact_chunk_fts USING fts5(
+    revision_id UNINDEXED,
+    artifact_id UNINDEXED,
+    row_kind UNINDEXED,
+    ordinal UNINDEXED,
+    start_byte UNINDEXED,
+    end_byte UNINDEXED,
+    chunker_version UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 
 CREATE TRIGGER IF NOT EXISTS artifact_revision_index
 AFTER INSERT ON artifact_revisions BEGIN
@@ -229,6 +289,16 @@ END;
 CREATE TRIGGER IF NOT EXISTS claim_revision_index
 AFTER INSERT ON claim_revisions BEGIN
     INSERT INTO claim_fts(revision_id, claim_id, statement)
+    VALUES (new.id, new.claim_id, new.statement);
+END;
+CREATE TRIGGER IF NOT EXISTS artifact_revision_trigram_index
+AFTER INSERT ON artifact_revisions BEGIN
+    INSERT INTO artifact_trigram_fts(revision_id, artifact_id, title, body)
+    VALUES (new.id, new.artifact_id, new.title, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS claim_revision_trigram_index
+AFTER INSERT ON claim_revisions BEGIN
+    INSERT INTO claim_trigram_fts(revision_id, claim_id, statement)
     VALUES (new.id, new.claim_id, new.statement);
 END;
 
@@ -305,6 +375,18 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     cas: Cas,
     db_path: PathBuf,
+    semantic: SemanticManager,
+    reranker: RerankerManager,
+    schema_migration: Option<SchemaMigrationReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SchemaMigrationReport {
+    pub from_schema: i64,
+    pub to_schema: i64,
+    pub backup_destination: String,
+    pub copied_external_blobs: usize,
+    pub completed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -492,6 +574,16 @@ pub struct BackupReport {
 }
 
 impl Store {
+    pub fn inspect_schema_version(data_dir: impl AsRef<Path>) -> Result<Option<i64>> {
+        let database = data_dir.as_ref().join(MEMOREE_DATABASE_FILE);
+        if !database.is_file() {
+            return Ok(None);
+        }
+        let connection =
+            Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        preflight_schema_version(&connection)
+    }
+
     /// Open a self-contained data directory (`memoree.sqlite3` plus `blobs/`).
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
@@ -501,15 +593,32 @@ impl Store {
 
     pub fn open_paths(db_path: impl AsRef<Path>, blob_dir: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
-        if let Some(parent) = db_path.parent() {
-            ensure_private_directory(parent)?;
-        }
+        let parent = db_path
+            .parent()
+            .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?;
+        ensure_private_directory(parent)?;
+        let migration_lock = open_private_migration_lock(&parent.join(SCHEMA_MIGRATION_LOCK_FILE))?;
+        migration_lock.lock_exclusive().map_err(|error| {
+            MemoryError::Config(format!(
+                "could not acquire schema migration lock for {}: {error}",
+                db_path.display()
+            ))
+        })?;
         let mut connection = Connection::open(&db_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let existing_schema_version = preflight_schema_version(&connection)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
+        let schema_migration = match existing_schema_version {
+            Some(version) if version < SCHEMA_VERSION => Some(create_pre_migration_backup(
+                &connection,
+                &db_path,
+                blob_dir.as_ref(),
+                version,
+            )?),
+            _ => None,
+        };
         if existing_schema_version == Some(2) {
             migrate_schema_v2_to_v3(&mut connection)?;
         }
@@ -531,7 +640,10 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             cas: Cas::new(blob_dir)?,
+            semantic: SemanticManager::new(parent),
+            reranker: RerankerManager::new(parent),
             db_path,
+            schema_migration,
         })
     }
 
@@ -541,6 +653,19 @@ impl Store {
 
     pub fn cas(&self) -> &Cas {
         &self.cas
+    }
+
+    pub fn schema_migration(&self) -> Option<&SchemaMigrationReport> {
+        self.schema_migration.as_ref()
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        let connection = self.connection.lock();
+        Ok(connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn last_commit_seq(&self) -> Result<i64> {
@@ -620,6 +745,13 @@ impl Store {
                 now,
                 commit_seq,
             ],
+        )?;
+        index_artifact_revision_chunks(
+            &transaction,
+            &revision_id,
+            &artifact_id,
+            &input.title,
+            &search_text,
         )?;
 
         let record = ArtifactRecord {
@@ -745,6 +877,13 @@ impl Store {
                 now,
                 commit_seq,
             ],
+        )?;
+        index_artifact_revision_chunks(
+            &transaction,
+            &revision_id,
+            &input.artifact_id,
+            title,
+            &search_text,
         )?;
         transaction.execute(
             "UPDATE artifacts SET current_revision_id = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1772,7 +1911,15 @@ impl Store {
     }
 
     pub fn search(&self, context: &AmbientContext, input: &SearchInput) -> Result<SearchResult> {
-        self.search_filtered(context, input, None)
+        self.search_filtered(context, input, None, SearchQualificationPolicy::Broad)
+    }
+
+    pub fn search_qualified(
+        &self,
+        context: &AmbientContext,
+        input: &SearchInput,
+    ) -> Result<SearchResult> {
+        self.search_filtered(context, input, None, SearchQualificationPolicy::Qualified)
     }
 
     pub fn search_entity(
@@ -1781,7 +1928,26 @@ impl Store {
         input: &SearchInput,
         entity_type: EntityType,
     ) -> Result<SearchResult> {
-        self.search_filtered(context, input, Some(entity_type))
+        self.search_filtered(
+            context,
+            input,
+            Some(entity_type),
+            SearchQualificationPolicy::Broad,
+        )
+    }
+
+    pub fn search_entity_qualified(
+        &self,
+        context: &AmbientContext,
+        input: &SearchInput,
+        entity_type: EntityType,
+    ) -> Result<SearchResult> {
+        self.search_filtered(
+            context,
+            input,
+            Some(entity_type),
+            SearchQualificationPolicy::Qualified,
+        )
     }
 
     fn search_filtered(
@@ -1789,6 +1955,7 @@ impl Store {
         context: &AmbientContext,
         input: &SearchInput,
         entity_type: Option<EntityType>,
+        qualification_policy: SearchQualificationPolicy,
     ) -> Result<SearchResult> {
         validate_context(context)?;
         if let Some(reason) = &input.reason
@@ -1798,7 +1965,8 @@ impl Store {
                 "search reason must not exceed {MAX_REASON_BYTES} bytes"
             )));
         }
-        let query = fts_query(&input.query)?;
+        let query_analysis = analyze_query(&input.query)?;
+        let query = query_analysis.fts_expression();
         if input.limit == 0 || input.limit > MAX_SEARCH_ITEMS {
             return Err(MemoryError::InvalidRequest(format!(
                 "search limit must be between 1 and {MAX_SEARCH_ITEMS}"
@@ -1819,7 +1987,7 @@ impl Store {
             });
         }
 
-        let candidate_limit = i64::try_from((input.limit + 1).saturating_mul(2))
+        let candidate_limit = i64::try_from((input.limit + 1).saturating_mul(8))
             .map_err(|_| MemoryError::InvalidRequest("search limit is too large".into()))?;
         let (pin_artifacts, exact_revision_pins) = normalized_artifact_pins(&context.pins);
         let pins = serde_json::to_string(&pin_artifacts)?;
@@ -1835,7 +2003,8 @@ impl Store {
                     a.status, a.workspace_id, a.project_id, a.task_id, a.component,
                     a.kind, ar.provenance_json, ar.created_at,
                     a.current_revision_id = ar.id,
-                    bm25(artifact_fts, 0.0, 0.0, 5.0, 1.0)
+                    bm25(artifact_fts, 0.0, 0.0, 5.0, 1.0), ar.commit_seq,
+                    artifact_fts.rowid
              FROM artifact_fts
              JOIN artifact_revisions ar ON ar.id = artifact_fts.revision_id
              JOIN artifacts a ON a.id = ar.artifact_id
@@ -1882,7 +2051,8 @@ impl Store {
                       ELSE 'current'
                     END,
                     cr.created_at,
-                    bm25(claim_fts, 0.0, 0.0, 1.0)
+                    bm25(claim_fts, 0.0, 0.0, 1.0), cr.commit_seq,
+                    claim_fts.rowid
              FROM claim_fts
              JOIN claim_revisions cr ON cr.id = claim_fts.revision_id
              JOIN claims c ON c.id = cr.claim_id
@@ -1920,25 +2090,148 @@ impl Store {
             }
         }
 
-        hits.sort_by(|left, right| {
-            right
-                .hit
-                .score
-                .partial_cmp(&left.hit.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.hit.entity_id.cmp(&right.hit.entity_id))
-        });
+        annotate_lexical_matches(&connection, &mut hits, &query_analysis)?;
+        if !hits.iter().any(|candidate| {
+            candidate.hit.ranking.qualified && candidate.hit.ranking.lexical_coverage == 1.0
+        }) {
+            append_trigram_candidates(
+                &connection,
+                context,
+                input,
+                entity_type,
+                &query_analysis,
+                candidate_limit,
+                evaluated_at,
+                &mut hits,
+            )?;
+            annotate_lexical_matches(&connection, &mut hits, &query_analysis)?;
+        }
+        let eligible_semantic =
+            eligible_semantic_revisions(&connection, context, input, entity_type, evaluated_at)?;
+        let semantic_limit = usize::try_from(candidate_limit)
+            .map_err(|_| MemoryError::InvalidRequest("search limit is too large".into()))?
+            .max(SEMANTIC_MIN_CANDIDATE_POOL);
+        let (semantic_hits, mut semantic) = match self.semantic.search(
+            &input.query,
+            &eligible_semantic,
+            semantic_limit,
+            current_seq,
+        ) {
+            Ok(result) => result,
+            Err(error) => (
+                Vec::new(),
+                SemanticRetrievalStatus {
+                    state: "error".into(),
+                    policy_version: SEMANTIC_POLICY_VERSION.into(),
+                    model_id: None,
+                    model_revision: None,
+                    indexed_commit_seq: 0,
+                    current_commit_seq: current_seq,
+                    eligible_revision_count: eligible_semantic.len(),
+                    indexed_revision_count: 0,
+                    coverage: 0.0,
+                    reason: Some(format!(
+                        "semantic retrieval failed closed; lexical retrieval remains available: {error}"
+                    )),
+                },
+            ),
+        };
+        if let Err(error) =
+            append_semantic_candidates(&connection, &semantic_hits, evaluated_at, &mut hits)
+        {
+            semantic.state = "error".into();
+            semantic.reason = Some(format!(
+                "semantic candidates failed closed; lexical retrieval remains available: {error}"
+            ));
+        }
+        finalize_trigram_qualification_and_fusion(&mut hits);
+        let unqualified_candidate_count = hits
+            .iter()
+            .filter(|candidate| !candidate.hit.ranking.qualified)
+            .count();
+        let best_unqualified_coverage = hits
+            .iter()
+            .filter(|candidate| !candidate.hit.ranking.qualified)
+            .map(|candidate| candidate.hit.ranking.lexical_coverage)
+            .max_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+        select_artifact_citation_spans(&connection, &mut hits, &query_analysis)?;
+        let mut hits = rerank_with_recency(hits, input.recency.enabled, evaluated_at);
+        let reranker = match order_hits_with_reranker(
+            &self.reranker,
+            entity_type,
+            &input.query,
+            &mut hits,
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                let mut status = RerankerRetrievalStatus::disabled_on_surface(
+                    hits.iter().filter(|hit| !hit.ranking.exact_tier).count(),
+                    match entity_type {
+                        Some(EntityType::Artifact) => "artifact",
+                        Some(EntityType::Claim) => "claim",
+                        None => "mixed",
+                    },
+                    format!(
+                        "reranker ordering failed open; deterministic fused order remains available: {error}"
+                    ),
+                );
+                status.state = "error".into();
+                status
+            }
+        };
+        let candidate_partition_limit =
+            MAX_RECALL_CANDIDATE_CLAIMS.max(MAX_RECALL_CANDIDATE_ARTIFACT_REFS);
+        let mut candidate_entity_ids = BTreeSet::new();
+        let candidate_hit_count = hits
+            .iter()
+            .filter(|hit| !hit.ranking.qualified)
+            .filter(|hit| candidate_entity_ids.insert(hit.entity_id.clone()))
+            .count();
+        candidate_entity_ids.clear();
+        let candidate_hits = hits
+            .iter()
+            .filter(|hit| !hit.ranking.qualified)
+            .filter(|hit| candidate_entity_ids.insert(hit.entity_id.clone()))
+            .take(candidate_partition_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidate_hits_truncated = candidate_hit_count > candidate_hits.len();
+        if qualification_policy == SearchQualificationPolicy::Qualified {
+            hits.retain(|hit| hit.ranking.qualified);
+        }
+        retain_conflicted_hits_within_limit(&mut hits, input.limit);
         let truncated = hits.len() > input.limit;
         hits.truncate(input.limit);
-        let hits = rerank_with_recency(hits, input.recency.enabled, evaluated_at);
+        let semantic_component = (semantic.model_id.is_some()
+            && semantic.eligible_revision_count > 0
+            && semantic.state != "error")
+            .then_some(SEMANTIC_POLICY_VERSION);
+        let mut retrieval_mode = format!(
+            "sqlite_fts5_bm25+{LEXICAL_POLICY_VERSION}+{TRIGRAM_POLICY_VERSION}+{FUSION_POLICY_VERSION}"
+        );
+        if let Some(component) = semantic_component {
+            retrieval_mode.push('+');
+            retrieval_mode.push_str(component);
+        }
+        if reranker.ordering_applied {
+            retrieval_mode.push('+');
+            retrieval_mode.push_str(RERANKER_POLICY_VERSION);
+        }
+        if input.recency.enabled {
+            retrieval_mode.push('+');
+            retrieval_mode.push_str(RECENCY_POLICY_VERSION);
+        }
         Ok(SearchResult {
             query: input.query.clone(),
+            query_analysis: query_analysis.public(),
             horizon: input.horizon,
-            retrieval_mode: if input.recency.enabled {
-                format!("sqlite_fts5_bm25+{RECENCY_POLICY_VERSION}")
-            } else {
-                "sqlite_fts5_bm25".into()
-            },
+            retrieval_mode,
+            semantic,
+            reranker,
+            qualification_applied: qualification_policy
+                == SearchQualificationPolicy::Qualified,
+            unqualified_candidate_count,
+            best_unqualified_coverage,
             broaden_hint: if hits.is_empty() && matches!(input.horizon, Horizon::Ambient) {
                 Some(
                     "No ambient matches. Retry explicitly with horizon=workspace (and a reason) if broader precedent is needed."
@@ -1948,6 +2241,8 @@ impl Store {
                 None
             },
             hits,
+            candidate_hits,
+            candidate_hits_truncated,
             truncated,
             refine_hint: truncated.then(|| {
                 format!(
@@ -1965,12 +2260,329 @@ impl Store {
             "DELETE FROM artifact_fts;
              INSERT INTO artifact_fts(revision_id, artifact_id, title, body)
                SELECT id, artifact_id, title, search_text FROM artifact_revisions;
+             DELETE FROM artifact_trigram_fts;
+             INSERT INTO artifact_trigram_fts(revision_id, artifact_id, title, body)
+               SELECT id, artifact_id, title, search_text FROM artifact_revisions;
+             DELETE FROM artifact_chunk_fts;
              DELETE FROM claim_fts;
              INSERT INTO claim_fts(revision_id, claim_id, statement)
+               SELECT id, claim_id, statement FROM claim_revisions;
+             DELETE FROM claim_trigram_fts;
+             INSERT INTO claim_trigram_fts(revision_id, claim_id, statement)
                SELECT id, claim_id, statement FROM claim_revisions;",
         )?;
+        rebuild_artifact_chunk_index(&transaction)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Explicitly download, verify, and install the pinned semantic model,
+    /// then rebuild the disposable dense projection. Queries never call this
+    /// path and therefore never download model files.
+    pub fn semantic_enable(&self) -> Result<SemanticInstallReport> {
+        let manifest = self.semantic.install_model()?;
+        let (documents, indexed_commit_seq) = self.semantic_documents()?;
+        let (_, rebuild) = self.semantic.rebuild(&documents, indexed_commit_seq)?;
+        Ok(SemanticInstallReport {
+            enabled: true,
+            model_id: manifest.model_id,
+            model_revision: manifest.model_revision,
+            model_directory: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/model")
+                .display()
+                .to_string(),
+            projection_database: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/semantic.sqlite3")
+                .display()
+                .to_string(),
+            document_count: documents.len(),
+            vector_count: rebuild.vector_count,
+            reused_vector_count: rebuild.reused_vector_count,
+            embedded_vector_count: rebuild.embedded_vector_count,
+            deleted_vector_count: rebuild.deleted_vector_count,
+            indexed_commit_seq,
+        })
+    }
+
+    /// Install a previously verified local model directory, then rebuild the
+    /// projection without any network-backed model resolution.
+    pub fn semantic_enable_from_directory(&self, source: &Path) -> Result<SemanticInstallReport> {
+        let manifest = self.semantic.install_model_from_directory(source)?;
+        let (documents, indexed_commit_seq) = self.semantic_documents()?;
+        let (_, rebuild) = self.semantic.rebuild(&documents, indexed_commit_seq)?;
+        Ok(SemanticInstallReport {
+            enabled: true,
+            model_id: manifest.model_id,
+            model_revision: manifest.model_revision,
+            model_directory: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/model")
+                .display()
+                .to_string(),
+            projection_database: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/semantic.sqlite3")
+                .display()
+                .to_string(),
+            document_count: documents.len(),
+            vector_count: rebuild.vector_count,
+            reused_vector_count: rebuild.reused_vector_count,
+            embedded_vector_count: rebuild.embedded_vector_count,
+            deleted_vector_count: rebuild.deleted_vector_count,
+            indexed_commit_seq,
+        })
+    }
+
+    /// Rebuild an already installed semantic projection without network I/O.
+    pub fn semantic_rebuild(&self) -> Result<SemanticInstallReport> {
+        let (documents, indexed_commit_seq) = self.semantic_documents()?;
+        let (manifest, rebuild) = self.semantic.rebuild(&documents, indexed_commit_seq)?;
+        Ok(SemanticInstallReport {
+            enabled: true,
+            model_id: manifest.model_id,
+            model_revision: manifest.model_revision,
+            model_directory: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/model")
+                .display()
+                .to_string(),
+            projection_database: self
+                .db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("semantic/semantic.sqlite3")
+                .display()
+                .to_string(),
+            document_count: documents.len(),
+            vector_count: rebuild.vector_count,
+            reused_vector_count: rebuild.reused_vector_count,
+            embedded_vector_count: rebuild.embedded_vector_count,
+            deleted_vector_count: rebuild.deleted_vector_count,
+            indexed_commit_seq,
+        })
+    }
+
+    /// Report optional dense-projection readiness across all currently
+    /// recallable revisions without loading the inference runtime.
+    pub fn semantic_status(&self) -> Result<SemanticRetrievalStatus> {
+        let connection = self.connection.lock();
+        let current_commit_seq: i64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'commit_seq'",
+            [],
+            |row| row.get(0),
+        )?;
+        let evaluated_at = Utc::now();
+        let mut eligible = BTreeMap::new();
+        {
+            let mut statement = connection.prepare(
+                "SELECT ar.id, a.id, ar.blob_hash
+                   FROM artifact_revisions ar
+                   JOIN artifacts a ON a.id = ar.artifact_id
+                  WHERE a.status = 'active' AND a.current_revision_id = ar.id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (revision_id, entity_id, revision_hash) = row?;
+                eligible.insert(
+                    revision_id,
+                    EligibleSemanticRevision {
+                        entity_type: EntityType::Artifact,
+                        entity_id,
+                        revision_hash,
+                    },
+                );
+            }
+        }
+        {
+            let mut statement = connection.prepare(
+                "SELECT cr.id, c.id, cr.statement
+                   FROM claim_revisions cr
+                   JOIN claims c ON c.id = cr.claim_id
+                  WHERE c.status IN ('active', 'conflicted')
+                    AND c.current_revision_id = cr.id
+                    AND (c.valid_from IS NULL OR c.valid_from <= ?1)
+                    AND (c.valid_until IS NULL OR c.valid_until > ?1)",
+            )?;
+            let rows = statement.query_map([evaluated_at], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (revision_id, entity_id, statement) = row?;
+                eligible.insert(
+                    revision_id,
+                    EligibleSemanticRevision {
+                        entity_type: EntityType::Claim,
+                        entity_id,
+                        revision_hash: semantic_claim_revision_hash(&statement),
+                    },
+                );
+            }
+        }
+        drop(connection);
+        self.semantic.status(current_commit_seq, &eligible)
+    }
+
+    pub fn semantic_model_installed(&self) -> bool {
+        self.semantic.is_installed()
+    }
+
+    /// Explicitly download and digest-pin the provisional ordering-only
+    /// reranker. This never enables answer qualification.
+    pub fn reranker_enable(&self) -> Result<RerankerInstallReport> {
+        self.reranker.install_model()
+    }
+
+    /// Install already downloaded reranker bytes without network access.
+    pub fn reranker_enable_from_directory(&self, source: &Path) -> Result<RerankerInstallReport> {
+        self.reranker.install_model_from_directory(source)
+    }
+
+    pub fn reranker_status(&self) -> Result<RerankerRetrievalStatus> {
+        self.reranker.status()
+    }
+
+    pub fn reranker_model_installed(&self) -> bool {
+        self.reranker.is_installed()
+    }
+
+    fn semantic_documents(&self) -> Result<(Vec<SemanticDocument>, i64)> {
+        let connection = self.connection.lock();
+        let indexed_commit_seq: i64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'commit_seq'",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut documents = Vec::new();
+        let artifact_revisions = {
+            let mut statement = connection.prepare(
+                "SELECT id, artifact_id, title, blob_hash, commit_seq
+                   FROM artifact_revisions ORDER BY commit_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (revision_id, artifact_id, title, revision_hash, commit_seq) in artifact_revisions {
+            let mut semantic_ordinal = 0usize;
+            for span in semantic_window_spans(&title) {
+                documents.push(SemanticDocument {
+                    entity_type: EntityType::Artifact,
+                    entity_id: artifact_id.clone(),
+                    revision_id: revision_id.clone(),
+                    ordinal: semantic_ordinal,
+                    start_byte: None,
+                    end_byte: None,
+                    revision_hash: revision_hash.clone(),
+                    text: title[span.start_byte..span.end_byte].to_owned(),
+                    commit_seq,
+                });
+                semantic_ordinal += 1;
+            }
+            let chunks = {
+                let mut statement = connection.prepare(
+                    "SELECT CAST(ordinal AS INTEGER), CAST(start_byte AS INTEGER),
+                            CAST(end_byte AS INTEGER), body
+                       FROM artifact_chunk_fts
+                      WHERE revision_id = ?1 AND row_kind = 'body'
+                      ORDER BY CAST(ordinal AS INTEGER)",
+                )?;
+                let rows = statement.query_map([&revision_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (_authority_ordinal, authority_start, authority_end, body) in chunks {
+                let authority_start =
+                    usize::try_from(authority_start).map_err(|_| MemoryError::ContentTooLarge)?;
+                let authority_end =
+                    usize::try_from(authority_end).map_err(|_| MemoryError::ContentTooLarge)?;
+                if authority_end.saturating_sub(authority_start) != body.len() {
+                    return Err(MemoryError::Integrity(format!(
+                        "artifact authority chunk byte span does not match its body for revision {revision_id}"
+                    )));
+                }
+                for span in semantic_window_spans(&body) {
+                    documents.push(SemanticDocument {
+                        entity_type: EntityType::Artifact,
+                        entity_id: artifact_id.clone(),
+                        revision_id: revision_id.clone(),
+                        ordinal: semantic_ordinal,
+                        start_byte: Some(authority_start + span.start_byte),
+                        end_byte: Some(authority_start + span.end_byte),
+                        revision_hash: revision_hash.clone(),
+                        text: body[span.start_byte..span.end_byte].to_owned(),
+                        commit_seq,
+                    });
+                    semantic_ordinal += 1;
+                }
+            }
+        }
+        let claim_revisions = {
+            let mut statement = connection.prepare(
+                "SELECT id, claim_id, statement, commit_seq
+                   FROM claim_revisions ORDER BY commit_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (revision_id, claim_id, statement, commit_seq) in claim_revisions {
+            let revision_hash = semantic_claim_revision_hash(&statement);
+            for (ordinal, span) in semantic_window_spans(&statement).into_iter().enumerate() {
+                documents.push(SemanticDocument {
+                    entity_type: EntityType::Claim,
+                    entity_id: claim_id.clone(),
+                    revision_id: revision_id.clone(),
+                    ordinal,
+                    start_byte: None,
+                    end_byte: None,
+                    revision_hash: revision_hash.clone(),
+                    text: statement[span.start_byte..span.end_byte].to_owned(),
+                    commit_seq,
+                });
+            }
+        }
+        Ok((documents, indexed_commit_seq))
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
@@ -2077,6 +2689,14 @@ impl Store {
             connection.query_row("SELECT COUNT(*) FROM artifact_fts", [], |row| row.get(0))?;
         let claim_fts_count: i64 =
             connection.query_row("SELECT COUNT(*) FROM claim_fts", [], |row| row.get(0))?;
+        let artifact_trigram_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM artifact_trigram_fts", [], |row| {
+                row.get(0)
+            })?;
+        let claim_trigram_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM claim_trigram_fts", [], |row| {
+                row.get(0)
+            })?;
         if artifact_fts_count != checked_artifact_revisions as i64 {
             issues.push(format!(
                 "artifact FTS row count {artifact_fts_count} differs from revision count {checked_artifact_revisions}"
@@ -2086,6 +2706,131 @@ impl Store {
             issues.push(format!(
                 "claim FTS row count {claim_fts_count} differs from revision count {checked_claim_revisions}"
             ));
+        }
+        if artifact_trigram_count != checked_artifact_revisions as i64 {
+            issues.push(format!(
+                "artifact trigram row count {artifact_trigram_count} differs from revision count {checked_artifact_revisions}"
+            ));
+        }
+        if claim_trigram_count != checked_claim_revisions as i64 {
+            issues.push(format!(
+                "claim trigram row count {claim_trigram_count} differs from revision count {checked_claim_revisions}"
+            ));
+        }
+        let mismatched_artifact_trigrams: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifact_trigram_fts f
+              LEFT JOIN artifact_revisions ar ON ar.id = f.revision_id
+             WHERE ar.id IS NULL OR f.artifact_id <> ar.artifact_id
+                OR f.title <> ar.title OR f.body <> ar.search_text",
+            [],
+            |row| row.get(0),
+        )?;
+        if mismatched_artifact_trigrams > 0 {
+            issues.push(format!(
+                "{mismatched_artifact_trigrams} artifact trigram rows differ from their authoritative revision text"
+            ));
+        }
+        let mismatched_claim_trigrams: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM claim_trigram_fts f
+              LEFT JOIN claim_revisions cr ON cr.id = f.revision_id
+             WHERE cr.id IS NULL OR f.claim_id <> cr.claim_id
+                OR f.statement <> cr.statement",
+            [],
+            |row| row.get(0),
+        )?;
+        if mismatched_claim_trigrams > 0 {
+            issues.push(format!(
+                "{mismatched_claim_trigrams} claim trigram rows differ from their authoritative revision text"
+            ));
+        }
+        let malformed_chunk_rows: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifact_chunk_fts f
+              LEFT JOIN artifact_revisions ar ON ar.id = f.revision_id
+             WHERE ar.id IS NULL OR ar.artifact_id <> f.artifact_id
+                OR CAST(f.chunker_version AS INTEGER) <> ?1
+                OR (f.row_kind = 'title' AND (
+                      f.ordinal IS NOT NULL OR f.start_byte IS NOT NULL
+                      OR f.end_byte IS NOT NULL OR f.title <> ar.title OR f.body <> ''))
+                OR (f.row_kind = 'body' AND (
+                      f.ordinal IS NULL OR f.start_byte IS NULL OR f.end_byte IS NULL
+                      OR f.title <> '' OR CAST(f.start_byte AS INTEGER) < 0
+                      OR CAST(f.end_byte AS INTEGER) <= CAST(f.start_byte AS INTEGER)))
+                OR f.row_kind NOT IN ('title', 'body')",
+            [ARTIFACT_CHUNKER_VERSION],
+            |row| row.get(0),
+        )?;
+        if malformed_chunk_rows > 0 {
+            issues.push(format!(
+                "{malformed_chunk_rows} artifact chunk rows have invalid ownership, kind, version, or span metadata"
+            ));
+        }
+        let wrong_title_row_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifact_revisions ar
+              WHERE (SELECT COUNT(*) FROM artifact_chunk_fts f
+                      WHERE f.revision_id = ar.id AND f.row_kind = 'title') <> 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if wrong_title_row_count > 0 {
+            issues.push(format!(
+                "{wrong_title_row_count} artifact revisions do not have exactly one spanless title row"
+            ));
+        }
+        let revision_chunk_sources = {
+            let mut statement = connection.prepare(
+                "SELECT id, search_text, blob_hash, blob_size
+                   FROM artifact_revisions ORDER BY commit_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (revision_id, search_text, blob_hash, blob_size) in revision_chunk_sources {
+            let body_rows = {
+                let mut statement = connection.prepare(
+                    "SELECT CAST(ordinal AS INTEGER), CAST(start_byte AS INTEGER),
+                            CAST(end_byte AS INTEGER), body
+                       FROM artifact_chunk_fts
+                      WHERE revision_id = ?1 AND row_kind = 'body'
+                      ORDER BY CAST(ordinal AS INTEGER)",
+                )?;
+                let rows = statement.query_map([&revision_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let byte_identical = i64::try_from(search_text.len()).ok() == Some(blob_size)
+                && blake3::hash(search_text.as_bytes()).to_hex().to_string() == blob_hash;
+            let expected = if byte_identical {
+                artifact_chunk_spans(&search_text)
+            } else {
+                Vec::new()
+            };
+            let valid = body_rows.len() == expected.len()
+                && body_rows.iter().zip(&expected).enumerate().all(
+                    |(ordinal, ((stored_ordinal, start, end, body), span))| {
+                        usize::try_from(*stored_ordinal).ok() == Some(ordinal)
+                            && usize::try_from(*start).ok() == Some(span.start_byte)
+                            && usize::try_from(*end).ok() == Some(span.end_byte)
+                            && body == &search_text[span.start_byte..span.end_byte]
+                    },
+                );
+            if !valid {
+                issues.push(format!(
+                    "artifact revision {revision_id} chunk rows are not a dense, exact byte partition"
+                ));
+            }
         }
         let broken_relations: i64 = connection.query_row(
             "SELECT COUNT(*) FROM relations r WHERE
@@ -2372,6 +3117,182 @@ impl Store {
     }
 }
 
+fn open_private_migration_lock(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn create_pre_migration_backup(
+    connection: &Connection,
+    db_path: &Path,
+    blob_dir: &Path,
+    from_schema: i64,
+) -> Result<SchemaMigrationReport> {
+    let data_dir = db_path
+        .parent()
+        .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?;
+    let backup_root = data_dir.join(MIGRATION_BACKUP_DIRECTORY);
+    ensure_private_directory(&backup_root)?;
+    preflight_migration_backup_space(db_path, blob_dir, &backup_root)?;
+
+    let completed_at = Utc::now();
+    let destination = backup_root.join(format!(
+        "schema-{from_schema}-to-{SCHEMA_VERSION}-{}-{}",
+        completed_at.format("%Y%m%dT%H%M%SZ"),
+        Ulid::r#gen()
+    ));
+    ensure_backup_destination_absent(&destination)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".memoree-migration-stage-")
+        .tempdir_in(&backup_root)?;
+    ensure_private_directory(staging.path())?;
+    let staged_database_path = staging.path().join(MEMOREE_DATABASE_FILE);
+    let staged_blobs_path = staging.path().join("blobs");
+
+    let mut destination_connection = Connection::open(&staged_database_path)?;
+    {
+        let backup = rusqlite::backup::Backup::new(connection, &mut destination_connection)?;
+        backup.run_to_completion(64, Duration::from_millis(5), None)?;
+    }
+    let integrity: String =
+        destination_connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(MemoryError::Integrity(format!(
+            "pre-migration SQLite snapshot failed integrity_check: {integrity}"
+        )));
+    }
+    drop(destination_connection);
+    set_sqlite_file_permissions(&staged_database_path)?;
+
+    let source_cas = Cas::new(blob_dir)?;
+    verify_referenced_external_blobs(connection, &source_cas)?;
+    let copied_external_blobs = source_cas.copy_external_to(&staged_blobs_path)?;
+    let copied_report = Cas::new(&staged_blobs_path)?.verify_all_external()?;
+    if !copied_report.is_ok() {
+        return Err(MemoryError::Integrity(format!(
+            "pre-migration CAS snapshot failed verification: {}",
+            copied_report.issues.join("; ")
+        )));
+    }
+
+    let manifest_path = staging.path().join("migration.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": 1,
+            "from_schema": from_schema,
+            "to_schema": SCHEMA_VERSION,
+            "database": MEMOREE_DATABASE_FILE,
+            "blobs": "blobs",
+            "copied_external_blobs": copied_external_blobs,
+            "created_at": completed_at,
+            "restore": "Stop Memoree, replace the data directory database and blobs with this snapshot, then reinstall the matching older binary."
+        }))?,
+    )?;
+    set_private_regular_file(&manifest_path)?;
+    sync_backup_tree(staging.path())?;
+    atomic_publish_backup(staging.path(), &destination)?;
+    sync_directory_best_effort(&backup_root);
+
+    Ok(SchemaMigrationReport {
+        from_schema,
+        to_schema: SCHEMA_VERSION,
+        backup_destination: destination.display().to_string(),
+        copied_external_blobs,
+        completed_at,
+    })
+}
+
+fn preflight_migration_backup_space(
+    db_path: &Path,
+    blob_dir: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let sqlite_bytes = sqlite_live_bytes(db_path)?;
+    let required = sqlite_bytes
+        .saturating_mul(4)
+        .saturating_add(directory_regular_file_bytes(blob_dir)?)
+        .saturating_add(64 * 1024 * 1024);
+    let available = fs2::available_space(destination)?;
+    if available < required {
+        return Err(MemoryError::Config(format!(
+            "insufficient free space for schema migration backup: need at least {required} bytes, have {available} bytes in {}",
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+fn sqlite_live_bytes(db_path: &Path) -> Result<u64> {
+    let mut total = fs::metadata(db_path)?.len();
+    for suffix in ["-wal", "-shm"] {
+        let mut value = db_path.as_os_str().to_owned();
+        value.push(suffix);
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            total = total.saturating_add(fs::metadata(path)?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn directory_regular_file_bytes(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            total = total.saturating_add(directory_regular_file_bytes(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn verify_referenced_external_blobs(connection: &Connection, cas: &Cas) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT blob_hash, blob_size
+           FROM artifact_revisions
+          WHERE inline_blob IS NULL",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(BlobRef {
+            hash: row.get(0)?,
+            size_bytes: row.get::<_, i64>(1)? as u64,
+            inline_bytes: None,
+        })
+    })?;
+    for row in rows {
+        cas.verify(&row?)?;
+    }
+    Ok(())
+}
+
+fn set_private_regular_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn preflight_schema_version(connection: &Connection) -> Result<Option<i64>> {
     let object_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master
@@ -2424,6 +3345,9 @@ fn migrate_schema(connection: &mut Connection) -> Result<()> {
     )?;
     if version == SCHEMA_VERSION {
         return Ok(());
+    }
+    if version == 3 {
+        return migrate_schema_v3_to_v4(connection);
     }
     if version != 1 {
         return Err(MemoryError::Config(format!(
@@ -2545,6 +3469,88 @@ fn migrate_schema(connection: &mut Connection) -> Result<()> {
          UPDATE meta SET value = '3' WHERE key = 'schema_version';",
     )?;
     transaction.commit()?;
+    migrate_schema_v3_to_v4(connection)
+}
+
+fn migrate_schema_v3_to_v4(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "DELETE FROM artifact_trigram_fts;
+         INSERT INTO artifact_trigram_fts(revision_id, artifact_id, title, body)
+           SELECT id, artifact_id, title, search_text FROM artifact_revisions;
+         DELETE FROM claim_trigram_fts;
+         INSERT INTO claim_trigram_fts(revision_id, claim_id, statement)
+           SELECT id, claim_id, statement FROM claim_revisions;
+         DELETE FROM artifact_chunk_fts;",
+    )?;
+    rebuild_artifact_chunk_index(&transaction)?;
+    transaction.execute(
+        "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+        [],
+    )?;
+    verify_schema_v4_transaction(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn verify_schema_v4_transaction(transaction: &Transaction<'_>) -> Result<()> {
+    let integrity: String =
+        transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration failed SQLite integrity_check before commit: {integrity}"
+        )));
+    }
+    let foreign_key_violation: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if foreign_key_violation {
+        return Err(MemoryError::Integrity(
+            "schema migration introduced a foreign-key violation".into(),
+        ));
+    }
+    let version: i64 = transaction.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if version != SCHEMA_VERSION {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration staged version {version}, expected {SCHEMA_VERSION}"
+        )));
+    }
+    let missing_artifact_trigrams: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_revisions ar
+          WHERE NOT EXISTS (
+            SELECT 1 FROM artifact_trigram_fts tf WHERE tf.revision_id = ar.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_claim_trigrams: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM claim_revisions cr
+          WHERE NOT EXISTS (
+            SELECT 1 FROM claim_trigram_fts tf WHERE tf.revision_id = cr.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_artifact_chunks: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_revisions ar
+          WHERE NOT EXISTS (
+            SELECT 1 FROM artifact_chunk_fts cf WHERE cf.revision_id = ar.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_artifact_trigrams != 0 || missing_claim_trigrams != 0 || missing_artifact_chunks != 0
+    {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration projection verification failed before commit: missing artifact trigrams={missing_artifact_trigrams}, claim trigrams={missing_claim_trigrams}, artifact chunks={missing_artifact_chunks}"
+        )));
+    }
     Ok(())
 }
 
@@ -3238,6 +4244,8 @@ struct ArtifactSearchRow {
     revision_created_at: DateTime<Utc>,
     is_current_revision: bool,
     rank: f64,
+    commit_seq: i64,
+    index_rowid: i64,
 }
 
 fn search_artifact_row(row: &Row<'_>) -> rusqlite::Result<ArtifactSearchRow> {
@@ -3259,6 +4267,8 @@ fn search_artifact_row(row: &Row<'_>) -> rusqlite::Result<ArtifactSearchRow> {
         revision_created_at: row.get(11)?,
         is_current_revision: row.get(12)?,
         rank: row.get(13)?,
+        commit_seq: row.get(14)?,
+        index_rowid: row.get(15)?,
     })
 }
 
@@ -3290,6 +4300,11 @@ impl ArtifactSearchRow {
             effective_at_basis: RecencyTimestampBasis::RevisionCreatedAt,
             profile,
             recency_eligible: self.status == "active" && self.is_current_revision,
+            commit_seq: self.commit_seq,
+            index_rowid: self.index_rowid,
+            lexical_candidate: true,
+            trigram_score: None,
+            semantic_score: None,
         })
     }
 }
@@ -3310,6 +4325,8 @@ struct ClaimSearchRow {
     temporal_state: String,
     revision_created_at: DateTime<Utc>,
     rank: f64,
+    commit_seq: i64,
+    index_rowid: i64,
 }
 
 fn search_claim_row(row: &Row<'_>) -> rusqlite::Result<ClaimSearchRow> {
@@ -3335,6 +4352,8 @@ fn search_claim_row(row: &Row<'_>) -> rusqlite::Result<ClaimSearchRow> {
         temporal_state: row.get(15)?,
         revision_created_at: row.get(16)?,
         rank: row.get(17)?,
+        commit_seq: row.get(18)?,
+        index_rowid: row.get(19)?,
     })
 }
 
@@ -3405,6 +4424,11 @@ impl ClaimSearchRow {
             effective_at_basis,
             profile,
             recency_eligible: is_current,
+            commit_seq: self.commit_seq,
+            index_rowid: self.index_rowid,
+            lexical_candidate: true,
+            trigram_score: None,
+            semantic_score: None,
         })
     }
 }
@@ -3416,6 +4440,13 @@ struct SearchCandidate {
     effective_at_basis: RecencyTimestampBasis,
     profile: RecencyProfile,
     recency_eligible: bool,
+    /// Stable final tie-breaker for equal retrieval scores. Entity IDs are
+    /// random ULIDs and must never decide ranked retrieval order.
+    commit_seq: i64,
+    index_rowid: i64,
+    lexical_candidate: bool,
+    trigram_score: Option<f64>,
+    semantic_score: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -3433,6 +4464,26 @@ fn placeholder_ranking(
 ) -> SearchRanking {
     SearchRanking {
         policy_version: RECENCY_POLICY_VERSION.into(),
+        lexical_policy_version: LEXICAL_POLICY_VERSION.into(),
+        trigram_policy_version: TRIGRAM_POLICY_VERSION.into(),
+        fusion_policy_version: FUSION_POLICY_VERSION.into(),
+        query_unit_count: 0,
+        matched_unit_count: 0,
+        required_matches: 0,
+        lexical_coverage: 0.0,
+        phrase_group_count: 0,
+        matched_phrase_group_count: 0,
+        lexical_qualified: false,
+        trigram_qualified: false,
+        semantic_qualified: false,
+        qualified: false,
+        matched_terms: Vec::new(),
+        matched_phrase_groups: Vec::new(),
+        trigram_matched_terms: Vec::new(),
+        trigram_similarity: None,
+        semantic_similarity: None,
+        exact_tier: false,
+        fusion_score: 0.0,
         recency_enabled: false,
         recency_eligible: false,
         lexical_score,
@@ -3467,20 +4518,17 @@ fn rerank_with_recency(
             0.0
         };
         candidate.hit.score = lexical_score + recency_bonus;
-        candidate.hit.ranking = SearchRanking {
-            policy_version: RECENCY_POLICY_VERSION.into(),
-            recency_enabled: enabled,
-            recency_eligible: eligible,
-            lexical_score,
-            recency_bonus,
-            lexical_position: index + 1,
-            final_position: index + 1,
-            max_promotion: RECENCY_MAX_PROMOTION,
-            effective_at: candidate.effective_at,
-            effective_at_basis: candidate.effective_at_basis,
-            evaluated_at,
-            decay_class: candidate.profile.class,
-        };
+        candidate.hit.ranking.policy_version = RECENCY_POLICY_VERSION.into();
+        candidate.hit.ranking.recency_enabled = enabled;
+        candidate.hit.ranking.recency_eligible = eligible;
+        candidate.hit.ranking.recency_bonus = recency_bonus;
+        candidate.hit.ranking.lexical_position = index + 1;
+        candidate.hit.ranking.final_position = index + 1;
+        candidate.hit.ranking.max_promotion = RECENCY_MAX_PROMOTION;
+        candidate.hit.ranking.effective_at = candidate.effective_at;
+        candidate.hit.ranking.effective_at_basis = candidate.effective_at_basis;
+        candidate.hit.ranking.evaluated_at = evaluated_at;
+        candidate.hit.ranking.decay_class = candidate.profile.class;
         if enabled {
             candidate.hit.matched_by.push(RECENCY_POLICY_VERSION.into());
         }
@@ -3493,6 +4541,7 @@ fn rerank_with_recency(
             let promotion_floor = lexical_index.saturating_sub(RECENCY_MAX_PROMOTION);
             let mut insertion_index = reranked.len();
             while insertion_index > promotion_floor
+                && same_lexical_qualification_rank(&candidate, &reranked[insertion_index - 1])
                 && candidate.hit.score > reranked[insertion_index - 1].hit.score
             {
                 insertion_index -= 1;
@@ -3510,6 +4559,170 @@ fn rerank_with_recency(
             candidate.hit
         })
         .collect()
+}
+
+fn order_hits_with_reranker(
+    reranker: &RerankerManager,
+    entity_type: Option<EntityType>,
+    query: &str,
+    hits: &mut [SearchHit],
+) -> Result<RerankerRetrievalStatus> {
+    for hit in hits.iter_mut() {
+        hit.provenance.insert(
+            "retrieval_tier".into(),
+            Value::String(
+                if hit.ranking.exact_tier {
+                    "exact_match"
+                } else {
+                    "candidate"
+                }
+                .into(),
+            ),
+        );
+        if hit.ranking.exact_tier {
+            hit.provenance
+                .insert("model_independent_ranking".into(), Value::Bool(true));
+        }
+    }
+    let candidate_count = hits.iter().filter(|hit| !hit.ranking.exact_tier).count();
+    if entity_type != Some(EntityType::Claim) {
+        let surface = if entity_type == Some(EntityType::Artifact) {
+            "artifact"
+        } else {
+            "mixed"
+        };
+        return reranker.surface_disabled(surface, candidate_count);
+    }
+    let positions = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| !hit.ranking.exact_tier && hit.ranking.qualified)
+        .map(|(index, _)| index)
+        .chain(
+            hits.iter()
+                .enumerate()
+                .filter(|(_, hit)| !hit.ranking.exact_tier && !hit.ranking.qualified)
+                .map(|(index, _)| index),
+        )
+        .take(RERANKER_ORDERING_CANDIDATE_LIMIT)
+        .collect::<Vec<_>>();
+    let passages = positions
+        .iter()
+        .map(|index| hits[*index].excerpt.as_str())
+        .collect::<Vec<_>>();
+    let (scores, mut status) = reranker.score(query, &passages, candidate_count)?;
+    if scores.is_empty() {
+        return Ok(status);
+    }
+    if scores.len() != positions.len() || scores.iter().any(|score| !score.is_finite()) {
+        return Err(MemoryError::Integrity(
+            "reranker returned invalid ordering scores".into(),
+        ));
+    }
+    apply_reranker_scores(hits, &positions, &scores);
+    status.ordering_applied = status.scored_candidate_count > 1;
+    Ok(status)
+}
+
+fn apply_reranker_scores(hits: &mut [SearchHit], positions: &[usize], scores: &[f32]) {
+    let scored = positions
+        .iter()
+        .copied()
+        .zip(scores.iter().copied())
+        .map(|(position, score)| {
+            let mut hit = hits[position].clone();
+            hit.provenance.insert(
+                "reranker".into(),
+                json!({
+                    "policy_version": RERANKER_POLICY_VERSION,
+                    "role": "ordering_only",
+                    "raw_logit": score,
+                    "qualification_enabled": false,
+                    "scored_excerpt_equals_returned_excerpt": true,
+                }),
+            );
+            if !hit
+                .matched_by
+                .iter()
+                .any(|channel| channel == RERANKER_POLICY_VERSION)
+            {
+                hit.matched_by.push(RERANKER_POLICY_VERSION.into());
+            }
+            (position, score, hit)
+        })
+        .collect::<Vec<_>>();
+    for qualified in [true, false] {
+        let mut targets = scored
+            .iter()
+            .filter(|(_, _, hit)| hit.ranking.qualified == qualified)
+            .map(|(position, _, _)| *position)
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        let mut ordered = scored
+            .iter()
+            .filter(|(_, _, hit)| hit.ranking.qualified == qualified)
+            .cloned()
+            .collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        for (target, (_, _, hit)) in targets.into_iter().zip(ordered) {
+            hits[target] = hit;
+        }
+    }
+    for (index, hit) in hits.iter_mut().enumerate() {
+        hit.ranking.final_position = index + 1;
+    }
+}
+
+fn retain_conflicted_hits_within_limit(hits: &mut [SearchHit], limit: usize) {
+    if hits.len() <= limit || limit == 0 {
+        return;
+    }
+    let mut replacement_positions = (0..limit)
+        .filter(|index| !hits[*index].ranking.exact_tier && hits[*index].status != "conflicted")
+        .collect::<Vec<_>>();
+    let promoted_positions = (limit..hits.len())
+        .filter(|index| hits[*index].status == "conflicted")
+        .collect::<Vec<_>>();
+    for promoted in promoted_positions {
+        let Some(replacement) = replacement_positions.pop() else {
+            break;
+        };
+        hits.swap(replacement, promoted);
+        let hit = &mut hits[replacement];
+        hit.provenance.insert(
+            "conflict_retention".into(),
+            json!({
+                "policy_version": "conflict_retention_v1",
+                "reason": "unresolved conflict evidence retained within the response limit",
+            }),
+        );
+        if !hit
+            .matched_by
+            .iter()
+            .any(|channel| channel == "conflict_retention_v1")
+        {
+            hit.matched_by.push("conflict_retention_v1".into());
+        }
+    }
+    for (index, hit) in hits.iter_mut().enumerate() {
+        hit.ranking.final_position = index + 1;
+    }
+}
+
+fn same_lexical_qualification_rank(left: &SearchCandidate, right: &SearchCandidate) -> bool {
+    left.hit.ranking.exact_tier == right.hit.ranking.exact_tier
+        && left.hit.ranking.lexical_qualified == right.hit.ranking.lexical_qualified
+        && left.hit.ranking.trigram_qualified == right.hit.ranking.trigram_qualified
+        && left.hit.ranking.semantic_qualified == right.hit.ranking.semantic_qualified
+        && left.hit.ranking.matched_phrase_group_count
+            == right.hit.ranking.matched_phrase_group_count
+        && left.hit.ranking.matched_unit_count == right.hit.ranking.matched_unit_count
+        && left.hit.ranking.query_unit_count == right.hit.ranking.query_unit_count
 }
 
 fn artifact_recency_profile(kind: &str) -> RecencyProfile {
@@ -3645,15 +4858,1676 @@ fn normalized_artifact_pins(pins: &[String]) -> (Vec<String>, Vec<String>) {
     (artifacts, exact_revisions)
 }
 
-fn fts_query(query: &str) -> Result<String> {
+fn semantic_claim_revision_hash(statement: &str) -> String {
+    blake3::hash(statement.as_bytes()).to_hex().to_string()
+}
+
+fn eligible_semantic_revisions(
+    connection: &Connection,
+    context: &AmbientContext,
+    input: &SearchInput,
+    entity_type: Option<EntityType>,
+    evaluated_at: DateTime<Utc>,
+) -> Result<BTreeMap<String, EligibleSemanticRevision>> {
+    let (pin_artifacts, exact_revision_pins) = normalized_artifact_pins(&context.pins);
+    let pins = serde_json::to_string(&pin_artifacts)?;
+    let pinned_revisions = serde_json::to_string(&exact_revision_pins)?;
+    let horizon = enum_string(&input.horizon)?;
+    let historical = i64::from(input.include_historical);
+    let mut eligible = BTreeMap::new();
+
+    if !matches!(entity_type, Some(EntityType::Claim)) {
+        let sql = format!(
+            "SELECT ar.id, a.id, ar.blob_hash
+               FROM artifact_revisions ar
+               JOIN artifacts a ON a.id = ar.artifact_id
+              WHERE (?1 = 1 OR (a.status = 'active' AND (
+                         a.current_revision_id = ar.id
+                         OR (a.id || '@' || ar.id) IN
+                            (SELECT value FROM json_each(?8))
+                    )))
+                AND ({} OR (a.id || '@' || ar.id) IN
+                     (SELECT value FROM json_each(?8)))",
+            horizon_filter_sql("a", true)
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                historical,
+                "",
+                horizon,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                pins,
+                pinned_revisions,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (revision_id, entity_id, revision_hash) = row?;
+            eligible.insert(
+                revision_id,
+                EligibleSemanticRevision {
+                    entity_type: EntityType::Artifact,
+                    entity_id,
+                    revision_hash,
+                },
+            );
+        }
+    }
+
+    if !matches!(entity_type, Some(EntityType::Artifact)) {
+        let sql = format!(
+            "SELECT cr.id, c.id, cr.statement
+               FROM claim_revisions cr
+               JOIN claims c ON c.id = cr.claim_id
+              WHERE (?1 = 1 OR (
+                         c.status IN ('active', 'conflicted')
+                         AND c.current_revision_id = cr.id
+                         AND (c.valid_from IS NULL OR c.valid_from <= ?7)
+                         AND (c.valid_until IS NULL OR c.valid_until > ?7)
+                    ))
+                AND {}",
+            horizon_filter_sql("c", false)
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                historical,
+                "",
+                horizon,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                evaluated_at,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (revision_id, entity_id, statement) = row?;
+            eligible.insert(
+                revision_id,
+                EligibleSemanticRevision {
+                    entity_type: EntityType::Claim,
+                    entity_id,
+                    revision_hash: semantic_claim_revision_hash(&statement),
+                },
+            );
+        }
+    }
+
+    Ok(eligible)
+}
+
+fn append_semantic_candidates(
+    connection: &Connection,
+    hits: &[SemanticHit],
+    evaluated_at: DateTime<Utc>,
+    candidates: &mut Vec<SearchCandidate>,
+) -> Result<()> {
+    for hit in hits {
+        if let Some(existing) = candidates.iter_mut().find(|candidate| {
+            candidate.hit.entity_type == hit.entity_type
+                && candidate.hit.entity_id == hit.entity_id
+                && candidate.hit.revision_id == hit.revision_id
+        }) {
+            apply_semantic_hit(connection, existing, hit)?;
+            continue;
+        }
+        let candidate = match hit.entity_type {
+            EntityType::Artifact => connection
+                .query_row(
+                    "SELECT a.id, ar.id, ar.title, ar.title,
+                            a.status, a.workspace_id, a.project_id, a.task_id, a.component,
+                            a.kind, ar.provenance_json, ar.created_at,
+                            a.current_revision_id = ar.id,
+                            0.0, ar.commit_seq,
+                            COALESCE((SELECT rowid FROM artifact_fts
+                                      WHERE revision_id = ar.id LIMIT 1), 0)
+                       FROM artifact_revisions ar
+                       JOIN artifacts a ON a.id = ar.artifact_id
+                      WHERE ar.id = ?1",
+                    [&hit.revision_id],
+                    search_artifact_row,
+                )
+                .optional()?
+                .map(ArtifactSearchRow::into_candidate)
+                .transpose()?,
+            EntityType::Claim => connection
+                .query_row(
+                    "SELECT c.id, cr.id, c.claim_type, cr.statement, c.status,
+                            c.workspace_id, c.project_id, c.task_id, c.component,
+                            cr.evidence_json, cr.confidence, c.valid_from, c.valid_until,
+                            c.current_revision_id = cr.id, ?2,
+                            CASE
+                              WHEN c.valid_from IS NOT NULL AND c.valid_from > ?2 THEN 'future'
+                              WHEN c.valid_until IS NOT NULL AND c.valid_until <= ?2 THEN 'expired'
+                              ELSE 'current'
+                            END,
+                            cr.created_at, 0.0, cr.commit_seq,
+                            COALESCE((SELECT rowid FROM claim_fts
+                                      WHERE revision_id = cr.id LIMIT 1), 0)
+                       FROM claim_revisions cr
+                       JOIN claims c ON c.id = cr.claim_id
+                      WHERE cr.id = ?1",
+                    params![hit.revision_id, evaluated_at],
+                    search_claim_row,
+                )
+                .optional()?
+                .map(ClaimSearchRow::into_candidate)
+                .transpose()?,
+        };
+        let Some(mut candidate) = candidate else {
+            continue;
+        };
+        candidate.lexical_candidate = false;
+        candidate.hit.score = 0.0;
+        candidate.hit.ranking.lexical_score = 0.0;
+        candidate.hit.matched_by.clear();
+        apply_semantic_hit(connection, &mut candidate, hit)?;
+        candidates.push(candidate);
+    }
+    Ok(())
+}
+
+fn apply_semantic_hit(
+    connection: &Connection,
+    candidate: &mut SearchCandidate,
+    hit: &SemanticHit,
+) -> Result<()> {
+    candidate.semantic_score = Some(hit.similarity);
+    candidate.hit.ranking.semantic_similarity = Some(hit.similarity);
+    // Dense cosine creates candidates only. It has no calibrated answerability
+    // meaning and cannot qualify or suppress evidence.
+    candidate.hit.ranking.semantic_qualified = false;
+    let channel = "semantic_candidate_v1";
+    if !candidate
+        .hit
+        .matched_by
+        .iter()
+        .any(|matched| matched == channel)
+    {
+        candidate.hit.matched_by.push(channel.into());
+    }
+    if !matches!(hit.entity_type, EntityType::Artifact) {
+        return Ok(());
+    }
+    match (hit.start_byte, hit.end_byte) {
+        (Some(start_byte), Some(end_byte)) => {
+            let authority_chunk = connection
+                .query_row(
+                    "SELECT CAST(start_byte AS INTEGER), body
+                       FROM artifact_chunk_fts
+                      WHERE revision_id = ?1 AND row_kind = 'body'
+                        AND CAST(start_byte AS INTEGER) <= ?2
+                        AND CAST(end_byte AS INTEGER) >= ?3
+                      ORDER BY CAST(end_byte AS INTEGER) - CAST(start_byte AS INTEGER),
+                               CAST(ordinal AS INTEGER)
+                      LIMIT 1",
+                    params![
+                        hit.revision_id,
+                        i64::try_from(start_byte).map_err(|_| MemoryError::ContentTooLarge)?,
+                        i64::try_from(end_byte).map_err(|_| MemoryError::ContentTooLarge)?,
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let Some((authority_start, authority_body)) = authority_chunk else {
+                return Err(MemoryError::Integrity(format!(
+                    "semantic artifact span {}-{} is absent from authoritative chunks for revision {}",
+                    start_byte, end_byte, hit.revision_id
+                )));
+            };
+            let authority_start =
+                u64::try_from(authority_start).map_err(|_| MemoryError::ContentTooLarge)?;
+            let relative_start = usize::try_from(start_byte.saturating_sub(authority_start))
+                .map_err(|_| MemoryError::ContentTooLarge)?;
+            let relative_end = usize::try_from(end_byte.saturating_sub(authority_start))
+                .map_err(|_| MemoryError::ContentTooLarge)?;
+            if start_byte < authority_start
+                || relative_start >= relative_end
+                || relative_end > authority_body.len()
+                || !authority_body.is_char_boundary(relative_start)
+                || !authority_body.is_char_boundary(relative_end)
+            {
+                return Err(MemoryError::Integrity(format!(
+                    "semantic artifact span {}-{} is not an exact UTF-8 slice of revision {}",
+                    start_byte, end_byte, hit.revision_id
+                )));
+            }
+            let excerpt = authority_body[relative_start..relative_end].to_owned();
+            candidate.hit.excerpt = excerpt;
+            candidate.hit.citation = format!(
+                "memoree://artifact/{}@{}#{}-{}",
+                candidate.hit.entity_id, candidate.hit.revision_id, start_byte, end_byte
+            );
+            candidate.hit.provenance.insert(
+                "retrieval_span".into(),
+                json!({
+                    "start_byte": start_byte,
+                    "end_byte": end_byte,
+                    "chunker_version": ARTIFACT_CHUNKER_VERSION,
+                    "coordinate_space": "immutable_artifact_bytes",
+                    "selected_by": SEMANTIC_POLICY_VERSION,
+                    "semantic_window_max_bytes": SEMANTIC_WINDOW_MAX_BYTES,
+                    "semantic_window_overlap_bytes": SEMANTIC_WINDOW_OVERLAP_BYTES,
+                }),
+            );
+            if !candidate
+                .hit
+                .matched_by
+                .iter()
+                .any(|matched| matched == "artifact_citation_span_v1")
+            {
+                candidate
+                    .hit
+                    .matched_by
+                    .push("artifact_citation_span_v1".into());
+            }
+        }
+        (None, None) => {
+            candidate
+                .hit
+                .provenance
+                .insert("retrieval_match".into(), Value::String("title".into()));
+        }
+        _ => {
+            return Err(MemoryError::Integrity(format!(
+                "semantic artifact span is incomplete for revision {}",
+                hit.revision_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_trigram_candidates(
+    connection: &Connection,
+    context: &AmbientContext,
+    input: &SearchInput,
+    entity_type: Option<EntityType>,
+    analysis: &AnalyzedQuery,
+    candidate_limit: i64,
+    evaluated_at: DateTime<Utc>,
+    candidates: &mut Vec<SearchCandidate>,
+) -> Result<()> {
+    if entity_type.is_none() {
+        // Each FTS vocabulary has independent document frequencies. Building
+        // one anchor expression from their summed frequencies can suppress an
+        // artifact that is recoverable in artifact-only recall (or vice
+        // versa), breaking cross-surface citation parity.
+        append_trigram_candidates(
+            connection,
+            context,
+            input,
+            Some(EntityType::Artifact),
+            analysis,
+            candidate_limit,
+            evaluated_at,
+            candidates,
+        )?;
+        append_trigram_candidates(
+            connection,
+            context,
+            input,
+            Some(EntityType::Claim),
+            analysis,
+            candidate_limit,
+            evaluated_at,
+            candidates,
+        )?;
+        return Ok(());
+    }
+    let Some(query) = trigram_fts_expression(connection, analysis, entity_type)? else {
+        return Ok(());
+    };
+    let (pin_artifacts, exact_revision_pins) = normalized_artifact_pins(&context.pins);
+    let pins = serde_json::to_string(&pin_artifacts)?;
+    let pinned_revisions = serde_json::to_string(&exact_revision_pins)?;
+    let horizon = enum_string(&input.horizon)?;
+    let historical = i64::from(input.include_historical);
+
+    if !matches!(entity_type, Some(EntityType::Claim)) {
+        let sql = format!(
+            "SELECT a.id, ar.id, ar.title,
+                    snippet(artifact_trigram_fts, -1, '', '', ' … ', 64),
+                    a.status, a.workspace_id, a.project_id, a.task_id, a.component,
+                    a.kind, ar.provenance_json, ar.created_at,
+                    a.current_revision_id = ar.id,
+                    bm25(artifact_trigram_fts, 0.0, 0.0, 5.0, 1.0), ar.commit_seq,
+                    (SELECT rowid FROM artifact_fts WHERE revision_id = ar.id LIMIT 1)
+               FROM artifact_trigram_fts
+               JOIN artifact_revisions ar ON ar.id = artifact_trigram_fts.revision_id
+               JOIN artifacts a ON a.id = ar.artifact_id
+              WHERE artifact_trigram_fts MATCH ?1
+                AND (?2 = 1 OR (a.status = 'active' AND (
+                     a.current_revision_id = ar.id
+                     OR (a.id || '@' || ar.id) IN (SELECT value FROM json_each(?8))
+                )))
+                AND ({} OR (a.id || '@' || ar.id) IN (SELECT value FROM json_each(?8)))
+              ORDER BY bm25(artifact_trigram_fts, 0.0, 0.0, 5.0, 1.0), ar.commit_seq DESC
+              LIMIT ?9",
+            horizon_filter_sql("a", true)
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                query,
+                historical,
+                horizon,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                pins,
+                pinned_revisions,
+                candidate_limit,
+            ],
+            search_artifact_row,
+        )?;
+        for row in rows {
+            let row = row?;
+            let match_text = format!("{} {}", row.title, row.excerpt);
+            let trigram_score = normalized_rank(row.rank);
+            let mut candidate = row.into_candidate()?;
+            prepare_trigram_candidate(&mut candidate, analysis, &match_text, trigram_score);
+            merge_trigram_candidate(candidates, candidate);
+        }
+    }
+
+    if !matches!(entity_type, Some(EntityType::Artifact)) {
+        let sql = format!(
+            "SELECT c.id, cr.id, c.claim_type, cr.statement, c.status,
+                    c.workspace_id, c.project_id, c.task_id, c.component,
+                    cr.evidence_json, cr.confidence, c.valid_from, c.valid_until,
+                    c.current_revision_id = cr.id, ?10,
+                    CASE
+                      WHEN c.valid_from IS NOT NULL AND c.valid_from > ?10 THEN 'future'
+                      WHEN c.valid_until IS NOT NULL AND c.valid_until <= ?10 THEN 'expired'
+                      ELSE 'current'
+                    END,
+                    cr.created_at,
+                    bm25(claim_trigram_fts, 0.0, 0.0, 1.0), cr.commit_seq,
+                    (SELECT rowid FROM claim_fts WHERE revision_id = cr.id LIMIT 1)
+               FROM claim_trigram_fts
+               JOIN claim_revisions cr ON cr.id = claim_trigram_fts.revision_id
+               JOIN claims c ON c.id = cr.claim_id
+              WHERE claim_trigram_fts MATCH ?1
+                AND (?2 = 1 OR (
+                     c.status IN ('active', 'conflicted')
+                     AND c.current_revision_id = cr.id
+                     AND (c.valid_from IS NULL OR c.valid_from <= ?10)
+                     AND (c.valid_until IS NULL OR c.valid_until > ?10)
+                ))
+                AND {}
+              ORDER BY bm25(claim_trigram_fts, 0.0, 0.0, 1.0), cr.commit_seq DESC
+              LIMIT ?9",
+            horizon_filter_sql("c", false)
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                query,
+                historical,
+                horizon,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                "[]",
+                "[]",
+                candidate_limit,
+                evaluated_at,
+            ],
+            search_claim_row,
+        )?;
+        for row in rows {
+            let row = row?;
+            let match_text = row.statement.clone();
+            let trigram_score = normalized_rank(row.rank);
+            let mut candidate = row.into_candidate()?;
+            prepare_trigram_candidate(&mut candidate, analysis, &match_text, trigram_score);
+            merge_trigram_candidate(candidates, candidate);
+        }
+    }
+    Ok(())
+}
+
+fn prepare_trigram_candidate(
+    candidate: &mut SearchCandidate,
+    analysis: &AnalyzedQuery,
+    match_text: &str,
+    trigram_score: f64,
+) {
+    let (similarity, matched_terms, qualified) = fuzzy_token_qualification(analysis, match_text);
+    candidate.lexical_candidate = false;
+    candidate.trigram_score = Some(trigram_score);
+    candidate.hit.score = 0.0;
+    candidate.hit.ranking.lexical_score = 0.0;
+    candidate.hit.ranking.trigram_similarity = Some(similarity);
+    candidate.hit.ranking.trigram_matched_terms = matched_terms;
+    candidate.hit.ranking.trigram_qualified = qualified;
+    candidate.hit.matched_by = vec![if qualified {
+        TRIGRAM_POLICY_VERSION.into()
+    } else {
+        "trigram_candidate_v1".into()
+    }];
+}
+
+fn merge_trigram_candidate(candidates: &mut Vec<SearchCandidate>, fuzzy: SearchCandidate) {
+    if let Some(existing) = candidates.iter_mut().find(|candidate| {
+        candidate.hit.entity_type == fuzzy.hit.entity_type
+            && candidate.hit.entity_id == fuzzy.hit.entity_id
+            && candidate.hit.revision_id == fuzzy.hit.revision_id
+    }) {
+        existing.trigram_score = fuzzy.trigram_score;
+        existing.hit.ranking.trigram_similarity = fuzzy.hit.ranking.trigram_similarity;
+        existing.hit.ranking.trigram_matched_terms = fuzzy.hit.ranking.trigram_matched_terms;
+        existing.hit.ranking.trigram_qualified = fuzzy.hit.ranking.trigram_qualified;
+        if !existing
+            .hit
+            .matched_by
+            .iter()
+            .any(|channel| channel == TRIGRAM_POLICY_VERSION)
+            && fuzzy.hit.ranking.trigram_qualified
+        {
+            existing.hit.matched_by.push(TRIGRAM_POLICY_VERSION.into());
+        }
+    } else {
+        candidates.push(fuzzy);
+    }
+}
+
+fn trigram_fts_expression(
+    connection: &Connection,
+    analysis: &AnalyzedQuery,
+    entity_type: Option<EntityType>,
+) -> Result<Option<String>> {
+    let words = fuzzy_query_words(analysis);
+    let mut trigrams_by_word = Vec::new();
+    let mut all_trigrams = BTreeSet::new();
+    for word in words {
+        let characters = word.chars().collect::<Vec<_>>();
+        let trigrams = characters
+            .windows(3)
+            .map(|window| window.iter().collect::<String>())
+            .collect::<BTreeSet<_>>();
+        all_trigrams.extend(trigrams.iter().cloned());
+        trigrams_by_word.push(trigrams);
+    }
+    if all_trigrams.is_empty() {
+        return Ok(None);
+    }
+    let trigram_json = serde_json::to_string(&all_trigrams)?;
+    let mut frequencies = BTreeMap::<String, i64>::new();
+    for table in match entity_type {
+        Some(EntityType::Artifact) => vec!["artifact_trigram_vocab"],
+        Some(EntityType::Claim) => vec!["claim_trigram_vocab"],
+        None => vec!["artifact_trigram_vocab", "claim_trigram_vocab"],
+    } {
+        let sql = format!(
+            "SELECT term, doc FROM {table}
+              WHERE term IN (SELECT value FROM json_each(?1))"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map([&trigram_json], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (trigram, documents) = row?;
+            *frequencies.entry(trigram).or_default() += documents;
+        }
+    }
+    let anchors = trigrams_by_word
+        .into_iter()
+        .flat_map(|trigrams| {
+            let mut ranked = trigrams
+                .into_iter()
+                .filter_map(|trigram| {
+                    frequencies
+                        .get(&trigram)
+                        .copied()
+                        .filter(|documents| *documents > 0)
+                        .map(|documents| (documents, trigram))
+                })
+                .collect::<Vec<_>>();
+            ranked.sort();
+            ranked
+                .into_iter()
+                .take(2)
+                .map(|(_, trigram)| trigram)
+                .collect::<Vec<_>>()
+        })
+        .collect::<BTreeSet<_>>();
+    Ok((!anchors.is_empty()).then(|| {
+        anchors
+            .into_iter()
+            .map(|trigram| format!("\"{trigram}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }))
+}
+
+fn fuzzy_query_words(analysis: &AnalyzedQuery) -> Vec<String> {
+    analysis
+        .units
+        .iter()
+        .flat_map(|unit| {
+            unit.display
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+        })
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn fuzzy_token_qualification(
+    analysis: &AnalyzedQuery,
+    candidate_text: &str,
+) -> (f64, Vec<String>, bool) {
+    let query_words = fuzzy_query_words(analysis);
+    if query_words.is_empty() {
+        return (0.0, Vec::new(), false);
+    }
+    let candidate_words = candidate_text
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|word| word.chars().count() >= 3)
+        .map(|word| word.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let threshold = if query_words.len() == 1 { 0.80 } else { 0.72 };
+    let mut scores = Vec::with_capacity(query_words.len());
+    let mut matched = Vec::new();
+    for query_word in &query_words {
+        let best = candidate_words
+            .iter()
+            .map(|candidate| normalized_edit_similarity(query_word, candidate))
+            .fold(0.0_f64, f64::max);
+        scores.push(best);
+        if best >= threshold {
+            matched.push(query_word.clone());
+        }
+    }
+    let required = if query_words.len() == 1 {
+        1
+    } else {
+        (query_words.len() * 3).div_ceil(5)
+    };
+    let similarity = scores.iter().copied().sum::<f64>() / scores.len() as f64;
+    let qualified = matched.len() >= required;
+    (similarity, matched, qualified)
+}
+
+fn normalized_edit_similarity(left: &str, right: &str) -> f64 {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    let longest = left.len().max(right.len());
+    if longest == 0 {
+        return 1.0;
+    }
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_character) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + usize::from(left_character != right_character));
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    1.0 - previous[right.len()] as f64 / longest as f64
+}
+
+fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate]) {
+    let mut lexical_order = (0..candidates.len())
+        .filter(|index| candidates[*index].lexical_candidate)
+        .collect::<Vec<_>>();
+    lexical_order.sort_by(|left, right| {
+        candidates[*right]
+            .hit
+            .ranking
+            .lexical_score
+            .partial_cmp(&candidates[*left].hit.ranking.lexical_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                candidates[*right]
+                    .commit_seq
+                    .cmp(&candidates[*left].commit_seq)
+            })
+    });
+    let mut trigram_order = (0..candidates.len())
+        .filter(|index| candidates[*index].trigram_score.is_some())
+        .collect::<Vec<_>>();
+    trigram_order.sort_by(|left, right| {
+        candidates[*right]
+            .trigram_score
+            .unwrap_or_default()
+            .partial_cmp(&candidates[*left].trigram_score.unwrap_or_default())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                candidates[*right]
+                    .commit_seq
+                    .cmp(&candidates[*left].commit_seq)
+            })
+    });
+    let mut semantic_order = (0..candidates.len())
+        .filter(|index| candidates[*index].semantic_score.is_some())
+        .collect::<Vec<_>>();
+    semantic_order.sort_by(|left, right| {
+        candidates[*right]
+            .semantic_score
+            .unwrap_or_default()
+            .partial_cmp(&candidates[*left].semantic_score.unwrap_or_default())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                candidates[*right]
+                    .commit_seq
+                    .cmp(&candidates[*left].commit_seq)
+            })
+            .then_with(|| {
+                candidates[*left]
+                    .hit
+                    .revision_id
+                    .cmp(&candidates[*right].hit.revision_id)
+            })
+    });
+    let mut lexical_ranks = vec![None; candidates.len()];
+    let mut trigram_ranks = vec![None; candidates.len()];
+    let mut semantic_ranks = vec![None; candidates.len()];
+    for (rank, index) in lexical_order.into_iter().enumerate() {
+        lexical_ranks[index] = Some(rank + 1);
+    }
+    for (rank, index) in trigram_order.into_iter().enumerate() {
+        trigram_ranks[index] = Some(rank + 1);
+    }
+    for (rank, index) in semantic_order.into_iter().enumerate() {
+        semantic_ranks[index] = Some(rank + 1);
+    }
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        let ranking = &mut candidate.hit.ranking;
+        ranking.lexical_qualified = ranking.qualified;
+        ranking.qualified =
+            ranking.lexical_qualified || ranking.trigram_qualified || ranking.semantic_qualified;
+        ranking.exact_tier = ranking.lexical_qualified && ranking.lexical_coverage == 1.0;
+        ranking.fusion_policy_version = FUSION_POLICY_VERSION.into();
+        ranking.trigram_policy_version = TRIGRAM_POLICY_VERSION.into();
+        let lexical_rrf = lexical_ranks[index].map_or(0.0, |rank| 1.0 / (RRF_K + rank as f64));
+        let trigram_rrf = trigram_ranks[index].map_or(0.0, |rank| 0.7 / (RRF_K + rank as f64));
+        let semantic_rrf = semantic_ranks[index].map_or(0.0, |rank| 0.85 / (RRF_K + rank as f64));
+        // Quantization prevents platform-level floating-point noise from
+        // becoming an observable ordering decision. Stable authority fields
+        // remain the final tie-breakers.
+        let fused = if ranking.exact_tier {
+            // Exact/full lexical results are model-independent: optional typo
+            // or dense channels may annotate them but can never reorder them.
+            lexical_rrf
+        } else {
+            lexical_rrf + trigram_rrf + semantic_rrf
+        };
+        ranking.fusion_score = (fused * 1e12).round() / 1e12;
+        candidate.hit.score = ranking.fusion_score;
+        if ranking.qualified
+            && !candidate
+                .hit
+                .matched_by
+                .iter()
+                .any(|channel| channel == FUSION_POLICY_VERSION)
+        {
+            candidate.hit.matched_by.push(FUSION_POLICY_VERSION.into());
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .hit
+            .ranking
+            .exact_tier
+            .cmp(&left.hit.ranking.exact_tier)
+            .then_with(|| {
+                right
+                    .hit
+                    .ranking
+                    .fusion_score
+                    .partial_cmp(&left.hit.ranking.fusion_score)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| {
+                right
+                    .hit
+                    .ranking
+                    .matched_phrase_group_count
+                    .cmp(&left.hit.ranking.matched_phrase_group_count)
+            })
+            .then_with(|| {
+                right
+                    .hit
+                    .ranking
+                    .lexical_coverage
+                    .partial_cmp(&left.hit.ranking.lexical_coverage)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| right.commit_seq.cmp(&left.commit_seq))
+            .then_with(|| left.hit.entity_id.cmp(&right.hit.entity_id))
+    });
+}
+
+#[derive(Clone)]
+struct QueryUnit {
+    display: String,
+    expression: String,
+    phrase: bool,
+    component_count: usize,
+}
+
+#[derive(Clone)]
+struct AnalyzedQuery {
+    units: Vec<QueryUnit>,
+    dropped_stopwords: Vec<String>,
+    normalized_query: String,
+    required_matches: usize,
+}
+
+impl AnalyzedQuery {
+    fn fts_expression(&self) -> String {
+        self.units
+            .iter()
+            .map(|unit| unit.expression.as_str())
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }
+
+    fn phrase_count(&self) -> usize {
+        self.units.iter().filter(|unit| unit.phrase).count()
+    }
+
+    fn public(&self) -> QueryAnalysis {
+        QueryAnalysis {
+            policy_version: LEXICAL_POLICY_VERSION.into(),
+            normalized_query: self.normalized_query.clone(),
+            content_units: self.units.iter().map(|unit| unit.display.clone()).collect(),
+            phrase_groups: self
+                .units
+                .iter()
+                .filter(|unit| unit.phrase)
+                .map(|unit| unit.display.clone())
+                .collect(),
+            dropped_stopwords: self.dropped_stopwords.clone(),
+            required_matches: self.required_matches,
+        }
+    }
+}
+
+fn analyze_query(query: &str) -> Result<AnalyzedQuery> {
     if query.len() > MAX_QUERY_BYTES {
         return Err(MemoryError::InvalidRequest(format!(
             "search query must not exceed {MAX_QUERY_BYTES} bytes"
         )));
     }
+    let mut parsed = parse_query_units(query);
+    if parsed.is_empty() {
+        return Err(MemoryError::InvalidRequest(
+            "search query must contain at least one word or identifier".into(),
+        ));
+    }
+    let component_count: usize = parsed.iter().map(|unit| unit.component_count).sum();
+    if component_count > 48 {
+        return Err(MemoryError::InvalidRequest(
+            "search query must not contain more than 48 words or identifiers".into(),
+        ));
+    }
+
+    let has_content = parsed
+        .iter()
+        .any(|unit| unit.phrase || !is_query_stopword(&unit.display));
+    let mut dropped_stopwords = Vec::new();
+    if has_content {
+        parsed.retain(|unit| {
+            let drop = !unit.phrase && is_query_stopword(&unit.display);
+            if drop {
+                dropped_stopwords.push(unit.display.clone());
+            }
+            !drop
+        });
+    }
+    let mut seen = BTreeSet::new();
+    parsed.retain(|unit| seen.insert((unit.phrase, unit.display.clone())));
+    dropped_stopwords.sort();
+    dropped_stopwords.dedup();
+    let required_matches = required_lexical_matches(parsed.len());
+    let normalized_query = parsed
+        .iter()
+        .map(|unit| {
+            if unit.phrase {
+                format!("\"{}\"", unit.display)
+            } else {
+                unit.display.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(AnalyzedQuery {
+        units: parsed,
+        dropped_stopwords,
+        normalized_query,
+        required_matches,
+    })
+}
+
+fn annotate_lexical_matches(
+    connection: &Connection,
+    candidates: &mut [SearchCandidate],
+    analysis: &AnalyzedQuery,
+) -> Result<()> {
+    let artifact_rowids = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.hit.entity_type, EntityType::Artifact))
+        .map(|candidate| candidate.index_rowid)
+        .collect::<Vec<_>>();
+    let claim_rowids = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.hit.entity_type, EntityType::Claim))
+        .map(|candidate| candidate.index_rowid)
+        .collect::<Vec<_>>();
+    let mut artifact_matches = Vec::with_capacity(analysis.units.len());
+    let mut claim_matches = Vec::with_capacity(analysis.units.len());
+    for unit in &analysis.units {
+        artifact_matches.push(matching_fts_rowids(
+            connection,
+            "artifact_fts",
+            &unit.expression,
+            &artifact_rowids,
+        )?);
+        claim_matches.push(matching_fts_rowids(
+            connection,
+            "claim_fts",
+            &unit.expression,
+            &claim_rowids,
+        )?);
+    }
+
+    let phrase_group_count = analysis.phrase_count();
+    for candidate in candidates {
+        let matches = match candidate.hit.entity_type {
+            EntityType::Artifact => &artifact_matches,
+            EntityType::Claim => &claim_matches,
+        };
+        let mut matched_terms = Vec::new();
+        let mut matched_phrase_groups = Vec::new();
+        for (unit, rowids) in analysis.units.iter().zip(matches) {
+            if rowids.contains(&candidate.index_rowid) {
+                if unit.phrase {
+                    matched_phrase_groups.push(unit.display.clone());
+                } else {
+                    matched_terms.push(unit.display.clone());
+                }
+            }
+        }
+        let matched_unit_count = matched_terms.len() + matched_phrase_groups.len();
+        let phrase_requirements_met = matched_phrase_groups.len() == phrase_group_count;
+        let qualified = phrase_requirements_met
+            && matched_unit_count >= analysis.required_matches
+            && matched_unit_count > 0;
+        let lexical_coverage = if analysis.units.is_empty() {
+            0.0
+        } else {
+            matched_unit_count as f64 / analysis.units.len() as f64
+        };
+        candidate.hit.ranking.lexical_policy_version = LEXICAL_POLICY_VERSION.into();
+        candidate.hit.ranking.query_unit_count = analysis.units.len();
+        candidate.hit.ranking.matched_unit_count = matched_unit_count;
+        candidate.hit.ranking.required_matches = analysis.required_matches;
+        candidate.hit.ranking.lexical_coverage = lexical_coverage;
+        candidate.hit.ranking.phrase_group_count = phrase_group_count;
+        candidate.hit.ranking.matched_phrase_group_count = matched_phrase_groups.len();
+        candidate.hit.ranking.qualified = qualified;
+        candidate.hit.ranking.matched_terms = matched_terms;
+        candidate.hit.ranking.matched_phrase_groups = matched_phrase_groups;
+        candidate.hit.matched_by.push(if qualified {
+            LEXICAL_POLICY_VERSION.into()
+        } else {
+            "lexical_candidate_v1".into()
+        });
+    }
+    Ok(())
+}
+
+fn matching_fts_rowids(
+    connection: &Connection,
+    table: &str,
+    expression: &str,
+    candidate_rowids: &[i64],
+) -> Result<BTreeSet<i64>> {
+    if candidate_rowids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let candidate_json = serde_json::to_string(candidate_rowids)?;
+    let sql = format!(
+        "SELECT rowid FROM {table}
+         WHERE {table} MATCH ?1
+           AND rowid IN (SELECT CAST(value AS INTEGER) FROM json_each(?2))"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params![expression, candidate_json], |row| row.get(0))?;
+    rows.collect::<rusqlite::Result<BTreeSet<i64>>>()
+        .map_err(Into::into)
+}
+
+#[derive(Debug)]
+struct ArtifactChunkMatch {
+    rowid: i64,
+    revision_id: String,
+    row_kind: String,
+    ordinal: Option<i64>,
+    start_byte: Option<i64>,
+    end_byte: Option<i64>,
+    chunker_version: i64,
+    exact_excerpt: String,
+    lexical_score: f64,
+    matched_unit_count: usize,
+    matched_phrase_count: usize,
+}
+
+fn select_artifact_citation_spans(
+    connection: &Connection,
+    candidates: &mut [SearchCandidate],
+    analysis: &AnalyzedQuery,
+) -> Result<()> {
+    let revision_ids = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.hit.entity_type, EntityType::Artifact))
+        .map(|candidate| candidate.hit.revision_id.clone())
+        .collect::<Vec<_>>();
+    if revision_ids.is_empty() {
+        return Ok(());
+    }
+    let revision_json = serde_json::to_string(&revision_ids)?;
+    let query = analysis.fts_expression();
+    let mut matches = {
+        let mut statement = connection.prepare(
+            "SELECT rowid, revision_id, row_kind, ordinal, start_byte, end_byte,
+                    chunker_version,
+                    CASE WHEN row_kind = 'title' THEN title ELSE body END,
+                    bm25(artifact_chunk_fts, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 5.0, 1.0)
+               FROM artifact_chunk_fts
+              WHERE artifact_chunk_fts MATCH ?1
+                AND revision_id IN (SELECT value FROM json_each(?2))",
+        )?;
+        let rows = statement.query_map(params![query, revision_json], |row| {
+            Ok(ArtifactChunkMatch {
+                rowid: row.get(0)?,
+                revision_id: row.get(1)?,
+                row_kind: row.get(2)?,
+                ordinal: row.get(3)?,
+                start_byte: row.get(4)?,
+                end_byte: row.get(5)?,
+                chunker_version: row.get(6)?,
+                exact_excerpt: row.get(7)?,
+                lexical_score: normalized_rank(row.get(8)?),
+                matched_unit_count: 0,
+                matched_phrase_count: 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let rowids = matches.iter().map(|item| item.rowid).collect::<Vec<_>>();
+    let unit_matches = analysis
+        .units
+        .iter()
+        .map(|unit| {
+            matching_fts_rowids(connection, "artifact_chunk_fts", &unit.expression, &rowids)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for item in &mut matches {
+        for (unit, matching_rows) in analysis.units.iter().zip(&unit_matches) {
+            if matching_rows.contains(&item.rowid) {
+                item.matched_unit_count += 1;
+                item.matched_phrase_count += usize::from(unit.phrase);
+            }
+        }
+    }
+    matches.sort_by(|left, right| {
+        left.revision_id
+            .cmp(&right.revision_id)
+            .then_with(|| right.matched_phrase_count.cmp(&left.matched_phrase_count))
+            .then_with(|| right.matched_unit_count.cmp(&left.matched_unit_count))
+            .then_with(|| {
+                right
+                    .lexical_score
+                    .partial_cmp(&left.lexical_score)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| left.ordinal.unwrap_or(-1).cmp(&right.ordinal.unwrap_or(-1)))
+            .then_with(|| left.rowid.cmp(&right.rowid))
+    });
+    let mut best_by_revision = BTreeMap::new();
+    for item in matches {
+        best_by_revision
+            .entry(item.revision_id.clone())
+            .or_insert(item);
+    }
+    for candidate in candidates {
+        if !matches!(candidate.hit.entity_type, EntityType::Artifact) {
+            continue;
+        }
+        if candidate.hit.ranking.semantic_qualified
+            && !candidate.hit.ranking.lexical_qualified
+            && !candidate.hit.ranking.trigram_qualified
+        {
+            // `apply_semantic_hit` already selected and validated the exact
+            // immutable chunk span (or the spanless title). Do not replace it
+            // with a weak lexical OR-term match.
+            continue;
+        }
+        let best = if let Some(best) = best_by_revision.remove(&candidate.hit.revision_id) {
+            Some(best)
+        } else if candidate.hit.ranking.trigram_qualified {
+            best_fuzzy_artifact_chunk(connection, candidate, analysis)?
+        } else {
+            None
+        };
+        let Some(best) = best else {
+            continue;
+        };
+        candidate.hit.excerpt = best.exact_excerpt;
+        if best.row_kind == "body" {
+            let (Some(start_byte), Some(end_byte)) = (best.start_byte, best.end_byte) else {
+                return Err(MemoryError::Integrity(format!(
+                    "artifact chunk body for revision {} has no byte span",
+                    candidate.hit.revision_id
+                )));
+            };
+            candidate.hit.citation = format!(
+                "memoree://artifact/{}@{}#{}-{}",
+                candidate.hit.entity_id, candidate.hit.revision_id, start_byte, end_byte
+            );
+            candidate.hit.provenance.insert(
+                "retrieval_span".into(),
+                json!({
+                    "start_byte": start_byte,
+                    "end_byte": end_byte,
+                    "chunker_version": best.chunker_version,
+                    "coordinate_space": "immutable_artifact_bytes"
+                }),
+            );
+            if !candidate
+                .hit
+                .matched_by
+                .iter()
+                .any(|channel| channel == "artifact_citation_span_v1")
+            {
+                candidate
+                    .hit
+                    .matched_by
+                    .push("artifact_citation_span_v1".into());
+            }
+        } else {
+            candidate.hit.citation = format!(
+                "memoree://artifact/{}@{}",
+                candidate.hit.entity_id, candidate.hit.revision_id
+            );
+            candidate.hit.provenance.remove("retrieval_span");
+            candidate
+                .hit
+                .matched_by
+                .retain(|channel| channel != "artifact_citation_span_v1");
+            candidate
+                .hit
+                .provenance
+                .insert("retrieval_match".into(), Value::String("title".into()));
+        }
+    }
+    Ok(())
+}
+
+fn best_fuzzy_artifact_chunk(
+    connection: &Connection,
+    candidate: &SearchCandidate,
+    analysis: &AnalyzedQuery,
+) -> Result<Option<ArtifactChunkMatch>> {
+    let mut rows = {
+        let mut statement = connection.prepare(
+            "SELECT rowid, revision_id, row_kind, ordinal, start_byte, end_byte,
+                    chunker_version,
+                    CASE WHEN row_kind = 'title' THEN title ELSE body END
+               FROM artifact_chunk_fts
+              WHERE revision_id = ?1",
+        )?;
+        let mapped = statement.query_map([&candidate.hit.revision_id], |row| {
+            let excerpt = row.get::<_, String>(7)?;
+            let (similarity, matched_terms, qualified) =
+                fuzzy_token_qualification(analysis, &excerpt);
+            Ok((
+                ArtifactChunkMatch {
+                    rowid: row.get(0)?,
+                    revision_id: row.get(1)?,
+                    row_kind: row.get(2)?,
+                    ordinal: row.get(3)?,
+                    start_byte: row.get(4)?,
+                    end_byte: row.get(5)?,
+                    chunker_version: row.get(6)?,
+                    exact_excerpt: excerpt,
+                    lexical_score: similarity,
+                    matched_unit_count: matched_terms.len(),
+                    matched_phrase_count: 0,
+                },
+                qualified,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    rows.retain(|(_, qualified)| *qualified);
+    rows.sort_by(|(left, _), (right, _)| {
+        right
+            .matched_unit_count
+            .cmp(&left.matched_unit_count)
+            .then_with(|| {
+                right
+                    .lexical_score
+                    .partial_cmp(&left.lexical_score)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| {
+                let left_len = left
+                    .end_byte
+                    .zip(left.start_byte)
+                    .map_or(usize::MAX, |(end, start)| (end - start) as usize);
+                let right_len = right
+                    .end_byte
+                    .zip(right.start_byte)
+                    .map_or(usize::MAX, |(end, start)| (end - start) as usize);
+                left_len.cmp(&right_len)
+            })
+            .then_with(|| left.ordinal.unwrap_or(-1).cmp(&right.ordinal.unwrap_or(-1)))
+    });
+    Ok(rows.into_iter().next().map(|(chunk, _)| chunk))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtifactChunkSpan {
+    start_byte: usize,
+    end_byte: usize,
+}
+
+fn index_artifact_revision_chunks(
+    connection: &Connection,
+    revision_id: &str,
+    artifact_id: &str,
+    title: &str,
+    exact_body: &str,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO artifact_chunk_fts(
+             revision_id, artifact_id, row_kind, ordinal, start_byte,
+             end_byte, chunker_version, title, body
+         ) VALUES (?1, ?2, 'title', NULL, NULL, NULL, ?3, ?4, '')",
+        params![revision_id, artifact_id, ARTIFACT_CHUNKER_VERSION, title],
+    )?;
+    for (ordinal, span) in artifact_chunk_spans(exact_body).into_iter().enumerate() {
+        connection.execute(
+            "INSERT INTO artifact_chunk_fts(
+                 revision_id, artifact_id, row_kind, ordinal, start_byte,
+                 end_byte, chunker_version, title, body
+             ) VALUES (?1, ?2, 'body', ?3, ?4, ?5, ?6, '', ?7)",
+            params![
+                revision_id,
+                artifact_id,
+                i64::try_from(ordinal).map_err(|_| MemoryError::ContentTooLarge)?,
+                i64::try_from(span.start_byte).map_err(|_| MemoryError::ContentTooLarge)?,
+                i64::try_from(span.end_byte).map_err(|_| MemoryError::ContentTooLarge)?,
+                ARTIFACT_CHUNKER_VERSION,
+                &exact_body[span.start_byte..span.end_byte],
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn rebuild_artifact_chunk_index(connection: &Connection) -> Result<()> {
+    let revisions = {
+        let mut statement = connection.prepare(
+            "SELECT id, artifact_id, title, search_text, blob_hash, blob_size
+               FROM artifact_revisions ORDER BY commit_seq",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (revision_id, artifact_id, title, search_text, blob_hash, blob_size) in revisions {
+        // Older schemas allowed lossy UTF-8 conversion. Only a byte-identical
+        // search projection may become a cited body coordinate space.
+        let byte_identical = i64::try_from(search_text.len()).ok() == Some(blob_size)
+            && blake3::hash(search_text.as_bytes()).to_hex().as_str() == blob_hash;
+        index_artifact_revision_chunks(
+            connection,
+            &revision_id,
+            &artifact_id,
+            &title,
+            if byte_identical { &search_text } else { "" },
+        )?;
+    }
+    Ok(())
+}
+
+fn artifact_chunk_spans(text: &str) -> Vec<ArtifactChunkSpan> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let blocks = artifact_structural_blocks(text);
+    let mut chunks = Vec::new();
+    let mut current_start = blocks[0].start_byte;
+    let mut current_end = current_start;
+    for block in blocks {
+        let block_len = block.end_byte - block.start_byte;
+        if block_len > ARTIFACT_CHUNK_MAX_BYTES {
+            if current_end > current_start {
+                chunks.push(ArtifactChunkSpan {
+                    start_byte: current_start,
+                    end_byte: current_end,
+                });
+            }
+            chunks.extend(split_oversized_artifact_block(
+                text,
+                block.start_byte,
+                block.end_byte,
+            ));
+            current_start = block.end_byte;
+            current_end = block.end_byte;
+            continue;
+        }
+        if current_end == current_start {
+            current_start = block.start_byte;
+            current_end = block.end_byte;
+            continue;
+        }
+        let combined = block.end_byte - current_start;
+        if combined <= ARTIFACT_CHUNK_TARGET_BYTES
+            || (current_end - current_start < ARTIFACT_CHUNK_MIN_TAIL_BYTES
+                && combined <= ARTIFACT_CHUNK_MAX_BYTES)
+        {
+            current_end = block.end_byte;
+        } else {
+            chunks.push(ArtifactChunkSpan {
+                start_byte: current_start,
+                end_byte: current_end,
+            });
+            current_start = block.start_byte;
+            current_end = block.end_byte;
+        }
+    }
+    if current_end > current_start {
+        chunks.push(ArtifactChunkSpan {
+            start_byte: current_start,
+            end_byte: current_end,
+        });
+    }
+    if chunks.len() >= 2 {
+        let tail = chunks[chunks.len() - 1];
+        let previous = chunks[chunks.len() - 2];
+        if tail.end_byte - tail.start_byte < ARTIFACT_CHUNK_MIN_TAIL_BYTES
+            && tail.end_byte - previous.start_byte <= ARTIFACT_CHUNK_MAX_BYTES
+        {
+            chunks.pop();
+            chunks.last_mut().expect("previous chunk exists").end_byte = tail.end_byte;
+        }
+    }
+    debug_assert_artifact_chunk_partition(text, &chunks);
+    chunks
+}
+
+/// Produces deterministic, overlapping exact-byte slices small enough to avoid
+/// silently truncating evidence at the embedding model's token limit.
+fn semantic_window_spans(text: &str) -> Vec<ArtifactChunkSpan> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    while start < text.len() {
+        let ceiling =
+            floor_char_boundary(text, (start + SEMANTIC_WINDOW_MAX_BYTES).min(text.len()));
+        let end = if ceiling == text.len() {
+            ceiling
+        } else {
+            preferred_semantic_window_end(text, start, ceiling)
+        };
+        debug_assert!(end > start);
+        windows.push(ArtifactChunkSpan {
+            start_byte: start,
+            end_byte: end,
+        });
+        if end == text.len() {
+            break;
+        }
+        let desired = end.saturating_sub(SEMANTIC_WINDOW_OVERLAP_BYTES);
+        let mut next_start = nearest_word_boundary(text, desired, start + 1, end);
+        if next_start <= start {
+            next_start = next_char_boundary(text, start);
+        }
+        start = next_start;
+    }
+    debug_assert_semantic_windows(text, &windows);
+    windows
+}
+
+fn preferred_semantic_window_end(text: &str, start: usize, ceiling: usize) -> usize {
+    let preferred_floor = start + SEMANTIC_WINDOW_PREFERRED_MIN_BYTES;
+    let mut sentence = None;
+    let mut whitespace = None;
+    for (relative, character) in text[start..ceiling].char_indices() {
+        let boundary = start + relative + character.len_utf8();
+        if boundary < preferred_floor {
+            continue;
+        }
+        if character.is_whitespace() {
+            whitespace = Some(boundary);
+        }
+        if matches!(character, '.' | '!' | '?' | '\n') {
+            sentence = Some(boundary);
+        }
+    }
+    sentence.or(whitespace).unwrap_or(ceiling)
+}
+
+fn nearest_word_boundary(text: &str, desired: usize, minimum: usize, maximum: usize) -> usize {
+    let radius = SEMANTIC_WINDOW_OVERLAP_BYTES / 2;
+    // Snap forward only. Together with the preferred minimum window size this
+    // bounds progress even for adversarial whitespace and prevents O(n)
+    // near-duplicate windows.
+    let lower = floor_char_boundary(text, desired.max(minimum));
+    let upper = floor_char_boundary(text, (desired + radius).min(maximum));
+    let mut best = None;
+    for (relative, character) in text[lower..upper].char_indices() {
+        if !character.is_whitespace() {
+            continue;
+        }
+        let boundary = lower + relative + character.len_utf8();
+        if boundary < minimum || boundary >= maximum {
+            continue;
+        }
+        let distance = boundary.abs_diff(desired);
+        if best.is_none_or(|(best_distance, best_boundary)| {
+            distance < best_distance || (distance == best_distance && boundary < best_boundary)
+        }) {
+            best = Some((distance, boundary));
+        }
+    }
+    best.map(|(_, boundary)| boundary)
+        .unwrap_or_else(|| floor_char_boundary(text, desired.max(minimum)))
+}
+
+fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
+    byte = byte.min(text.len());
+    while byte > 0 && !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
+fn next_char_boundary(text: &str, byte: usize) -> usize {
+    byte + text[byte..].chars().next().map_or(0, char::len_utf8)
+}
+
+fn debug_assert_semantic_windows(text: &str, windows: &[ArtifactChunkSpan]) {
+    debug_assert!(!windows.is_empty());
+    debug_assert_eq!(windows[0].start_byte, 0);
+    debug_assert_eq!(
+        windows.last().map(|window| window.end_byte),
+        Some(text.len())
+    );
+    for (index, window) in windows.iter().enumerate() {
+        debug_assert!(window.start_byte < window.end_byte);
+        debug_assert!(window.end_byte - window.start_byte <= SEMANTIC_WINDOW_MAX_BYTES);
+        debug_assert!(text.is_char_boundary(window.start_byte));
+        debug_assert!(text.is_char_boundary(window.end_byte));
+        if index > 0 {
+            debug_assert!(windows[index - 1].start_byte < window.start_byte);
+            debug_assert!(window.start_byte < windows[index - 1].end_byte);
+        }
+    }
+}
+
+fn artifact_structural_blocks(text: &str) -> Vec<ArtifactChunkSpan> {
+    let mut blocks = Vec::new();
+    let mut block_start = 0;
+    let mut offset = 0;
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let trimmed = line.trim_start();
+        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        let heading = !in_fence && trimmed.starts_with('#');
+        if heading && line_start > block_start {
+            blocks.push(ArtifactChunkSpan {
+                start_byte: block_start,
+                end_byte: line_start,
+            });
+            block_start = line_start;
+        }
+        if fence {
+            if !in_fence && line_start > block_start {
+                blocks.push(ArtifactChunkSpan {
+                    start_byte: block_start,
+                    end_byte: line_start,
+                });
+                block_start = line_start;
+            }
+            in_fence = !in_fence;
+            if !in_fence {
+                blocks.push(ArtifactChunkSpan {
+                    start_byte: block_start,
+                    end_byte: offset,
+                });
+                block_start = offset;
+            }
+        } else if !in_fence && line.trim().is_empty() {
+            blocks.push(ArtifactChunkSpan {
+                start_byte: block_start,
+                end_byte: offset,
+            });
+            block_start = offset;
+        }
+    }
+    if offset < text.len() {
+        offset = text.len();
+    }
+    if block_start < offset {
+        blocks.push(ArtifactChunkSpan {
+            start_byte: block_start,
+            end_byte: offset,
+        });
+    }
+    blocks.retain(|block| block.end_byte > block.start_byte);
+    if blocks.is_empty() {
+        blocks.push(ArtifactChunkSpan {
+            start_byte: 0,
+            end_byte: text.len(),
+        });
+    }
+    blocks
+}
+
+fn split_oversized_artifact_block(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+) -> Vec<ArtifactChunkSpan> {
+    let mut chunks = Vec::new();
+    let mut start = start_byte;
+    while end_byte - start > ARTIFACT_CHUNK_MAX_BYTES {
+        let ceiling = start + ARTIFACT_CHUNK_MAX_BYTES;
+        let target = (start + ARTIFACT_CHUNK_TARGET_BYTES).min(ceiling);
+        let split = preferred_artifact_split(text, start, target, ceiling);
+        chunks.push(ArtifactChunkSpan {
+            start_byte: start,
+            end_byte: split,
+        });
+        start = split;
+    }
+    if start < end_byte {
+        chunks.push(ArtifactChunkSpan {
+            start_byte: start,
+            end_byte,
+        });
+    }
+    chunks
+}
+
+fn preferred_artifact_split(text: &str, start: usize, target: usize, ceiling: usize) -> usize {
+    let mut ceiling = ceiling;
+    while ceiling > start && !text.is_char_boundary(ceiling) {
+        ceiling -= 1;
+    }
+    let range = &text[start..ceiling];
+    let target_relative = target.saturating_sub(start).min(range.len());
+    let choose = |predicate: &dyn Fn(&str, usize) -> bool| {
+        range
+            .char_indices()
+            .filter_map(|(index, _)| {
+                let boundary = index;
+                (boundary >= target_relative && predicate(range, boundary)).then_some(boundary)
+            })
+            .last()
+            .map(|relative| start + relative)
+    };
+    choose(&|source, boundary| source[..boundary].ends_with("\n\n"))
+        .or_else(|| choose(&|source, boundary| source[..boundary].ends_with('\n')))
+        .or_else(|| {
+            choose(&|source, boundary| {
+                let before = source[..boundary].chars().next_back();
+                let after = source[boundary..].chars().next();
+                matches!(before, Some('.' | '!' | '?')) && after.is_some_and(char::is_whitespace)
+            })
+        })
+        .or_else(|| {
+            choose(&|source, boundary| {
+                source[boundary..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+            })
+        })
+        .unwrap_or(ceiling)
+}
+
+fn debug_assert_artifact_chunk_partition(text: &str, chunks: &[ArtifactChunkSpan]) {
+    debug_assert!(!chunks.is_empty());
+    debug_assert_eq!(chunks[0].start_byte, 0);
+    debug_assert_eq!(chunks.last().map(|chunk| chunk.end_byte), Some(text.len()));
+    for (index, chunk) in chunks.iter().enumerate() {
+        debug_assert!(chunk.start_byte < chunk.end_byte);
+        debug_assert!(chunk.end_byte - chunk.start_byte <= ARTIFACT_CHUNK_MAX_BYTES);
+        debug_assert!(text.is_char_boundary(chunk.start_byte));
+        debug_assert!(text.is_char_boundary(chunk.end_byte));
+        if index > 0 {
+            debug_assert_eq!(chunks[index - 1].end_byte, chunk.start_byte);
+        }
+    }
+}
+
+fn parse_query_units(query: &str) -> Vec<QueryUnit> {
+    let mut units = Vec::new();
+    let mut buffer = String::new();
+    let mut quoted = false;
+    for character in query.chars() {
+        if character == '"' {
+            if quoted {
+                push_phrase_unit(&buffer, &mut units);
+            } else {
+                push_unquoted_units(&buffer, &mut units);
+            }
+            buffer.clear();
+            quoted = !quoted;
+        } else {
+            buffer.push(character);
+        }
+    }
+    if quoted {
+        // An unmatched quote is treated as ordinary punctuation rather than
+        // changing the meaning of the remainder of the query.
+        push_unquoted_units(&buffer, &mut units);
+    } else {
+        push_unquoted_units(&buffer, &mut units);
+    }
+    units
+}
+
+fn push_unquoted_units(source: &str, units: &mut Vec<QueryUnit>) {
+    for piece in source.split_whitespace() {
+        let trimmed = piece.trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != '-'
+        });
+        let hyphen_parts = trimmed.split('-').collect::<Vec<_>>();
+        if hyphen_parts.len() > 1
+            && hyphen_parts.iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_')
+            })
+        {
+            push_unit_from_tokens(
+                hyphen_parts.into_iter().map(str::to_owned).collect(),
+                true,
+                units,
+            );
+        } else {
+            for token in lexical_tokens(trimmed) {
+                push_unit_from_tokens(vec![token], false, units);
+            }
+        }
+    }
+}
+
+fn push_phrase_unit(source: &str, units: &mut Vec<QueryUnit>) {
+    let tokens = lexical_tokens(source);
+    if !tokens.is_empty() {
+        push_unit_from_tokens(tokens, true, units);
+    }
+}
+
+fn push_unit_from_tokens(tokens: Vec<String>, phrase: bool, units: &mut Vec<QueryUnit>) {
+    if tokens.is_empty() {
+        return;
+    }
+    let tokens = tokens
+        .into_iter()
+        .map(|token| token.to_lowercase())
+        .collect::<Vec<_>>();
+    let display = tokens.join(" ");
+    let expression = format!("\"{}\"", display.replace('"', "\"\""));
+    units.push(QueryUnit {
+        display,
+        expression,
+        phrase,
+        component_count: tokens.len(),
+    });
+}
+
+fn lexical_tokens(source: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    for character in query.chars() {
+    for character in source.chars() {
         if character.is_alphanumeric() || character == '_' {
             current.push(character);
         } else if !current.is_empty() {
@@ -3663,21 +6537,71 @@ fn fts_query(query: &str) -> Result<String> {
     if !current.is_empty() {
         tokens.push(current);
     }
-    if tokens.is_empty() {
-        return Err(MemoryError::InvalidRequest(
-            "search query must contain at least one word or identifier".into(),
-        ));
+    tokens
+}
+
+fn required_lexical_matches(unit_count: usize) -> usize {
+    match unit_count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        count => 2.max((count * 2).div_ceil(5)),
     }
-    if tokens.len() > 48 {
-        return Err(MemoryError::InvalidRequest(
-            "search query must not contain more than 48 words or identifiers".into(),
-        ));
-    }
-    Ok(tokens
-        .into_iter()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR "))
+}
+
+fn is_query_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "about"
+            | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "been"
+            | "but"
+            | "by"
+            | "can"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "how"
+            | "i"
+            | "if"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "its"
+            | "may"
+            | "of"
+            | "on"
+            | "or"
+            | "should"
+            | "that"
+            | "the"
+            | "their"
+            | "this"
+            | "to"
+            | "was"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "will"
+            | "with"
+            | "would"
+    )
 }
 
 fn idempotency_replay<T: DeserializeOwned>(
@@ -3911,7 +6835,10 @@ fn searchable_text(media_type: &str, bytes: &[u8]) -> String {
                 | "image/svg+xml"
         );
     if textual {
-        String::from_utf8_lossy(bytes).into_owned()
+        // Search spans are byte citations into the immutable source. Invalid
+        // UTF-8 cannot be transformed lossily without changing that coordinate
+        // space, so it remains title-searchable but has no body projection.
+        std::str::from_utf8(bytes).unwrap_or_default().to_owned()
     } else {
         String::new()
     }
@@ -4426,6 +7353,7 @@ fn recompute_claim_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn context(project: &str) -> AmbientContext {
         context_with_task(project, Some("task"))
@@ -4475,6 +7403,11 @@ mod tests {
             effective_at_basis: RecencyTimestampBasis::RevisionCreatedAt,
             profile,
             recency_eligible: true,
+            commit_seq: 0,
+            index_rowid: 0,
+            lexical_candidate: true,
+            trigram_score: None,
+            semantic_score: None,
         }
     }
 
@@ -4506,6 +7439,150 @@ mod tests {
         assert_eq!(hits[0].ranking.lexical_position, 1);
         assert_eq!(hits[0].ranking.final_position, 1);
         assert!(hits[1].ranking.recency_bonus > hits[0].ranking.recency_bonus);
+    }
+
+    #[test]
+    fn reranker_scores_only_reorder_non_exact_hits_deterministically() {
+        let evaluated_at = Utc::now();
+        let profile = RecencyProfile {
+            class: RecencyDecayClass::General,
+            half_life_days: 180.0,
+            max_bonus_ratio: 0.05,
+        };
+        let mut hits = ["exact-a", "exact-b", "candidate-a", "candidate-b"]
+            .into_iter()
+            .map(|id| ranking_candidate(id, 1.0, evaluated_at, profile).hit)
+            .collect::<Vec<_>>();
+        hits[0].ranking.exact_tier = true;
+        hits[1].ranking.exact_tier = true;
+        let exact_before = hits[..2]
+            .iter()
+            .map(|hit| {
+                (
+                    hit.entity_id.clone(),
+                    hit.excerpt.clone(),
+                    hit.citation.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let original = hits.clone();
+
+        apply_reranker_scores(&mut hits, &[2, 3], &[-4.0, 6.0]);
+        assert_eq!(
+            hits[..2]
+                .iter()
+                .map(|hit| (
+                    hit.entity_id.clone(),
+                    hit.excerpt.clone(),
+                    hit.citation.clone()
+                ))
+                .collect::<Vec<_>>(),
+            exact_before
+        );
+        assert_eq!(hits[2].entity_id, "candidate-b");
+        assert_eq!(hits[2].excerpt, "candidate-b");
+        assert!(hits[2].citation.contains("candidate-b"));
+        assert_eq!(
+            hits[2].provenance["reranker"]["qualification_enabled"],
+            Value::Bool(false)
+        );
+
+        let mut restarted = original;
+        apply_reranker_scores(&mut restarted, &[2, 3], &[-4.0, 6.0]);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.entity_id.as_str())
+                .collect::<Vec<_>>(),
+            restarted
+                .iter()
+                .map(|hit| hit.entity_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn artifact_surface_never_invokes_cross_encoder_ordering() {
+        let evaluated_at = Utc::now();
+        let profile = RecencyProfile {
+            class: RecencyDecayClass::General,
+            half_life_days: 180.0,
+            max_bonus_ratio: 0.05,
+        };
+        let mut hits = ["artifact-a", "artifact-b"]
+            .into_iter()
+            .map(|id| ranking_candidate(id, 1.0, evaluated_at, profile).hit)
+            .collect::<Vec<_>>();
+        let original_order = hits
+            .iter()
+            .map(|hit| {
+                (
+                    hit.entity_id.clone(),
+                    hit.excerpt.clone(),
+                    hit.citation.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let temporary = tempfile::tempdir().unwrap();
+        let reranker = RerankerManager::new(temporary.path());
+
+        let status = order_hits_with_reranker(
+            &reranker,
+            Some(EntityType::Artifact),
+            "artifact ordering",
+            &mut hits,
+        )
+        .unwrap();
+
+        assert_eq!(status.state, "surface_disabled");
+        assert_eq!(status.surface, "artifact");
+        assert_eq!(status.scored_candidate_count, 0);
+        assert!(!status.ordering_applied);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (
+                    hit.entity_id.clone(),
+                    hit.excerpt.clone(),
+                    hit.citation.clone()
+                ))
+                .collect::<Vec<_>>(),
+            original_order
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| !hit.provenance.contains_key("reranker"))
+        );
+    }
+
+    #[test]
+    fn unresolved_conflict_candidate_is_retained_without_displacing_exact_hits() {
+        let evaluated_at = Utc::now();
+        let profile = RecencyProfile {
+            class: RecencyDecayClass::General,
+            half_life_days: 180.0,
+            max_bonus_ratio: 0.05,
+        };
+        let mut hits = [
+            "exact",
+            "candidate-a",
+            "candidate-b",
+            "conflict",
+            "candidate-c",
+        ]
+        .into_iter()
+        .map(|id| ranking_candidate(id, 1.0, evaluated_at, profile).hit)
+        .collect::<Vec<_>>();
+        hits[0].ranking.exact_tier = true;
+        hits[3].status = "conflicted".into();
+
+        retain_conflicted_hits_within_limit(&mut hits, 3);
+
+        assert_eq!(hits[0].entity_id, "exact");
+        assert!(hits[..3].iter().any(|hit| hit.entity_id == "conflict"));
+        let conflict = hits.iter().find(|hit| hit.entity_id == "conflict").unwrap();
+        assert_eq!(
+            conflict.provenance["conflict_retention"]["policy_version"],
+            Value::String("conflict_retention_v1".into())
+        );
     }
 
     #[test]
@@ -4583,6 +7660,458 @@ mod tests {
             "semantic payload"
         );
         assert!(searchable_text("application/octet-stream", b"semantic payload").is_empty());
+        assert!(searchable_text("text/plain", b"invalid \xff utf8").is_empty());
+    }
+
+    #[test]
+    fn artifact_chunks_are_a_complete_stable_utf8_partition() {
+        let text = format!(
+            "# Heading\n\n{}\n\n```text\n{}\n```\n\n{}",
+            "paragraph with emoji 🧭. ".repeat(300),
+            "fenced λ content ".repeat(400),
+            "尾部内容。".repeat(500)
+        );
+        let first = artifact_chunk_spans(&text);
+        let second = artifact_chunk_spans(&text);
+        assert_eq!(first, second);
+        assert_eq!(first.first().unwrap().start_byte, 0);
+        assert_eq!(first.last().unwrap().end_byte, text.len());
+        for pair in first.windows(2) {
+            assert_eq!(pair[0].end_byte, pair[1].start_byte);
+        }
+        for chunk in first {
+            assert!(chunk.end_byte - chunk.start_byte <= ARTIFACT_CHUNK_MAX_BYTES);
+            assert!(text.is_char_boundary(chunk.start_byte));
+            assert!(text.is_char_boundary(chunk.end_byte));
+        }
+    }
+
+    #[test]
+    fn semantic_windows_are_stable_bounded_overlapping_utf8_slices() {
+        let text = format!(
+            "# Memory retrieval\n\n{}\n{}",
+            "semantic claims with emoji 🧭 and exact evidence. ".repeat(80),
+            "尾部证据必须保持精确。 ".repeat(80)
+        );
+        let first = semantic_window_spans(&text);
+        let second = semantic_window_spans(&text);
+        assert_eq!(first, second);
+        assert_eq!(first.first().unwrap().start_byte, 0);
+        assert_eq!(first.last().unwrap().end_byte, text.len());
+        assert!(first.len() > 2);
+        for (index, window) in first.iter().enumerate() {
+            assert!(window.start_byte < window.end_byte);
+            assert!(window.end_byte - window.start_byte <= SEMANTIC_WINDOW_MAX_BYTES);
+            assert!(text.is_char_boundary(window.start_byte));
+            assert!(text.is_char_boundary(window.end_byte));
+            if index > 0 {
+                assert!(first[index - 1].start_byte < window.start_byte);
+                assert!(window.start_byte < first[index - 1].end_byte);
+            }
+        }
+        for token in text.split_whitespace() {
+            let token_start = text.find(token).unwrap();
+            let token_end = token_start + token.len();
+            assert!(first.iter().any(|window| {
+                window.start_byte <= token_start && window.end_byte >= token_end
+            }));
+        }
+    }
+
+    #[test]
+    fn semantic_windows_handle_short_and_empty_text() {
+        assert!(semantic_window_spans("").is_empty());
+        assert_eq!(
+            semantic_window_spans("short 🧭 evidence"),
+            vec![ArtifactChunkSpan {
+                start_byte: 0,
+                end_byte: "short 🧭 evidence".len(),
+            }]
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn semantic_windows_preserve_arbitrary_utf8_with_bounded_progress(
+            characters in proptest::collection::vec(any::<char>(), 0..4096)
+        ) {
+            let text = characters.into_iter().collect::<String>();
+            let windows = semantic_window_spans(&text);
+            if text.is_empty() {
+                prop_assert!(windows.is_empty());
+                return Ok(());
+            }
+            prop_assert_eq!(windows.first().map(|window| window.start_byte), Some(0));
+            prop_assert_eq!(windows.last().map(|window| window.end_byte), Some(text.len()));
+            prop_assert!(windows.len() <= text.len().div_ceil(256) + 1);
+            let mut covered_end = 0usize;
+            let mut previous_start = None;
+            for window in &windows {
+                prop_assert!(window.start_byte < window.end_byte);
+                prop_assert!(window.end_byte - window.start_byte <= SEMANTIC_WINDOW_MAX_BYTES);
+                prop_assert!(text.is_char_boundary(window.start_byte));
+                prop_assert!(text.is_char_boundary(window.end_byte));
+                prop_assert!(window.start_byte <= covered_end);
+                if let Some(start) = previous_start {
+                    prop_assert!(window.start_byte > start);
+                }
+                let exact = &text[window.start_byte..window.end_byte];
+                prop_assert_eq!(exact.as_bytes(), &text.as_bytes()[window.start_byte..window.end_byte]);
+                covered_end = covered_end.max(window.end_byte);
+                previous_start = Some(window.start_byte);
+            }
+            prop_assert_eq!(covered_end, text.len());
+        }
+    }
+
+    #[test]
+    fn long_artifact_search_returns_an_exact_body_span() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let body = format!(
+            "{}\n\n# Deep section\n\nThe deepneedle is paired with zebraflux for verification.\n\n{}",
+            "ordinary architectural background. ".repeat(2500),
+            "unrelated appendix material. ".repeat(1200)
+        );
+        let inserted = store
+            .artifact_put(
+                &context("one"),
+                &artifact("Very long architecture note", &body),
+                Some("long-span"),
+                "long-span",
+            )
+            .unwrap();
+        let result = store
+            .search_qualified(
+                &context("one"),
+                &SearchInput {
+                    query: "deepneedle zebraflux".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        let hit = &result.hits[0];
+        assert_eq!(hit.entity_id, inserted.value.artifact_id);
+        let (_, span) = hit.citation.rsplit_once('#').unwrap();
+        let (start, end) = span.split_once('-').unwrap();
+        let start: usize = start.parse().unwrap();
+        let end: usize = end.parse().unwrap();
+        assert_eq!(hit.excerpt, body[start..end]);
+        assert!(hit.excerpt.contains("deepneedle"));
+        assert!(end - start <= ARTIFACT_CHUNK_MAX_BYTES);
+        assert_eq!(
+            hit.provenance["retrieval_span"]["coordinate_space"],
+            "immutable_artifact_bytes"
+        );
+    }
+
+    #[test]
+    fn title_match_is_spanless_even_for_a_many_chunk_artifact() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact("ORBITAL-TITLE-742", &"body material. ".repeat(4000)),
+                Some("title-spanless"),
+                "title-spanless",
+            )
+            .unwrap();
+        let result = store
+            .search_qualified(
+                &context("one"),
+                &SearchInput {
+                    query: "ORBITAL-TITLE-742".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert!(!result.hits[0].citation.contains('#'));
+        assert_eq!(result.hits[0].excerpt, "ORBITAL-TITLE-742");
+        assert_eq!(result.hits[0].provenance["retrieval_match"], "title");
+    }
+
+    #[test]
+    fn document_qualification_survives_terms_in_distant_chunks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let body = format!(
+            "alphaunique begins the decision.\n\n{}\n\nomegaunique closes the decision.",
+            "middle context without either marker. ".repeat(500)
+        );
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact("Distributed decision", &body),
+                Some("distant-terms"),
+                "distant-terms",
+            )
+            .unwrap();
+        let result = store
+            .search_qualified(
+                &context("one"),
+                &SearchInput {
+                    query: "alphaunique omegaunique".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.hits[0].ranking.qualified);
+        assert_eq!(result.hits[0].ranking.matched_unit_count, 2);
+        assert!(result.hits[0].citation.contains('#'));
+    }
+
+    #[test]
+    fn lexical_threshold_is_explicit_for_small_and_long_queries() {
+        let expected = [0, 1, 2, 2, 2, 2, 3, 3, 4, 4, 4];
+        for (unit_count, required) in expected.into_iter().enumerate() {
+            assert_eq!(required_lexical_matches(unit_count), required);
+        }
+    }
+
+    #[test]
+    fn query_analysis_preserves_phrases_identifiers_and_all_stopword_queries() {
+        let analyzed = analyze_query("What about APP-BOUNDARY-101 and \"cold cache\"?").unwrap();
+        assert_eq!(
+            analyzed
+                .units
+                .iter()
+                .map(|unit| (unit.display.as_str(), unit.phrase))
+                .collect::<Vec<_>>(),
+            vec![("app boundary 101", true), ("cold cache", true)]
+        );
+        assert_eq!(analyzed.required_matches, 2);
+        assert_eq!(analyzed.dropped_stopwords, vec!["about", "and", "what"]);
+
+        let underscore = analyze_query("SCOPED_ALPHA_01").unwrap();
+        assert_eq!(underscore.units[0].display, "scoped_alpha_01");
+        assert!(!underscore.units[0].phrase);
+
+        let stopwords = analyze_query("what is the").unwrap();
+        assert_eq!(stopwords.units.len(), 3);
+        assert!(stopwords.dropped_stopwords.is_empty());
+    }
+
+    #[test]
+    fn qualified_search_abstains_but_reports_weak_lexical_candidates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact("Runtime boundary", "The runtime snapshot is versioned."),
+                Some("weak-candidate"),
+                "weak-candidate",
+            )
+            .unwrap();
+        let input = SearchInput {
+            query: "What runtime stores user login records in the database?".into(),
+            horizon: Horizon::Ambient,
+            reason: None,
+            limit: 10,
+            include_historical: false,
+            min_commit_seq: None,
+            recency: Default::default(),
+        };
+        let broad = store.search(&context("one"), &input).unwrap();
+        assert_eq!(broad.hits.len(), 1);
+        assert!(!broad.hits[0].ranking.qualified);
+        assert_eq!(broad.hits[0].ranking.matched_terms, vec!["runtime"]);
+
+        let qualified = store.search_qualified(&context("one"), &input).unwrap();
+        assert!(qualified.hits.is_empty());
+        assert_eq!(qualified.unqualified_candidate_count, 1);
+        assert_eq!(qualified.best_unqualified_coverage, Some(1.0 / 6.0));
+    }
+
+    #[test]
+    fn hyphenated_identifier_requires_adjacent_ordered_fts_tokens() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let exact = store
+            .artifact_put(
+                &context("one"),
+                &artifact("Exact", "Decision APP-BOUNDARY-101 is accepted."),
+                Some("identifier-exact"),
+                "identifier-exact",
+            )
+            .unwrap();
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact(
+                    "Scattered",
+                    "The app starts here. A boundary appears later. Revision 101 is unrelated.",
+                ),
+                Some("identifier-scattered"),
+                "identifier-scattered",
+            )
+            .unwrap();
+        let result = store
+            .search_qualified(
+                &context("one"),
+                &SearchInput {
+                    query: "APP-BOUNDARY-101".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entity_id, exact.value.artifact_id);
+        assert_eq!(
+            result.hits[0].ranking.matched_phrase_groups,
+            vec!["app boundary 101"]
+        );
+    }
+
+    #[test]
+    fn trigram_typo_recovery_returns_a_qualified_exact_source_span() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let body = "The browser engine is the authoritative solver and UI forks are prohibited.";
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact("Solver boundary", body),
+                Some("trigram-typo"),
+                "trigram-typo",
+            )
+            .unwrap();
+        let input = SearchInput {
+            query: "browsr authorative solvr".into(),
+            horizon: Horizon::Ambient,
+            reason: None,
+            limit: 10,
+            include_historical: false,
+            min_commit_seq: None,
+            recency: Default::default(),
+        };
+        let first = store.search_qualified(&context("one"), &input).unwrap();
+        let second = store.search_qualified(&context("one"), &input).unwrap();
+        assert_eq!(first.hits.len(), 1);
+        assert!(first.hits[0].ranking.trigram_qualified);
+        assert!(!first.hits[0].ranking.lexical_qualified);
+        assert!(first.hits[0].citation.contains('#'));
+        assert_eq!(first.hits[0].excerpt, body);
+        assert_eq!(first.hits[0].entity_id, second.hits[0].entity_id);
+        assert_eq!(first.hits[0].citation, second.hits[0].citation);
+        assert_eq!(
+            first.hits[0].ranking.trigram_matched_terms,
+            second.hits[0].ranking.trigram_matched_terms
+        );
+        assert_eq!(
+            first.hits[0].ranking.fusion_score,
+            second.hits[0].ranking.fusion_score
+        );
+    }
+
+    #[test]
+    fn partial_lexical_match_does_not_starve_typo_candidates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let relevant = store
+            .artifact_put(
+                &context("one"),
+                &artifact(
+                    "Authority policy",
+                    "The browser follows the authoritative deployment policy.",
+                ),
+                Some("mixed-relevant"),
+                "mixed-relevant",
+            )
+            .unwrap();
+        store
+            .artifact_put(
+                &context("one"),
+                &artifact(
+                    "Browser settings",
+                    "The browser setting controls dashboard colors.",
+                ),
+                Some("mixed-distractor"),
+                "mixed-distractor",
+            )
+            .unwrap();
+        let result = store
+            .search_qualified(
+                &context("one"),
+                &SearchInput {
+                    query: "browser setting authortative".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        let recovered = result
+            .hits
+            .iter()
+            .find(|hit| hit.entity_id == relevant.value.artifact_id)
+            .expect("the typo-supported candidate must not be starved");
+        assert!(recovered.ranking.trigram_qualified);
+    }
+
+    #[test]
+    fn verification_detects_same_count_trigram_content_drift() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let inserted = store
+            .artifact_put(
+                &context("one"),
+                &artifact("Projection source", "authoritative source body"),
+                Some("trigram-drift"),
+                "trigram-drift",
+            )
+            .unwrap();
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "DELETE FROM artifact_trigram_fts WHERE revision_id = ?1",
+                    [&inserted.value.revision_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO artifact_trigram_fts(revision_id, artifact_id, title, body)
+                     VALUES (?1, ?2, 'Projection source', 'drifted body')",
+                    params![inserted.value.revision_id, inserted.value.artifact_id],
+                )
+                .unwrap();
+        }
+        let report = store.verify().unwrap();
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("trigram rows differ"))
+        );
     }
 
     fn artifact(title: &str, body: &str) -> ArtifactPutInput {
@@ -4664,6 +8193,74 @@ mod tests {
             "different-hash",
         );
         assert!(matches!(conflict, Err(MemoryError::IdempotencyConflict(_))));
+    }
+
+    #[test]
+    fn schema_v3_backfills_only_exact_artifact_byte_partitions() {
+        let temporary = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(temporary.path()).unwrap();
+            store
+                .artifact_put(
+                    &context("migration-v3"),
+                    &artifact(
+                        "Migration artifact",
+                        &format!("{} migrationneedle", "context. ".repeat(1000)),
+                    ),
+                    Some("migration-v3-artifact"),
+                    "migration-v3-artifact",
+                )
+                .unwrap();
+            let connection = store.connection.lock();
+            connection
+                .execute("DELETE FROM artifact_chunk_fts", [])
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+                    [],
+                )
+                .unwrap();
+        }
+        let migrated = Store::open(temporary.path()).unwrap();
+        let migration = migrated
+            .schema_migration()
+            .expect("schema 3 migration must publish a recovery snapshot");
+        assert_eq!(migration.from_schema, 3);
+        assert_eq!(migration.to_schema, 4);
+        let backup = PathBuf::from(&migration.backup_destination);
+        assert!(backup.join(MEMOREE_DATABASE_FILE).is_file());
+        assert!(backup.join("migration.json").is_file());
+        let backup_connection = Connection::open(backup.join(MEMOREE_DATABASE_FILE)).unwrap();
+        let backup_schema: i64 = backup_connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backup_schema, 3,
+            "recovery snapshot must remain pre-migration"
+        );
+        assert_eq!(migrated.verify().unwrap().schema_version, 4);
+        assert!(migrated.verify().unwrap().ok);
+        let result = migrated
+            .search_qualified(
+                &context("migration-v3"),
+                &SearchInput {
+                    query: "migrationneedle".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.hits[0].citation.contains('#'));
     }
 
     #[test]
@@ -4803,7 +8400,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(schema_version, 3);
+        assert_eq!(schema_version, 4);
         assert_eq!(counts, (2, 3, 1, last_seq));
         drop(connection);
         assert!(migrated.verify().unwrap().ok);
@@ -4972,7 +8569,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
-        assert_eq!(schema_version, 3);
+        assert_eq!(schema_version, 4);
         assert_eq!(migrated_event_ids, preserved_event_ids);
         drop(connection);
         assert!(migrated.verify().unwrap().ok);

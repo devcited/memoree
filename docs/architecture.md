@@ -20,11 +20,15 @@ One Rust binary provides the CLI and daemon. The CLI resolves client-local ambie
 - Consumption and echoing of the attached context, plus retrieval-horizon enforcement. Scoped storage and retrieval paths validate context before use.
 - The JSON request/response protocol.
 
+The CLI probes daemon version, schema, and lifecycle ownership before ordinary requests. Installer reconciliation may replace only the default daemon it owns (plus the explicitly observed one-time v0.2 legacy case); direct `serve` and explicit endpoints remain supervisor-owned.
+
 SQLite is authoritative. The CAS is immutable. FTS rows and any future vector index are derived projections that can be rebuilt.
+
+Every authority schema migration is serialized under a private lock. Before schema 1–3 becomes schema 4, Memoree checks available space and atomically publishes a verified old-schema SQLite/CAS recovery snapshot. The migration then rebuilds deterministic projections and verifies SQLite, foreign keys, and projection coverage before commit. Upgrade state records the prior daemon state and phase so interruption cannot turn a previously running installation into a silently stopped one.
 
 Running one process avoids separate Postgres, object-store, and search-server memory footprints. Docker Compose is packaging rather than an architectural dependency; the same binary can run directly on the host.
 
-General model reasoning and tool execution remain outside the daemon. A caller can request one scoped, byte-bounded context bundle and pass it to any companion or model under that caller's own policy. The CLI additionally provides one bounded adapter, `memoree remember`, that invokes Codex/Luna solely to compile natural language into a strict claim proposal. The daemon never receives model-provider credentials, launches a model, or executes generated output.
+General model reasoning and tool execution remain outside the daemon. A caller can request one scoped, byte-bounded context bundle and pass it to any companion or model under that caller's own policy. The CLI additionally provides one bounded adapter, `memoree remember`, that invokes a selected authenticated Codex or Claude CLI solely to compile natural language into a strict claim proposal. The daemon never receives model-provider credentials, launches a model, or executes generated output.
 
 ## Ambient context
 
@@ -68,15 +72,17 @@ Recency is enabled by default for recall/search/context requests and can be disa
 
 ## Model boundary
 
-`memory.recall` is the default agent-facing knowledge check. It owns no index, embedding, model call, or alternate ranker: it projects the existing current-only search path into separate claim and artifact-reference lists. Claims carry immutable evidence spans and open contradiction IDs; `presence` distinguishes claims, artifact-only material, and no match without asserting truth or broadening scope. This moves repetitive result assembly out of every agent while keeping reasoning outside the daemon.
+`memory.recall` is the default agent-facing knowledge check. It projects one authority-filtered retrieval snapshot into separate claim and artifact-reference lists plus a separately labelled candidate channel. Claims carry immutable evidence spans and open contradiction IDs; `presence` is derived only from deterministic qualification and distinguishes claims, artifact-only material, and no qualified match without asserting truth or broadening scope. Candidates never become facts or model context automatically.
+
+SQLite authority and exact lexical/trigram tiers remain sufficient on their own. An explicitly installed Snowflake Arctic Embed S projection can add private candidate windows; cosine never qualifies an answer. A separately installed MiniLM-L12 cross-encoder may order non-exact claim candidates only. It never touches exact-tier order, artifact/mixed surfaces, qualification, scope, lifecycle, or citations. Model bytes are revision/digest pinned, installed deliberately, warmed before queries, and never downloaded by a retrieval call. Missing/error/slow ordering fails open to the deterministic fused order.
 
 `memoree checkpoint` is also caller-side. It stores one private, bounded, last-write-wins continuity note per session under a pending directory that the daemon, database, CAS, search index, recall, and context builder never inspect. Review and compiler preview remain local; only explicit `memoree pending apply` crosses the normal remember write boundary. This prevents lifecycle capture from becoming background self-mutation or artifact-only retrieval noise.
 
 `context.build` is the explicit handoff from memory to an external reasoning system. It freezes the retrieval result, labels excerpts as untrusted, preserves exact citations, reports conflicts and truncation, and stays within the caller's byte budget. Ambient retrieval is the default; wider horizons still require a reason.
 
-`memoree remember` is a narrow caller-side exception to manual orchestration, not a daemon operation or general agent loop. The CLI resolves and freezes ambient scope before inference, runs one ephemeral `gpt-5.6-luna` call in a private read-only work directory with tools, web search, user configuration, rules, hooks, apps, memories, and multi-agent behavior disabled, and requires a strict JSON Schema result. Luna returns only typed statements and exact source quotes. Rust enforces bounds, rejects unknown fields, duplicate statements, missing quotes, and non-unique quotes, then computes byte spans itself. Preview is the default; only `--apply` submits ordinary idempotent artifact and claim mutations. A compiler or authentication failure performs no write; raw preservation requires an intentional `--raw --apply` invocation.
+`memoree remember` is a narrow caller-side exception to manual orchestration, not a daemon operation or general agent loop. The CLI resolves and freezes ambient scope before inference, validates a private persisted provider/model choice against model data requested from the authenticated CLI, and runs one ephemeral low-effort schema-constrained call with tools and session persistence disabled. Codex additionally disables web search, user configuration, rules, hooks, apps, memories, and multi-agent behavior; Claude uses safe mode with an empty tool set. The compiler returns only typed statements and exact source quotes. Rust enforces bounds, rejects unknown fields, duplicate statements, missing quotes, and non-unique quotes, then computes byte spans itself. Preview is the default; only `--apply` submits ordinary idempotent artifact and claim mutations. A compiler or authentication failure performs no write; raw preservation requires an intentional `--raw --apply` invocation.
 
-The default subprocess environment exposes `HOME`/`CODEX_HOME` so Codex can reuse cached ChatGPT login, while excluding API keys and access tokens. API-key auth is a per-invocation fallback available only through explicit `--allow-api-key`; callers must ask the human before enabling it. Even then, the key is supplied to `codex exec`, not used by a direct API implementation.
+The default subprocess environment exposes only the small set of home/config, path, locale, and temporary-directory variables needed for cached ChatGPT or claude.ai login, while excluding API keys and access tokens. API-key auth is a Codex-only per-invocation fallback available only through explicit `--allow-api-key`; callers must ask the human before enabling it. Even then, the key is supplied to `codex exec`, not used by a direct API implementation.
 
 This boundary intentionally denies the model authority over context, retrieval horizon, artifact identity, confidence, relations, conflicts, lifecycle changes, deletion, and write intent. `--raw` bypasses inference entirely. Other reasoning still belongs to the consuming companion, and model output is never itself a protocol request.
 
@@ -102,11 +108,11 @@ An explicit `derived_from`, `supports`, `contradicts`, `supersedes`, `references
 
 ### Chunk
 
-The v0.1 lexical index uses one private, rebuildable FTS row per complete artifact or claim revision; sub-revision chunking is not implemented yet. If chunk projections are added, their identifiers will remain private. Search excerpts always cite a stable artifact/claim revision, and durable evidence locators additionally carry an exact byte span. An agent fetches the cited revision before turning an excerpt into evidence, so changing the retrieval projection cannot invalidate stored claims.
+The schema-v4 lexical projection keeps private exact artifact chunks and immutable byte offsets for long content; the semantic projection uses overlapping, bounded windows no larger than 384 bytes. Projection identities never escape as authority. Search excerpts always cite a stable artifact/claim revision and, when derived from an artifact body span, the exact `[start_byte, end_byte)` bytes. Title-only matches reset to the revision citation rather than retaining a stale body span. Durable evidence locators remain exact artifact-revision spans, so rebuilding either projection cannot invalidate stored claims.
 
 ### Recall result
 
-A deterministic claim-first read for “does memory have something about this?” It returns current or disputed claims with exact evidence revisions and byte spans, open contradiction summaries, and a separate bounded list of raw artifact references. It never generates prose, assigns truth confidence, searches history, or broadens the horizon.
+A deterministic claim-first read for “does memory have something about this?” It returns current or disputed claims with exact evidence revisions and byte spans, open contradiction summaries, and a separate bounded list of raw artifact references. Up to five per-type `unqualified_candidate` suggestions may expose useful near-matches from the same snapshot without affecting `presence`; they carry exact citations but are not remembered facts. Recall never generates prose, assigns truth confidence, searches history, or broadens the horizon.
 
 ### Context bundle
 
@@ -134,4 +140,4 @@ The storage boundary is intended to admit a generic S3-compatible blob adapter l
 
 When added, SeaweedFS should remain opt-in and non-authoritative. A usable profile must include deterministic credentials, idempotent bucket creation, authenticated put/get/delete readiness checks, disk-headroom reporting, and backups that pair a database checkpoint with a blob manifest at the same commit sequence. Merely seeing a healthy SeaweedFS process is not sufficient.
 
-Postgres, external search, semantic embeddings, and model-based reranking are also deferred until measured workloads justify their additional processes and resource use. The implemented deterministic recency adjustment is deliberately not semantic reranking and adds no service or model dependency.
+Postgres and external search remain deferred. Local semantic embeddings and ordering-only reranking are optional, pinned projections admitted only behind evidence-first boundaries: authority filtering precedes model work, exact qualification remains deterministic, context bundles stay qualified-only, and resource/quality promotion gates are evaluated separately.

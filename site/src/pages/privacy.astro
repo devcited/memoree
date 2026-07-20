@@ -10,7 +10,7 @@ import SiteLayout from '../layouts/SiteLayout.astro';
     <h2>What the CLI sends</h2>
     <p>Normal daemon, storage, recall, search, context, and checkpoint operations make no network requests. The CLI does not automatically check for updates.</p>
     <h2>The explicit model-assisted command</h2>
-    <p><code>memoree remember</code> can invoke the locally installed Codex CLI when you ask it to compile natural language into grounded claims. The source is sent only as part of that explicit command. Preview is the default; persistence requires <code>--apply</code>. See <a href="/docs/model-integration/">agent integration</a> for the exact boundary.</p>
+    <p><code>memoree remember</code> can invoke your selected locally authenticated Codex or Claude CLI when you ask it to compile natural language into grounded claims. The source is sent only as part of that explicit command. Provider/model selection is stored locally; preview is the default and persistence requires <code>--apply</code>. See <a href="/docs/model-integration/">agent integration</a> for the exact boundary.</p>
     <h2>Downloads and updates</h2>
     <p>The install script contacts this domain for the release pointer and versioned archive/checksum URLs. Those download URLs redirect to the matching public GitHub Release. Running the installer is the update action. Memoree performs no background download.</p>
     <h2>Website logs</h2>

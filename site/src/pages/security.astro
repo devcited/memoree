@@ -10,7 +10,7 @@ import SiteLayout from '../layouts/SiteLayout.astro';
     <h2>No hidden network path</h2>
     <p>The Memoree crate has no HTTP client. Normal daemon, storage, recall, search, context, checkpoint, verification, and backup operations do not contact this website or an update service. The binary never checks for updates automatically.</p>
     <h2>Explicit model boundary</h2>
-    <p><code>memoree remember</code> is a caller-side convenience that shells out to the locally installed, already authenticated Codex CLI for one tool-free, schema-constrained compilation. Preview is the default. The daemon never invokes a model, reads a provider credential, or executes model output.</p>
+    <p><code>memoree remember</code> is a caller-side convenience that shells out to a selected, locally installed, subscription-authenticated Codex or Claude CLI for one tool-free, schema-constrained compilation. Memoree requests login state and live models from the CLIs, strips API credentials from normal child environments, and validates all exact evidence spans in Rust. Preview is the default. The daemon never invokes a model, reads a provider credential, or executes model output.</p>
     <h2>Local transport</h2>
     <p>The default Unix socket lives in an owner-only runtime directory and is mode <code>0600</code>. Loopback TCP is host-local but not user-private, and non-loopback TCP requires an intentionally alarming opt-in flag. Authorization is outside the local personal v0.1 scope.</p>
     <h2>Release integrity</h2>

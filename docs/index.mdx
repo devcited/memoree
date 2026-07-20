@@ -24,7 +24,7 @@ hero:
   <a className="memoree-doc-card" href="/docs/protocol/">
     <span>02 / RECALL</span>
     <strong>Recall claims with references</strong>
-    <p>Ask whether Memoree has something and receive claims, exact evidence revisions, byte spans, and open conflicts.</p>
+    <p>Receive qualified claims with exact evidence plus separately labelled, cited leads when a near-match needs corroboration.</p>
   </a>
   <a className="memoree-doc-card" href="/docs/model-integration/">
     <span>03 / CONTEXT</span>
@@ -48,7 +48,7 @@ memoree context build "deployment constraints" --max-bytes 4096
 memoree remember --apply "Production deploys require a clean migration check."
 ```
 
-Normal retrieval stays within ambient project/task context. A `none` result is honest absence at that horizon, not permission to widen the search. Broaden to workspace or personal scope only for a separate request with a reason.
+Normal retrieval stays within ambient project/task context. A `none` result means no qualified match at that horizon, not permission to widen the search. Any `unqualified_candidate` items remain cited leads rather than remembered facts. Broaden to workspace or personal scope only for a separate request with a reason.
 
 ## Understand the boundaries
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_root="https://memoree.dev/releases"
+release_root="${MEMOREE_RELEASE_ROOT:-https://memoree.dev/releases}"
 version="${MEMOREE_VERSION:-}"
 install_dir="${MEMOREE_INSTALL_DIR:-}"
 temp_dir=""
@@ -19,7 +19,7 @@ cleanup() {
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
 
-for command_name in curl tar awk uname mktemp mkdir install mv rm grep tr; do
+for command_name in curl tar awk uname mktemp mkdir install mv cp rm grep tr; do
   command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 
@@ -53,6 +53,24 @@ download_root="$release_root/download/$version"
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/memoree-install.XXXXXXXX")"
 archive_path="$temp_dir/$archive"
 checksum_path="$archive_path.sha256"
+previous_version=""
+previous_daemon_running=0
+rollback_memoree="$temp_dir/rollback-memoree"
+rollback_eval="$temp_dir/rollback-memoree-eval"
+
+if [ -x "$install_dir/memoree" ]; then
+  previous_version="$("$install_dir/memoree" --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+  cp -p "$install_dir/memoree" "$rollback_memoree"
+  if [ -x "$install_dir/memoree-eval" ]; then
+    cp -p "$install_dir/memoree-eval" "$rollback_eval"
+  fi
+  if (
+    unset MEMOREE_ENDPOINT MEMOREE_NO_AUTOSTART
+    "$install_dir/memoree" daemon status >/dev/null 2>&1
+  ); then
+    previous_daemon_running=1
+  fi
+fi
 
 printf 'Downloading memoree %s for %s...\n' "$version" "$target"
 curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive_path" "$download_root/$archive"
@@ -77,8 +95,52 @@ package_dir="$temp_dir/unpack/memoree-$target"
 
 install -m 755 "$package_dir/memoree" "$install_dir/.memoree.new.$$"
 install -m 755 "$package_dir/memoree-eval" "$install_dir/.memoree-eval.new.$$"
-mv -f "$install_dir/.memoree.new.$$" "$install_dir/memoree"
-mv -f "$install_dir/.memoree-eval.new.$$" "$install_dir/memoree-eval"
+mv -f "$install_dir/.memoree-eval.new.$$" "$install_dir/memoree-eval" ||
+  fail "could not install memoree-eval"
+if ! mv -f "$install_dir/.memoree.new.$$" "$install_dir/memoree"; then
+  if [ -x "$rollback_eval" ]; then
+    cp -p "$rollback_eval" "$install_dir/memoree-eval"
+  else
+    rm -f -- "$install_dir/memoree-eval"
+  fi
+  fail "could not install memoree"
+fi
 
-printf 'Installed memoree %s to %s\n' "$version" "$install_dir"
-printf 'If a daemon is already running, run: memoree daemon restart\n'
+upgrade_status=0
+if [ "$previous_daemon_running" -eq 1 ]; then
+  "$install_dir/memoree" upgrade apply \
+    --previous-version "$previous_version" \
+    --legacy-default-was-running || upgrade_status=$?
+elif [ -n "$previous_version" ]; then
+  "$install_dir/memoree" upgrade apply \
+    --previous-version "$previous_version" || upgrade_status=$?
+else
+  "$install_dir/memoree" upgrade apply || upgrade_status=$?
+fi
+
+if [ "$upgrade_status" -ne 0 ] && [ "$upgrade_status" -ne 20 ]; then
+  rollback_safe=0
+  "$install_dir/memoree" upgrade rollback-safe >/dev/null 2>&1 || rollback_safe=$?
+  if [ "$rollback_safe" -eq 0 ] && [ -x "$rollback_memoree" ]; then
+    mv -f "$rollback_memoree" "$install_dir/memoree"
+    if [ -x "$rollback_eval" ]; then
+      mv -f "$rollback_eval" "$install_dir/memoree-eval"
+    fi
+    if [ "$previous_daemon_running" -eq 1 ]; then
+      (
+        unset MEMOREE_ENDPOINT MEMOREE_NO_AUTOSTART
+        "$install_dir/memoree" daemon restart >/dev/null
+      ) || fail "upgrade failed; previous binaries were restored but the previous daemon could not be restarted"
+    fi
+    fail "upgrade reconciliation failed; previous binaries were restored"
+  fi
+  if [ "$rollback_safe" -eq 0 ]; then
+    fail "post-install reconciliation failed; no previous binary was available to restore"
+  fi
+  fail 'upgrade reconciliation failed after the store reached the new schema; the new binaries were retained and memoree upgrade apply can be retried'
+fi
+
+printf 'Installed and reconciled memoree %s in %s\n' "$version" "$install_dir"
+if [ "$upgrade_status" -eq 20 ]; then
+  fail "the binary is installed, but a supervised daemon or post-migration health check requires attention"
+fi

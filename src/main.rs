@@ -15,11 +15,15 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
 use memoree::{
     checkpoint::{CheckpointStore, MAX_CHECKPOINT_INPUT_BYTES},
+    compiler::{
+        CompilerProvider, CompilerRegistry, SelectionOrigin, interactive_selection_available,
+    },
     context::{
         AppPaths, ContextResolver, MARKER_FILE, MEMOREE_CONTEXT_ENV, encode_memory_context,
         init_marker, task_context,
     },
     error::{MemoryError, Result},
+    eval::run_retrieval_eval_with_models,
     protocol::{
         AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput,
         ArtifactHistoryInput, ArtifactPutInput, ArtifactReviseInput, BackupCreateInput,
@@ -30,12 +34,19 @@ use memoree::{
         RelationType, Request, Response, SearchInput, Warning,
     },
     remember::{
-        CodexCompiler, REMEMBER_MODEL, REMEMBER_SCHEMA_VERSION, ValidatedClaim,
-        ValidatedCompilation, deterministic_title, input_digest,
+        REMEMBER_SCHEMA_VERSION, ValidatedClaim, ValidatedCompilation, deterministic_title,
+        input_digest,
     },
+    reranker_eval::evaluate_reranker_pairs,
     service::MemoryService,
-    store::{ArtifactRecord, ClaimRecord, MEMOREE_DATABASE_FILE, MutationResult, Store},
+    store::{
+        ArtifactRecord, ClaimRecord, MEMOREE_DATABASE_FILE, MutationResult, SCHEMA_VERSION, Store,
+    },
     transport::{self, Endpoint},
+    upgrade::{
+        SkillSyncReport, UpgradeLock, UpgradeState, ensure_upgrade_not_in_progress,
+        load_upgrade_state, sync_skills, write_upgrade_state,
+    },
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -87,10 +98,30 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommands,
     },
+    /// Reconcile binaries, storage, projections, daemon state, and agent skills.
+    Upgrade {
+        #[command(subcommand)]
+        command: UpgradeCommands,
+    },
+    /// Install or refresh Memoree's canonical agent integrations.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommands,
+    },
+    /// Inspect or choose the authenticated CLI used for claim compilation.
+    Compiler {
+        #[command(subcommand)]
+        command: CompilerCommands,
+    },
     /// Inspect ambient context or build a bounded context bundle.
     Context {
         #[command(subcommand)]
         command: ContextCommands,
+    },
+    /// Install, inspect, or rebuild the optional local semantic index.
+    Semantic {
+        #[command(subcommand)]
+        command: SemanticCommands,
     },
     /// Run a child process with an inherited task context.
     Session {
@@ -129,6 +160,8 @@ enum Commands {
     Schema,
     /// Print implemented protocol capabilities.
     Capabilities,
+    /// Run a versioned retrieval corpus in an isolated temporary store.
+    Eval(EvalArgs),
     /// Check daemon/database health.
     Doctor,
     /// Verify database, index, and blob integrity.
@@ -148,10 +181,10 @@ struct RememberArgs {
     /// Read UTF-8 text from a file instead of the command line.
     #[arg(long, value_name = "PATH", conflicts_with = "text")]
     file: Option<PathBuf>,
-    /// Store the source without invoking Codex or creating claims.
+    /// Store the source without invoking a compiler CLI or creating claims.
     #[arg(long)]
     raw: bool,
-    /// Explicitly permit API-key auth for this Codex invocation if CLI login is unavailable.
+    /// Explicitly use Codex with one-run API-key auth instead of a persisted CLI selection.
     #[arg(long, conflicts_with = "raw")]
     allow_api_key: bool,
     /// Apply the displayed plan. Without this flag, the command is read-only.
@@ -166,6 +199,19 @@ struct RememberArgs {
     /// Stable logical-operation key for exact retries.
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct EvalArgs {
+    /// Corpus directory containing seed.jsonl, cases.jsonl, and baseline.json.
+    #[arg(value_name = "CORPUS_DIRECTORY")]
+    corpus: PathBuf,
+    /// Verified local semantic model directory; enables dense evaluation without downloads.
+    #[arg(long, value_name = "DIRECTORY")]
+    semantic_model: Option<PathBuf>,
+    /// Verified local ordering-only reranker directory; no downloads or qualification.
+    #[arg(long, value_name = "DIRECTORY")]
+    reranker_model: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -234,6 +280,23 @@ struct ServeArgs {
     /// Use only behind a trusted container/network boundary.
     #[arg(long)]
     dangerously_allow_non_loopback_tcp: bool,
+    #[arg(long, value_enum, default_value_t = DaemonLifecycleOwner::External, hide = true)]
+    lifecycle_owner: DaemonLifecycleOwner,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DaemonLifecycleOwner {
+    Memoree,
+    External,
+}
+
+impl DaemonLifecycleOwner {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Memoree => "memoree",
+            Self::External => "external",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -247,10 +310,104 @@ enum DaemonCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum UpgradeCommands {
+    /// Apply the idempotent local reconciliation required by an installed update.
+    Apply {
+        /// Version replaced by the installer, when known.
+        #[arg(long)]
+        previous_version: Option<String>,
+        /// Permit the one-time 0.2 legacy default daemon restart.
+        #[arg(long)]
+        legacy_default_was_running: bool,
+    },
+    /// Show the durable reconciliation state without starting a daemon.
+    Status,
+    /// Installer-only downgrade guard after a failed reconciliation.
+    #[command(hide = true)]
+    RollbackSafe,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommands {
+    /// Atomically synchronize the embedded use-memoree skill to installed agent homes.
+    Sync,
+}
+
+#[derive(Debug, Subcommand)]
+enum CompilerCommands {
+    /// Discover installed CLIs, login state, live models, and the saved selection.
+    Status,
+    /// Validate and persist the preferred compiler provider and model.
+    Configure {
+        /// Authenticated CLI provider. Prompted when omitted in a terminal.
+        #[arg(long, value_enum)]
+        provider: Option<CompilerProviderArg>,
+        /// Live model id or alias reported by the selected CLI.
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompilerProviderArg {
+    Codex,
+    Claude,
+}
+
+impl From<CompilerProviderArg> for CompilerProvider {
+    fn from(value: CompilerProviderArg) -> Self {
+        match value {
+            CompilerProviderArg::Codex => Self::Codex,
+            CompilerProviderArg::Claude => Self::Claude,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
 enum ContextCommands {
     Show,
     Explain,
     Build(ContextBuildArgs),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum SemanticCommands {
+    /// Explicitly download and verify the pinned local model, then index memory.
+    Enable {
+        /// Install a previously downloaded model directory without network I/O.
+        #[arg(long, value_name = "DIRECTORY")]
+        from_directory: Option<PathBuf>,
+    },
+    /// Rebuild the semantic projection from local authority without network I/O.
+    Rebuild,
+    /// Inspect the installed model, projection coverage, and freshness.
+    Status,
+    /// Install the pinned local cross-encoder for ordering only.
+    EnableReranker {
+        /// Install previously downloaded pinned model bytes without network I/O.
+        #[arg(long, value_name = "DIRECTORY")]
+        from_directory: Option<PathBuf>,
+    },
+    /// Inspect the ordering-only reranker and latency breaker.
+    RerankerStatus,
+    /// Calibrate and evaluate a local reranker against disjoint pair corpora.
+    EvaluateReranker {
+        /// Verified local reranker model directory; no downloads are performed.
+        #[arg(long, value_name = "DIRECTORY")]
+        model_directory: PathBuf,
+        /// JSONL pair corpus used to choose raw-logit thresholds.
+        #[arg(long, value_name = "JSONL")]
+        calibration: PathBuf,
+        /// Disjoint JSONL pair corpus evaluated only after threshold selection.
+        #[arg(long, value_name = "JSONL")]
+        heldout: PathBuf,
+        /// Exact upstream model identifier recorded in calibration output.
+        #[arg(long, default_value = memoree::semantic::RERANKER_MODEL_ID)]
+        model_id: String,
+        /// Exact immutable upstream model revision recorded in calibration output.
+        #[arg(long, default_value = memoree::semantic::RERANKER_MODEL_REVISION)]
+        model_revision: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -503,6 +660,12 @@ struct RecallArgs {
     max_artifact_refs: usize,
     #[arg(long, default_value_t = 320)]
     max_excerpt_bytes: usize,
+    /// Maximum unqualified claim suggestions (0 disables, hard maximum 5).
+    #[arg(long, default_value_t = 3)]
+    max_candidate_claims: usize,
+    /// Maximum unqualified artifact suggestions (0 disables, hard maximum 5).
+    #[arg(long, default_value_t = 3)]
+    max_candidate_artifact_refs: usize,
     #[arg(long)]
     min_commit_seq: Option<i64>,
     /// Disable the small deterministic recency rerank for this retrieval.
@@ -616,9 +779,17 @@ struct MaterializeTarget {
 
 #[derive(Debug, Serialize)]
 struct RememberCompilerReport {
-    mode: &'static str,
+    mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'static str>,
+    provider: Option<CompilerProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cli_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection_origin: Option<SelectionOrigin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resolved_model_ids: Vec<String>,
     schema_version: u32,
 }
 
@@ -660,6 +831,22 @@ struct RememberResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stored_claims: Vec<MutationResult<ClaimRecord>>,
 }
+
+#[derive(Debug, Serialize)]
+struct UpgradeApplyReport {
+    from_version: Option<String>,
+    to_version: String,
+    authority: Value,
+    daemon: Value,
+    semantic: Value,
+    reranker: Value,
+    compiler: Value,
+    skills: Option<SkillSyncReport>,
+    state: UpgradeState,
+    warnings: Vec<String>,
+}
+
+const UPGRADE_POST_COMMIT_EXIT_CODE: i32 = 20;
 
 #[tokio::main]
 async fn main() {
@@ -733,6 +920,22 @@ async fn run(cli: Cli) -> Result<i32> {
         Commands::Serve(args) => serve_daemon(args, &paths).await,
         Commands::Daemon { command } => {
             daemon_command(command, cli.endpoint.as_deref(), &paths, cli.pretty).await
+        }
+        Commands::Upgrade { command } => {
+            upgrade_command(command, cli.endpoint.as_deref(), &paths, cli.pretty).await
+        }
+        Commands::Skills { command } => skills_command(command, &paths, cli.pretty),
+        Commands::Compiler { command } => compiler_command(command, &paths, cli.pretty).await,
+        Commands::Semantic { command } => semantic_command(command, &paths, cli.pretty).await,
+        Commands::Eval(args) => {
+            let report = run_retrieval_eval_with_models(
+                &args.corpus,
+                args.semantic_model.as_deref(),
+                args.reranker_model.as_deref(),
+            )
+            .await?;
+            print_json(&report, cli.pretty);
+            Ok(i32::from(!report.passed))
         }
         Commands::Context {
             command: ContextCommands::Show,
@@ -1044,6 +1247,8 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
                 max_claims: args.max_claims,
                 max_artifact_refs: args.max_artifact_refs,
                 max_excerpt_bytes: args.max_excerpt_bytes,
+                max_candidate_claims: args.max_candidate_claims,
+                max_candidate_artifact_refs: args.max_candidate_artifact_refs,
                 min_commit_seq: args.min_commit_seq,
                 recency: RecencyBiasInput {
                     enabled: !args.no_recency,
@@ -1078,6 +1283,11 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         | Commands::Pending { .. }
         | Commands::Serve(_)
         | Commands::Daemon { .. }
+        | Commands::Upgrade { .. }
+        | Commands::Skills { .. }
+        | Commands::Compiler { .. }
+        | Commands::Semantic { .. }
+        | Commands::Eval(_)
         | Commands::Context {
             command: ContextCommands::Show | ContextCommands::Explain,
         }
@@ -1093,6 +1303,510 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         materialize,
         auto_idempotency,
     })
+}
+
+async fn semantic_command(
+    command: SemanticCommands,
+    paths: &AppPaths,
+    pretty: bool,
+) -> Result<i32> {
+    if let SemanticCommands::EvaluateReranker {
+        model_directory,
+        calibration,
+        heldout,
+        model_id,
+        model_revision,
+    } = &command
+    {
+        let report = evaluate_reranker_pairs(
+            model_directory,
+            calibration,
+            heldout,
+            model_id,
+            model_revision,
+        )?;
+        print_json(&serde_json::to_value(&report)?, pretty);
+        return Ok(if report.passed { 0 } else { 1 });
+    }
+    let default_endpoint = resolve_endpoint(None, paths)?;
+    match probe_daemon(&default_endpoint).await {
+        Ok(response) => {
+            require_matching_daemon(&response, &default_endpoint)?;
+        }
+        Err(error) if daemon_is_unreachable(&error) => {}
+        Err(error) => return Err(error),
+    }
+    let store = Store::open(&paths.data_dir)?;
+    let output = match command {
+        SemanticCommands::Enable { from_directory } => {
+            let report = match from_directory {
+                Some(directory) => store.semantic_enable_from_directory(&directory)?,
+                None => store.semantic_enable()?,
+            };
+            serde_json::to_value(report)?
+        }
+        SemanticCommands::Rebuild => serde_json::to_value(store.semantic_rebuild()?)?,
+        SemanticCommands::Status => serde_json::to_value(store.semantic_status()?)?,
+        SemanticCommands::EnableReranker { from_directory } => {
+            let report = match from_directory {
+                Some(directory) => store.reranker_enable_from_directory(&directory)?,
+                None => store.reranker_enable()?,
+            };
+            serde_json::to_value(report)?
+        }
+        SemanticCommands::RerankerStatus => serde_json::to_value(store.reranker_status()?)?,
+        SemanticCommands::EvaluateReranker { .. } => unreachable!("handled above"),
+    };
+    print_json(&output, pretty);
+    Ok(0)
+}
+
+fn skills_command(command: SkillsCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
+    match command {
+        SkillsCommands::Sync => {
+            let report = sync_skills(paths)?;
+            let request = Request::new(Operation::ContextResolve, json!({}))?;
+            let response = Response::success(&request, report)?;
+            print_json(&response, pretty);
+            Ok(0)
+        }
+    }
+}
+
+async fn compiler_command(
+    command: CompilerCommands,
+    paths: &AppPaths,
+    pretty: bool,
+) -> Result<i32> {
+    let registry = CompilerRegistry::default();
+    let result = match command {
+        CompilerCommands::Status => serde_json::to_value(registry.status(paths).await?)?,
+        CompilerCommands::Configure { provider, model } => serde_json::to_value(
+            registry
+                .configure(
+                    paths,
+                    provider.map(Into::into),
+                    model,
+                    interactive_selection_available(),
+                )
+                .await?,
+        )?,
+    };
+    let request = Request::new(Operation::ContextResolve, json!({}))?;
+    let response = Response::success(&request, result)?;
+    print_json(&response, pretty);
+    Ok(0)
+}
+
+async fn upgrade_command(
+    command: UpgradeCommands,
+    endpoint_override: Option<&str>,
+    paths: &AppPaths,
+    pretty: bool,
+) -> Result<i32> {
+    match command {
+        UpgradeCommands::Status => {
+            let request = Request::new(Operation::ContextResolve, json!({}))?;
+            let response = Response::success(
+                &request,
+                json!({
+                    "binary_version": env!("CARGO_PKG_VERSION"),
+                    "target_schema_version": SCHEMA_VERSION,
+                    "state": load_upgrade_state(paths)?,
+                }),
+            )?;
+            print_json(&response, pretty);
+            Ok(0)
+        }
+        UpgradeCommands::RollbackSafe => {
+            let schema = Store::inspect_schema_version(&paths.data_dir)?;
+            let rollback_safe = schema.is_none_or(|version| version < SCHEMA_VERSION);
+            let request = Request::new(Operation::ContextResolve, json!({}))?;
+            let response = Response::success(
+                &request,
+                json!({
+                    "rollback_safe": rollback_safe,
+                    "store_schema_version": schema,
+                    "current_schema_version": SCHEMA_VERSION,
+                }),
+            )?;
+            print_json(&response, pretty);
+            Ok(if rollback_safe {
+                0
+            } else {
+                UPGRADE_POST_COMMIT_EXIT_CODE
+            })
+        }
+        UpgradeCommands::Apply {
+            previous_version,
+            legacy_default_was_running,
+        } => {
+            apply_upgrade(
+                paths,
+                endpoint_override,
+                previous_version,
+                legacy_default_was_running,
+                pretty,
+            )
+            .await
+        }
+    }
+}
+
+async fn apply_upgrade(
+    paths: &AppPaths,
+    endpoint_override: Option<&str>,
+    previous_version: Option<String>,
+    legacy_default_was_running: bool,
+    pretty: bool,
+) -> Result<i32> {
+    let _upgrade_lock = UpgradeLock::acquire(paths)?;
+    let endpoint = resolve_endpoint(endpoint_override, paths)?;
+    let observed = match probe_daemon(&endpoint).await {
+        Ok(response) => Some(doctor_result(&response)?),
+        Err(error) if daemon_is_unreachable(&error) => None,
+        Err(error) => return Err(error),
+    };
+    let previous_state = load_upgrade_state(paths)?;
+    let resumable_running_state = previous_state
+        .as_ref()
+        .filter(|state| {
+            state.target_version == env!("CARGO_PKG_VERSION") && state.phase != "complete"
+        })
+        .is_some_and(|state| state.prior_daemon_running);
+    let prior_daemon_running =
+        observed.is_some() || legacy_default_was_running || resumable_running_state;
+    let previous_daemon_version = previous_version
+        .or_else(|| {
+            observed
+                .as_ref()
+                .filter(|doctor| !doctor.binary_version.is_empty())
+                .map(|doctor| doctor.binary_version.clone())
+        })
+        .or_else(|| {
+            previous_state
+                .as_ref()
+                .and_then(|state| state.previous_daemon_version.clone())
+        });
+    let mut state = UpgradeState::new(prior_daemon_running, previous_daemon_version.clone());
+    if let Some(previous) = previous_state
+        && previous.target_version == env!("CARGO_PKG_VERSION")
+        && previous.phase != "complete"
+    {
+        state.prior_daemon_running |= previous.prior_daemon_running;
+        state.migration_backup = previous.migration_backup;
+        state.store_schema_version = previous.store_schema_version;
+    }
+    write_upgrade_state(paths, &state)?;
+
+    let mut warnings = Vec::new();
+    let compiler = match CompilerRegistry::default()
+        .reconcile_upgrade(paths, previous_daemon_version.as_deref())
+        .await
+    {
+        Ok(report) => serde_json::to_value(report)?,
+        Err(error) => {
+            warnings.push(format!(
+                "compiler preference reconciliation failed; `memoree remember` will require `memoree compiler configure`: {error}"
+            ));
+            json!({"state": "error", "reason": error.to_string()})
+        }
+    };
+    if endpoint_override.is_some() {
+        state.set_phase("external_daemon_action_required");
+        write_upgrade_state(paths, &state)?;
+        let skills = match sync_skills(paths) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                warnings.push(format!("agent skill sync failed: {error}"));
+                None
+            }
+        };
+        let report = UpgradeApplyReport {
+            from_version: previous_daemon_version,
+            to_version: env!("CARGO_PKG_VERSION").into(),
+            authority: json!({"state": "deferred", "reason": "an explicit endpoint is supervisor-owned"}),
+            daemon: json!({
+                "state": "external_action_required",
+                "endpoint": endpoint.display(),
+                "observed": observed,
+                "remediation": "restart the supervisor that owns the explicit daemon, then run `memoree upgrade apply` without that endpoint on its host if local reconciliation is required"
+            }),
+            semantic: json!({"state": "deferred", "downloaded": false}),
+            reranker: json!({"state": "deferred", "downloaded": false}),
+            compiler: compiler.clone(),
+            skills,
+            state,
+            warnings,
+        };
+        print_upgrade_report(report, pretty)?;
+        return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+    }
+    let mut daemon_stopped = false;
+    if let Some(doctor) = &observed {
+        let legacy_allowed = doctor.binary_version.is_empty()
+            && legacy_default_was_running
+            && previous_daemon_version
+                .as_deref()
+                .is_some_and(|version| version.trim_start_matches('v').starts_with("0.2."));
+        let managed = doctor.lifecycle_owner == "memoree";
+        if !managed && !legacy_allowed {
+            state.set_phase("external_daemon_action_required");
+            write_upgrade_state(paths, &state)?;
+            let skills = match sync_skills(paths) {
+                Ok(report) => Some(report),
+                Err(error) => {
+                    warnings.push(format!("agent skill sync failed: {error}"));
+                    None
+                }
+            };
+            let report = UpgradeApplyReport {
+                from_version: previous_daemon_version,
+                to_version: env!("CARGO_PKG_VERSION").into(),
+                authority: json!({"state": "deferred", "reason": "an external daemon still owns the store"}),
+                daemon: json!({
+                    "state": "external_action_required",
+                    "endpoint": endpoint.display(),
+                    "running": true,
+                    "binary_version": doctor.binary_version,
+                    "lifecycle_owner": doctor.lifecycle_owner,
+                    "remediation": "restart the supervisor that owns this daemon, then run `memoree upgrade apply` again"
+                }),
+                semantic: json!({"state": "deferred", "downloaded": false}),
+                reranker: json!({"state": "deferred", "downloaded": false}),
+                compiler: compiler.clone(),
+                skills,
+                state,
+                warnings,
+            };
+            print_upgrade_report(report, pretty)?;
+            return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+        }
+        stop_local_daemon(&endpoint).await?;
+        daemon_stopped = true;
+        state.set_phase("daemon_stopped");
+        write_upgrade_state(paths, &state)?;
+    }
+
+    let daemon_data_lock_path = paths.data_dir.join("memoreed.lock");
+    let daemon_data_lock = open_private_lock_file(&daemon_data_lock_path)?;
+    if let Err(error) = daemon_data_lock.try_lock_exclusive() {
+        state.set_phase("external_daemon_action_required");
+        write_upgrade_state(paths, &state)?;
+        let skills = match sync_skills(paths) {
+            Ok(report) => Some(report),
+            Err(skill_error) => {
+                warnings.push(format!("agent skill sync failed: {skill_error}"));
+                None
+            }
+        };
+        let report = UpgradeApplyReport {
+            from_version: previous_daemon_version,
+            to_version: env!("CARGO_PKG_VERSION").into(),
+            authority: json!({
+                "state": "deferred",
+                "reason": "another daemon still holds the authoritative data directory"
+            }),
+            daemon: json!({
+                "state": "external_action_required",
+                "lock": daemon_data_lock_path,
+                "reason": error.to_string(),
+                "remediation": "stop the supervisor or non-default daemon that owns this data directory, then run `memoree upgrade apply` again"
+            }),
+            semantic: json!({"state": "deferred", "downloaded": false}),
+            reranker: json!({"state": "deferred", "downloaded": false}),
+            compiler: compiler.clone(),
+            skills,
+            state,
+            warnings,
+        };
+        print_upgrade_report(report, pretty)?;
+        return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+    }
+
+    let database_path = paths.data_dir.join(MEMOREE_DATABASE_FILE);
+    let mut authority = json!({"state": "not_initialized", "database_present": false});
+    let mut semantic = json!({"state": "not_installed", "downloaded": false});
+    let mut reranker = json!({"state": "not_installed", "downloaded": false});
+    if database_path.is_file() {
+        state.set_phase("reconciling_authority");
+        write_upgrade_state(paths, &state)?;
+        let store = Store::open(&paths.data_dir)?;
+        let migration = store.schema_migration().cloned();
+        state.migration_backup = migration
+            .as_ref()
+            .map(|report| report.backup_destination.clone())
+            .or(state.migration_backup);
+        state.store_schema_version = Some(store.schema_version()?);
+        state.set_phase("authority_committed");
+        write_upgrade_state(paths, &state)?;
+
+        let verification = store.verify()?;
+        authority = json!({
+            "state": if verification.ok { "ready" } else { "verification_failed" },
+            "database_present": true,
+            "schema_version": verification.schema_version,
+            "last_commit_seq": verification.last_commit_seq,
+            "migration": migration,
+            "verification": verification,
+        });
+        if !authority["verification"]["ok"].as_bool().unwrap_or(false) {
+            state.set_phase("authority_verification_failed");
+            write_upgrade_state(paths, &state)?;
+            let report = UpgradeApplyReport {
+                from_version: previous_daemon_version,
+                to_version: env!("CARGO_PKG_VERSION").into(),
+                authority,
+                daemon: json!({"state": "stopped", "running_before": state.prior_daemon_running}),
+                semantic,
+                reranker,
+                compiler: compiler.clone(),
+                skills: None,
+                state,
+                warnings,
+            };
+            print_upgrade_report(report, pretty)?;
+            return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+        }
+
+        if store.semantic_model_installed() {
+            semantic = match store.semantic_status() {
+                Ok(status) if status.state == "ready" => serde_json::to_value(status)?,
+                Ok(status) => match store.semantic_rebuild() {
+                    Ok(rebuild) => json!({
+                        "state": "rebuilt",
+                        "downloaded": false,
+                        "previous_status": status,
+                        "rebuild": rebuild,
+                    }),
+                    Err(error) => {
+                        warnings.push(format!(
+                            "installed semantic projection could not be rebuilt; deterministic retrieval remains available: {error}"
+                        ));
+                        json!({"state": "error", "downloaded": false, "reason": error.to_string()})
+                    }
+                },
+                Err(error) => {
+                    warnings.push(format!(
+                        "installed semantic projection could not be inspected; deterministic retrieval remains available: {error}"
+                    ));
+                    json!({"state": "error", "downloaded": false, "reason": error.to_string()})
+                }
+            };
+        }
+        if store.reranker_model_installed() {
+            reranker = match store.reranker_status() {
+                Ok(status) => serde_json::to_value(status)?,
+                Err(error) => {
+                    warnings.push(format!(
+                        "installed reranker could not be warmed; deterministic ordering remains available: {error}"
+                    ));
+                    json!({"state": "error", "downloaded": false, "reason": error.to_string()})
+                }
+            };
+        }
+    }
+
+    let skills = match sync_skills(paths) {
+        Ok(report) => Some(report),
+        Err(error) => {
+            warnings.push(format!("agent skill sync failed: {error}"));
+            None
+        }
+    };
+    state.set_phase("local_state_reconciled");
+    write_upgrade_state(paths, &state)?;
+
+    drop(daemon_data_lock);
+    let should_restart = state.prior_daemon_running && (daemon_stopped || observed.is_none());
+    let daemon = if should_restart {
+        if let Err(error) = start_daemon(&endpoint, paths) {
+            state.set_phase("daemon_restart_failed");
+            write_upgrade_state(paths, &state)?;
+            warnings.push(format!("new daemon could not be started: {error}"));
+            let report = UpgradeApplyReport {
+                from_version: previous_daemon_version,
+                to_version: env!("CARGO_PKG_VERSION").into(),
+                authority,
+                daemon: json!({
+                    "state": "restart_failed",
+                    "running_before": true,
+                    "remediation": "run `memoree daemon restart`"
+                }),
+                semantic,
+                reranker,
+                compiler: compiler.clone(),
+                skills,
+                state,
+                warnings,
+            };
+            print_upgrade_report(report, pretty)?;
+            return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+        }
+        match wait_for_daemon(&endpoint).await {
+            Ok(response) => {
+                let doctor = require_matching_daemon(&response, &endpoint)?;
+                if doctor.schema_version != SCHEMA_VERSION || doctor.lifecycle_owner != "memoree" {
+                    state.set_phase("daemon_restart_failed");
+                    write_upgrade_state(paths, &state)?;
+                    warnings.push(format!(
+                        "new daemon health mismatch: schema={}, owner={}",
+                        doctor.schema_version, doctor.lifecycle_owner
+                    ));
+                    json!({"state": "restart_failed", "doctor": doctor})
+                } else {
+                    json!({"state": "restarted", "running_before": true, "doctor": doctor})
+                }
+            }
+            Err(error) => {
+                state.set_phase("daemon_restart_failed");
+                write_upgrade_state(paths, &state)?;
+                warnings.push(format!("new daemon failed its health check: {error}"));
+                json!({
+                    "state": "restart_failed",
+                    "running_before": true,
+                    "remediation": "run `memoree daemon restart`"
+                })
+            }
+        }
+    } else if let Some(doctor) = observed {
+        json!({"state": "already_current", "running_before": true, "doctor": doctor})
+    } else {
+        json!({"state": "remained_stopped", "running_before": false})
+    };
+
+    let restart_failed = daemon["state"] == "restart_failed";
+    state.set_phase(if restart_failed {
+        "daemon_restart_failed"
+    } else {
+        "complete"
+    });
+    write_upgrade_state(paths, &state)?;
+    let report = UpgradeApplyReport {
+        from_version: previous_daemon_version,
+        to_version: env!("CARGO_PKG_VERSION").into(),
+        authority,
+        daemon,
+        semantic,
+        reranker,
+        compiler,
+        skills,
+        state,
+        warnings,
+    };
+    print_upgrade_report(report, pretty)?;
+    Ok(if restart_failed {
+        UPGRADE_POST_COMMIT_EXIT_CODE
+    } else {
+        0
+    })
+}
+
+fn print_upgrade_report(report: UpgradeApplyReport, pretty: bool) -> Result<()> {
+    let request = Request::new(Operation::ContextResolve, json!({}))?;
+    let response = Response::success(&request, report)?;
+    print_json(&response, pretty);
+    Ok(())
 }
 
 fn checkpoint_command(args: CheckpointArgs, paths: &AppPaths, pretty: bool) -> Result<i32> {
@@ -1289,24 +2003,33 @@ async fn remember_command(
         (
             ValidatedCompilation { claims: vec![] },
             RememberCompilerReport {
-                mode: "raw",
+                mode: "raw".to_owned(),
+                provider: None,
                 model: None,
+                cli_version: None,
+                selection_origin: None,
+                resolved_model_ids: Vec::new(),
                 schema_version: REMEMBER_SCHEMA_VERSION,
             },
         )
     } else {
-        let compilation = CodexCompiler::new(args.allow_api_key)
-            .compile(&source)
+        let execution = CompilerRegistry::default()
+            .compile(
+                paths,
+                &source,
+                args.allow_api_key,
+                interactive_selection_available(),
+            )
             .await?;
         (
-            compilation,
+            execution.compilation,
             RememberCompilerReport {
-                mode: if args.allow_api_key {
-                    "codex_cli_api_key_permitted"
-                } else {
-                    "codex_cli_chatgpt"
-                },
-                model: Some(REMEMBER_MODEL),
+                mode: execution.report.mode,
+                provider: Some(execution.report.provider),
+                model: Some(execution.report.model),
+                cli_version: Some(execution.report.cli_version),
+                selection_origin: Some(execution.report.selection_origin),
+                resolved_model_ids: execution.report.resolved_model_ids,
                 schema_version: REMEMBER_SCHEMA_VERSION,
             },
         )
@@ -1355,12 +2078,30 @@ async fn remember_command(
             "remember_schema_version".to_owned(),
             Value::from(REMEMBER_SCHEMA_VERSION),
         );
-        provenance.insert(
-            "compiler".to_owned(),
-            Value::String(compiler.mode.to_owned()),
-        );
-        if compiler.model.is_some() {
-            provenance.insert("model".to_owned(), Value::String(REMEMBER_MODEL.to_owned()));
+        provenance.insert("compiler".to_owned(), Value::String(compiler.mode.clone()));
+        if let Some(provider) = compiler.provider {
+            provenance.insert(
+                "compiler_provider".to_owned(),
+                Value::String(provider.as_str().to_owned()),
+            );
+        }
+        if let Some(model) = &compiler.model {
+            provenance.insert("model".to_owned(), Value::String(model.clone()));
+        }
+        if let Some(cli_version) = &compiler.cli_version {
+            provenance.insert(
+                "compiler_cli_version".to_owned(),
+                Value::String(cli_version.clone()),
+            );
+        }
+        if let Some(origin) = compiler.selection_origin {
+            provenance.insert("compiler_selection_origin".to_owned(), json!(origin));
+        }
+        if !compiler.resolved_model_ids.is_empty() {
+            provenance.insert(
+                "resolved_model_ids".to_owned(),
+                serde_json::to_value(&compiler.resolved_model_ids)?,
+            );
         }
 
         let mut artifact_request = Request::new(
@@ -1600,15 +2341,22 @@ async fn dispatch(
     autostart: bool,
     paths: &AppPaths,
 ) -> Result<Response> {
-    match transport::request(endpoint, request).await {
-        Ok(response) => Ok(response),
+    match probe_daemon(endpoint).await {
+        Ok(doctor_response) => {
+            require_matching_daemon(&doctor_response, endpoint)?;
+            transport::request(endpoint, request).await
+        }
         Err(first_error) if autostart => {
+            ensure_upgrade_not_in_progress(paths)?;
             start_daemon(endpoint, paths)?;
             let mut last_error = first_error;
             for _ in 0..60 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                match transport::request(endpoint, request).await {
-                    Ok(response) => return Ok(response),
+                match probe_daemon(endpoint).await {
+                    Ok(doctor_response) => {
+                        require_matching_daemon(&doctor_response, endpoint)?;
+                        return transport::request(endpoint, request).await;
+                    }
                     Err(error) => last_error = error,
                 }
             }
@@ -1616,6 +2364,23 @@ async fn dispatch(
         }
         Err(error) => Err(error),
     }
+}
+
+fn require_matching_daemon(response: &Response, endpoint: &Endpoint) -> Result<DoctorResult> {
+    let doctor = doctor_result(response)?;
+    let current = env!("CARGO_PKG_VERSION");
+    if doctor.binary_version == current {
+        return Ok(doctor);
+    }
+    let running = if doctor.binary_version.is_empty() {
+        "a legacy daemon that does not report its version".to_owned()
+    } else {
+        format!("daemon version {}", doctor.binary_version)
+    };
+    Err(MemoryError::Config(format!(
+        "{running} is still serving {}; this CLI is {current}. Run `memoree upgrade apply` for the default local daemon, or restart the supervisor that owns an explicit endpoint",
+        endpoint.display()
+    )))
 }
 
 fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<()> {
@@ -1631,6 +2396,8 @@ fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<()> {
         .arg(endpoint.display())
         .arg("--data-dir")
         .arg(&paths.data_dir)
+        .arg("--lifecycle-owner")
+        .arg("memoree")
         .current_dir(&paths.data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -1861,7 +2628,10 @@ async fn serve_daemon(args: ServeArgs, paths: &AppPaths) -> Result<i32> {
             Endpoint::Unix(paths.socket_path.clone())
         }
     };
-    let service = Arc::new(MemoryService::new(Store::open(&data_dir)?));
+    let service = Arc::new(MemoryService::with_lifecycle_owner(
+        Store::open(&data_dir)?,
+        args.lifecycle_owner.as_str(),
+    ));
     transport::serve(
         endpoint,
         service,

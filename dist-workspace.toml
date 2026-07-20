@@ -7,8 +7,9 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["shell"]
+# memoree.dev/install.sh owns upgrade reconciliation; do not publish a second
+# binary-only installer that can leave an old daemon or schema behind.
+installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
 # Path that installers should place binaries in
@@ -23,7 +24,6 @@ hosting = "github"
 create-release = false
 # Publish verifiable GitHub build provenance for every release artifact.
 github-attestations = true
-# Whether to install an updater program
+# Whether to install an updater program. Updates remain explicit; the stable
+# domain installer performs the full idempotent reconciliation.
 install-updater = false
-# A resident daemon keeps running the old executable until explicitly restarted.
-install-success-msg = "Memoree is installed. If a daemon is already running, run: memoree daemon restart"

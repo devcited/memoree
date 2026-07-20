@@ -3,14 +3,23 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste 1.0.15 is an unmaintained compile-time proc-macro, not a reported
+    # vulnerability. It is transitive through pinned Candle/gemm and
+    # tokenizers, with no safe upgrade. Remove this exception when
+    # `cargo tree -i paste` is empty; revalidate model parity before unpinning.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro transitive through pinned Candle/tokenizers; no safe upgrade" },
+]
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
+    "BSD-3-Clause",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "MIT",
     "MIT-0",
     "MPL-2.0",

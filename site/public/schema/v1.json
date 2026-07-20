@@ -679,6 +679,20 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_candidate_artifact_refs": {
+          "default": 3,
+          "description": "Unqualified retrieval suggestions to expose separately from artifact\nreferences. Zero disables candidate artifact suggestions.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_candidate_claims": {
+          "default": 3,
+          "description": "Unqualified retrieval suggestions to expose separately from claims.\nZero disables candidate claim suggestions.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_claims": {
           "default": 5,
           "format": "uint",
@@ -2350,6 +2364,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_recall_candidate_artifact_refs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recall_candidate_claims": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_recall_claims": {
           "format": "uint",
           "minimum": 0,
@@ -2433,6 +2457,8 @@
         "max_search_items",
         "max_recall_claims",
         "max_recall_artifact_refs",
+        "max_recall_candidate_claims",
+        "max_recall_candidate_artifact_refs",
         "max_recall_excerpt_bytes",
         "max_recall_evidence_excerpts_per_claim",
         "max_history_items",
@@ -3866,6 +3892,192 @@
             "claim"
           ],
           "type": "string"
+        },
+        "RerankerCircuitBreakerStatus": {
+          "properties": {
+            "budget_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "consecutive_over_budget": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "probe_after_skips": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_since_open": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "trip_threshold": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "budget_ms",
+            "trip_threshold",
+            "consecutive_over_budget",
+            "probe_after_skips",
+            "skipped_since_open"
+          ],
+          "type": "object"
+        },
+        "RerankerRetrievalStatus": {
+          "properties": {
+            "breaker": {
+              "$ref": "#/$defs/RerankerCircuitBreakerStatus"
+            },
+            "candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit_reached": {
+              "type": "boolean"
+            },
+            "inference_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_load_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ordering_applied": {
+              "type": "boolean"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string"
+            },
+            "scored_candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "surface": {
+              "description": "Retrieval surface governed by this status: `claim`, `artifact`, or\n`control_plane` for a status-only request.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "role",
+            "surface",
+            "candidate_count",
+            "scored_candidate_count",
+            "ordering_applied",
+            "candidate_limit",
+            "candidate_limit_reached",
+            "breaker"
+          ],
+          "type": "object"
+        },
+        "SemanticRetrievalStatus": {
+          "properties": {
+            "coverage": {
+              "format": "double",
+              "type": "number"
+            },
+            "current_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "eligible_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "indexed_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "indexed_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "indexed_commit_seq",
+            "current_commit_seq",
+            "eligible_revision_count",
+            "indexed_revision_count",
+            "coverage"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3913,9 +4125,15 @@
         "rendered_markdown": {
           "type": "string"
         },
+        "reranker": {
+          "$ref": "#/$defs/RerankerRetrievalStatus"
+        },
         "retrieval_truncated": {
           "description": "Search had more matches than its retrieval limit. This is independent\nfrom `omitted_count`, which only reports byte-budget omissions.",
           "type": "boolean"
+        },
+        "semantic": {
+          "$ref": "#/$defs/SemanticRetrievalStatus"
         },
         "used_bytes": {
           "format": "uint",
@@ -3929,6 +4147,8 @@
         "max_bytes",
         "used_bytes",
         "rendered_markdown",
+        "semantic",
+        "reranker",
         "manifest",
         "retrieval_truncated",
         "omitted_count",
@@ -4032,6 +4252,10 @@
         "authoritative_store": {
           "type": "string"
         },
+        "binary_version": {
+          "default": "",
+          "type": "string"
+        },
         "daemon_pid": {
           "format": "uint32",
           "minimum": 0,
@@ -4041,11 +4265,20 @@
           "format": "int64",
           "type": "integer"
         },
+        "lifecycle_owner": {
+          "default": "",
+          "type": "string"
+        },
         "retrieval_mode": {
           "type": "string"
         },
         "running": {
           "type": "boolean"
+        },
+        "schema_version": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
         },
         "status": {
           "type": "string"
@@ -4254,6 +4487,40 @@
     },
     "memory.recall": {
       "$defs": {
+        "CandidateRankingSignals": {
+          "properties": {
+            "lexical_coverage": {
+              "format": "double",
+              "type": "number"
+            },
+            "reranker_raw_logit": {
+              "description": "Advisory ordering signal only. No qualification threshold exists.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "semantic_similarity": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "trigram_similarity": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "lexical_coverage"
+          ],
+          "type": "object"
+        },
         "ClaimType": {
           "enum": [
             "fact",
@@ -4291,6 +4558,48 @@
             "personal"
           ],
           "type": "string"
+        },
+        "QueryAnalysis": {
+          "properties": {
+            "content_units": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dropped_stopwords": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "normalized_query": {
+              "type": "string"
+            },
+            "phrase_groups": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "required_matches": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "policy_version",
+            "normalized_query",
+            "required_matches"
+          ],
+          "type": "object"
         },
         "RecallArtifactReference": {
           "properties": {
@@ -4343,6 +4652,107 @@
             "excerpt_truncated",
             "score",
             "matched_by"
+          ],
+          "type": "object"
+        },
+        "RecallCandidateArtifactReference": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "excerpt": {
+              "type": "string"
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "matched_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ranking_signals": {
+              "$ref": "#/$defs/CandidateRankingSignals"
+            },
+            "retrieval_tier": {
+              "description": "Always `unqualified_candidate`; this is a suggestion, not remembered\nfact or qualified evidence.",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "risk_signals": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "retrieval_tier",
+            "artifact_id",
+            "revision_id",
+            "title",
+            "citation",
+            "excerpt",
+            "excerpt_truncated",
+            "matched_by",
+            "ranking_signals"
+          ],
+          "type": "object"
+        },
+        "RecallCandidateClaim": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "$ref": "#/$defs/ClaimType"
+            },
+            "matched_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ranking_signals": {
+              "$ref": "#/$defs/CandidateRankingSignals"
+            },
+            "retrieval_tier": {
+              "description": "Always `unqualified_candidate`; serialized per item so the warning\nsurvives extraction from the surrounding recall response.",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "statement": {
+              "type": "string"
+            },
+            "statement_truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "retrieval_tier",
+            "claim_id",
+            "revision_id",
+            "claim_type",
+            "statement",
+            "statement_truncated",
+            "citation",
+            "matched_by",
+            "ranking_signals"
           ],
           "type": "object"
         },
@@ -4470,6 +4880,192 @@
             "none"
           ],
           "type": "string"
+        },
+        "RerankerCircuitBreakerStatus": {
+          "properties": {
+            "budget_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "consecutive_over_budget": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "probe_after_skips": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_since_open": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "trip_threshold": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "budget_ms",
+            "trip_threshold",
+            "consecutive_over_budget",
+            "probe_after_skips",
+            "skipped_since_open"
+          ],
+          "type": "object"
+        },
+        "RerankerRetrievalStatus": {
+          "properties": {
+            "breaker": {
+              "$ref": "#/$defs/RerankerCircuitBreakerStatus"
+            },
+            "candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit_reached": {
+              "type": "boolean"
+            },
+            "inference_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_load_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ordering_applied": {
+              "type": "boolean"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string"
+            },
+            "scored_candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "surface": {
+              "description": "Retrieval surface governed by this status: `claim`, `artifact`, or\n`control_plane` for a status-only request.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "role",
+            "surface",
+            "candidate_count",
+            "scored_candidate_count",
+            "ordering_applied",
+            "candidate_limit",
+            "candidate_limit_reached",
+            "breaker"
+          ],
+          "type": "object"
+        },
+        "SemanticRetrievalStatus": {
+          "properties": {
+            "coverage": {
+              "format": "double",
+              "type": "number"
+            },
+            "current_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "eligible_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "indexed_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "indexed_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "indexed_commit_seq",
+            "current_commit_seq",
+            "eligible_revision_count",
+            "indexed_revision_count",
+            "coverage"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4488,6 +5084,44 @@
         },
         "artifact_refs_truncated": {
           "type": "boolean"
+        },
+        "best_unqualified_artifact_coverage": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "best_unqualified_claim_coverage": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "candidate_artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/RecallCandidateArtifactReference"
+          },
+          "type": "array"
+        },
+        "candidate_artifact_refs_truncated": {
+          "type": "boolean"
+        },
+        "candidate_claims": {
+          "items": {
+            "$ref": "#/$defs/RecallCandidateClaim"
+          },
+          "type": "array"
+        },
+        "candidate_claims_truncated": {
+          "type": "boolean"
+        },
+        "candidates_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "claims": {
           "items": {
@@ -4514,26 +5148,63 @@
           "type": "boolean"
         },
         "presence": {
-          "$ref": "#/$defs/RecallPresence"
+          "$ref": "#/$defs/RecallPresence",
+          "description": "Qualified results only. Candidate lists never affect presence."
         },
         "query": {
           "type": "string"
+        },
+        "query_analysis": {
+          "$ref": "#/$defs/QueryAnalysis"
+        },
+        "reranker_artifacts": {
+          "$ref": "#/$defs/RerankerRetrievalStatus"
+        },
+        "reranker_claims": {
+          "$ref": "#/$defs/RerankerRetrievalStatus"
         },
         "searched_horizons": {
           "items": {
             "$ref": "#/$defs/Horizon"
           },
           "type": "array"
+        },
+        "semantic_artifacts": {
+          "$ref": "#/$defs/SemanticRetrievalStatus"
+        },
+        "semantic_claims": {
+          "$ref": "#/$defs/SemanticRetrievalStatus"
+        },
+        "unqualified_artifact_candidates": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unqualified_claim_candidates": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "content_is_untrusted",
         "query",
+        "query_analysis",
         "searched_horizons",
+        "semantic_claims",
+        "semantic_artifacts",
+        "reranker_claims",
+        "reranker_artifacts",
         "presence",
         "claims",
         "conflicts",
         "artifact_refs",
+        "candidate_claims",
+        "candidate_artifact_refs",
+        "candidate_claims_truncated",
+        "candidate_artifact_refs_truncated",
+        "unqualified_claim_candidates",
+        "unqualified_artifact_candidates",
         "claims_truncated",
         "artifact_refs_truncated"
       ],
@@ -4929,6 +5600,48 @@
           ],
           "type": "string"
         },
+        "QueryAnalysis": {
+          "properties": {
+            "content_units": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dropped_stopwords": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "normalized_query": {
+              "type": "string"
+            },
+            "phrase_groups": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "required_matches": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "policy_version",
+            "normalized_query",
+            "required_matches"
+          ],
+          "type": "object"
+        },
         "RecencyDecayClass": {
           "enum": [
             "ephemeral",
@@ -4947,6 +5660,132 @@
             "valid_from"
           ],
           "type": "string"
+        },
+        "RerankerCircuitBreakerStatus": {
+          "properties": {
+            "budget_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "consecutive_over_budget": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "probe_after_skips": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_since_open": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "trip_threshold": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "budget_ms",
+            "trip_threshold",
+            "consecutive_over_budget",
+            "probe_after_skips",
+            "skipped_since_open"
+          ],
+          "type": "object"
+        },
+        "RerankerRetrievalStatus": {
+          "properties": {
+            "breaker": {
+              "$ref": "#/$defs/RerankerCircuitBreakerStatus"
+            },
+            "candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit_reached": {
+              "type": "boolean"
+            },
+            "inference_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_load_latency_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ordering_applied": {
+              "type": "boolean"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string"
+            },
+            "scored_candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "surface": {
+              "description": "Retrieval surface governed by this status: `claim`, `artifact`, or\n`control_plane` for a status-only request.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "role",
+            "surface",
+            "candidate_count",
+            "scored_candidate_count",
+            "ordering_applied",
+            "candidate_limit",
+            "candidate_limit_reached",
+            "breaker"
+          ],
+          "type": "object"
         },
         "SearchHit": {
           "properties": {
@@ -5025,27 +5864,84 @@
               "format": "date-time",
               "type": "string"
             },
+            "exact_tier": {
+              "type": "boolean"
+            },
             "final_position": {
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "fusion_policy_version": {
+              "type": "string"
+            },
+            "fusion_score": {
+              "format": "double",
+              "type": "number"
+            },
+            "lexical_coverage": {
+              "format": "double",
+              "type": "number"
+            },
+            "lexical_policy_version": {
+              "type": "string"
             },
             "lexical_position": {
               "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
+            "lexical_qualified": {
+              "type": "boolean"
+            },
             "lexical_score": {
               "format": "double",
               "type": "number"
+            },
+            "matched_phrase_group_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "matched_phrase_groups": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "matched_terms": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "matched_unit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
             },
             "max_promotion": {
               "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
+            "phrase_group_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "policy_version": {
               "type": "string"
+            },
+            "qualified": {
+              "type": "boolean"
+            },
+            "query_unit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
             },
             "recency_bonus": {
               "format": "double",
@@ -5056,10 +5952,60 @@
             },
             "recency_enabled": {
               "type": "boolean"
+            },
+            "required_matches": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "semantic_qualified": {
+              "type": "boolean"
+            },
+            "semantic_similarity": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "trigram_matched_terms": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "trigram_policy_version": {
+              "type": "string"
+            },
+            "trigram_qualified": {
+              "type": "boolean"
+            },
+            "trigram_similarity": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
             }
           },
           "required": [
             "policy_version",
+            "lexical_policy_version",
+            "trigram_policy_version",
+            "fusion_policy_version",
+            "query_unit_count",
+            "matched_unit_count",
+            "required_matches",
+            "lexical_coverage",
+            "phrase_group_count",
+            "matched_phrase_group_count",
+            "lexical_qualified",
+            "trigram_qualified",
+            "semantic_qualified",
+            "qualified",
+            "exact_tier",
+            "fusion_score",
             "recency_enabled",
             "recency_eligible",
             "lexical_score",
@@ -5073,10 +6019,77 @@
             "decay_class"
           ],
           "type": "object"
+        },
+        "SemanticRetrievalStatus": {
+          "properties": {
+            "coverage": {
+              "format": "double",
+              "type": "number"
+            },
+            "current_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "eligible_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "indexed_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "indexed_revision_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "indexed_commit_seq",
+            "current_commit_seq",
+            "eligible_revision_count",
+            "indexed_revision_count",
+            "coverage"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "best_unqualified_coverage": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "broaden_hint": {
           "type": [
             "string",
@@ -5092,8 +6105,14 @@
         "horizon": {
           "$ref": "#/$defs/Horizon"
         },
+        "qualification_applied": {
+          "type": "boolean"
+        },
         "query": {
           "type": "string"
+        },
+        "query_analysis": {
+          "$ref": "#/$defs/QueryAnalysis"
         },
         "refine_hint": {
           "type": [
@@ -5101,17 +6120,33 @@
             "null"
           ]
         },
+        "reranker": {
+          "$ref": "#/$defs/RerankerRetrievalStatus"
+        },
         "retrieval_mode": {
           "type": "string"
         },
+        "semantic": {
+          "$ref": "#/$defs/SemanticRetrievalStatus"
+        },
         "truncated": {
           "type": "boolean"
+        },
+        "unqualified_candidate_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "query",
+        "query_analysis",
         "horizon",
         "retrieval_mode",
+        "semantic",
+        "reranker",
+        "qualification_applied",
+        "unqualified_candidate_count",
         "hits",
         "truncated"
       ],

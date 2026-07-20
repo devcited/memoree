@@ -24,7 +24,38 @@ use crate::{
     store::{ArtifactRecord, ClaimRecord, MutationResult, RelationRecord, Store},
 };
 
-const EVAL_SCHEMA_VERSION: u32 = 1;
+const EVAL_SCHEMA_VERSION: u32 = 2;
+const MIN_EVAL_SCHEMA_VERSION: u32 = 1;
+const CANDIDATE_POOL_PRIMARY_K: usize = 16;
+const CANDIDATE_POOL_DIAGNOSTIC_K: usize = 32;
+
+const EVAL_SLICES: &[&str] = &[
+    "correctness",
+    "exact_identifier",
+    "lexical",
+    "paraphrase",
+    "vague_intent",
+    "typo_abbreviation",
+    "noisy_distractors",
+    "long_document",
+    "lifecycle_currentness",
+    "conflict",
+    "multi_hop",
+    "ambient_scope",
+    "explicit_broadening",
+    "honest_none",
+];
+
+const EVAL_TAGS: &[&str] = &[
+    "single_memory",
+    "multi_memory",
+    "natural_query",
+    "operator_query",
+    "hard_negative",
+    "temporal",
+    "scoped",
+    "long_context",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +98,8 @@ enum SeedItem {
         #[serde(default = "default_media_type")]
         media_type: String,
         content: ArtifactContent,
+        #[serde(default)]
+        content_repeat: Option<SeedContentRepeat>,
     },
     Claim {
         claim_type: ClaimType,
@@ -83,6 +116,15 @@ enum SeedItem {
         relation: RelationType,
         target_label: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedContentRepeat {
+    unit: String,
+    count: usize,
+    #[serde(default)]
+    suffix: String,
 }
 
 fn default_media_type() -> String {
@@ -110,6 +152,10 @@ enum CaseGate {
 struct EvalCase {
     schema_version: u32,
     case_id: String,
+    #[serde(default = "default_eval_slice")]
+    slice: String,
+    #[serde(default)]
+    tags: Vec<String>,
     context: EvalContext,
     query: String,
     #[serde(default)]
@@ -130,11 +176,54 @@ struct EvalCase {
     #[serde(default)]
     relevant_artifacts: Vec<String>,
     #[serde(default)]
+    helpful_claims: Vec<String>,
+    #[serde(default)]
+    helpful_artifacts: Vec<String>,
+    #[serde(default)]
     forbidden: Vec<String>,
     #[serde(default)]
     expected_conflicts: Vec<[String; 2]>,
+    /// Require every directly relevant returned artifact to carry an exact
+    /// immutable byte span rather than a revision-only citation.
+    #[serde(default)]
+    require_artifact_spans: bool,
     #[serde(default)]
     gate: CaseGate,
+    /// Whether useful direct evidence exists inside the allowed horizon. V1
+    /// cases derive this from the direct gold labels.
+    #[serde(default)]
+    answerable: Option<bool>,
+    #[serde(default)]
+    provenance: Option<EvalCaseProvenance>,
+}
+
+impl EvalCase {
+    fn is_answerable(&self) -> bool {
+        self.answerable
+            .unwrap_or(!self.relevant_claims.is_empty() || !self.relevant_artifacts.is_empty())
+    }
+}
+
+fn default_eval_slice() -> String {
+    "correctness".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvalCaseProvenance {
+    source: EvalCaseSource,
+    author: String,
+    labeled_at: DateTime<Utc>,
+    #[serde(default)]
+    second_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvalCaseSource {
+    Synthetic,
+    AuthoredRealistic,
+    AnonymizedFailure,
 }
 
 fn default_max_claims() -> usize {
@@ -158,10 +247,20 @@ fn default_context_bytes() -> usize {
 struct EvalBaseline {
     schema_version: u32,
     corpus_version: String,
-    macro_claim_recall: f64,
-    macro_claim_precision: f64,
-    macro_artifact_recall: f64,
-    macro_artifact_precision: f64,
+    #[serde(default)]
+    macro_claim_recall: Option<f64>,
+    #[serde(default)]
+    macro_claim_precision: Option<f64>,
+    #[serde(default)]
+    macro_artifact_recall: Option<f64>,
+    #[serde(default)]
+    macro_artifact_precision: Option<f64>,
+    #[serde(default)]
+    max_false_answer_rate: Option<f64>,
+    #[serde(default)]
+    max_false_abstain_rate: Option<f64>,
+    #[serde(default)]
+    max_forbidden_returns: Option<usize>,
     #[serde(default = "default_epsilon")]
     epsilon: f64,
 }
@@ -194,14 +293,38 @@ pub struct RetrievalEvalReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalCaseReport {
     pub case_id: String,
+    pub slice: String,
+    pub tags: Vec<String>,
     pub gate: String,
+    pub answerable: bool,
+    pub abstained: bool,
     pub presence: RecallPresence,
     pub returned_claims: Vec<String>,
     pub returned_artifacts: Vec<String>,
+    pub suggested_candidate_claims: Vec<String>,
+    pub suggested_candidate_artifacts: Vec<String>,
+    pub candidate_suggestion_claim_recall: Option<f64>,
+    pub candidate_suggestion_artifact_recall: Option<f64>,
+    /// Authority-filtered, broad candidates before answerability filtering or
+    /// a future cross-encoder decision, in deterministic fusion order.
+    pub candidate_pool_claims: Vec<String>,
+    pub candidate_pool_artifacts: Vec<String>,
+    pub candidate_pool_claim_recall_at_16: Option<f64>,
+    pub candidate_pool_claim_recall_at_32: Option<f64>,
+    pub candidate_pool_artifact_recall_at_16: Option<f64>,
+    pub candidate_pool_artifact_recall_at_32: Option<f64>,
+    /// Dense similarities for all ranked search candidates, keyed by stable
+    /// corpus label. Empty when semantic retrieval is disabled.
+    pub semantic_scores: BTreeMap<String, f64>,
     pub claim_recall: Option<f64>,
     pub claim_precision: f64,
+    pub claim_ndcg: Option<f64>,
+    pub claim_mrr: Option<f64>,
     pub artifact_recall: Option<f64>,
     pub artifact_precision: f64,
+    pub artifact_ndcg: Option<f64>,
+    pub artifact_mrr: Option<f64>,
+    pub forbidden_returned: Vec<String>,
     pub context_used_bytes: usize,
     pub context_max_bytes: usize,
     pub failures: Vec<String>,
@@ -209,23 +332,79 @@ pub struct RetrievalCaseReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalAggregate {
+    pub case_count: usize,
     pub macro_claim_recall: f64,
     pub macro_claim_precision: f64,
+    pub macro_claim_ndcg: f64,
     pub macro_artifact_recall: f64,
     pub macro_artifact_precision: f64,
+    pub macro_artifact_ndcg: f64,
+    pub candidate_pool_claim_recall_at_16: f64,
+    pub candidate_pool_claim_recall_at_32: f64,
+    pub candidate_pool_artifact_recall_at_16: f64,
+    pub candidate_pool_artifact_recall_at_32: f64,
+    pub candidate_suggestion_claim_recall: f64,
+    pub candidate_suggestion_artifact_recall: f64,
+    pub false_answer_rate: f64,
+    pub false_abstain_rate: f64,
+    pub forbidden_returns: usize,
+    pub slices: BTreeMap<String, RetrievalSliceAggregate>,
     pub budget_violations: usize,
     pub citation_parity_violations: usize,
     pub scope_violations: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RetrievalSliceAggregate {
+    pub case_count: usize,
+    pub answerable_count: usize,
+    pub unanswerable_count: usize,
+    pub macro_claim_recall: f64,
+    pub macro_claim_precision: f64,
+    pub macro_claim_ndcg: f64,
+    pub macro_artifact_recall: f64,
+    pub macro_artifact_precision: f64,
+    pub macro_artifact_ndcg: f64,
+    pub candidate_pool_claim_recall_at_16: f64,
+    pub candidate_pool_claim_recall_at_32: f64,
+    pub candidate_pool_artifact_recall_at_16: f64,
+    pub candidate_pool_artifact_recall_at_32: f64,
+    pub candidate_suggestion_claim_recall: f64,
+    pub candidate_suggestion_artifact_recall: f64,
+    pub false_answer_rate: f64,
+    pub false_abstain_rate: f64,
+    pub forbidden_returns: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BaselineComparison {
     pub epsilon: f64,
+    pub checked_metrics: Vec<String>,
     pub regressions: Vec<String>,
     pub passed: bool,
 }
 
 pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport> {
+    run_retrieval_eval_with_models(corpus_dir, None, None).await
+}
+
+/// Run the corpus with an optional already installed local semantic model.
+/// The model directory is copied and verified inside the isolated evaluator;
+/// evaluation never mutates the caller's memory store.
+pub async fn run_retrieval_eval_with_semantic_model(
+    corpus_dir: &Path,
+    semantic_model_directory: Option<&Path>,
+) -> Result<RetrievalEvalReport> {
+    run_retrieval_eval_with_models(corpus_dir, semantic_model_directory, None).await
+}
+
+/// Run with independently pinned local candidate-generation and ordering
+/// models. Neither path performs downloads or enables reranker qualification.
+pub async fn run_retrieval_eval_with_models(
+    corpus_dir: &Path,
+    semantic_model_directory: Option<&Path>,
+    reranker_model_directory: Option<&Path>,
+) -> Result<RetrievalEvalReport> {
     let corpus_version = corpus_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -239,6 +418,16 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
     let temporary = tempfile::tempdir()?;
     let service = MemoryService::new(Store::open(temporary.path())?);
     let entities = seed_store(&service, &seeds).await?;
+    if let Some(model_directory) = semantic_model_directory {
+        service
+            .store()
+            .semantic_enable_from_directory(model_directory)?;
+    }
+    if let Some(model_directory) = reranker_model_directory {
+        service
+            .store()
+            .reranker_enable_from_directory(model_directory)?;
+    }
     let labels_by_id: BTreeMap<String, String> = entities
         .iter()
         .map(|(label, entity)| (entity.entity_id.clone(), label.clone()))
@@ -262,6 +451,8 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
                 max_claims: case.max_claims,
                 max_artifact_refs: case.max_artifact_refs,
                 max_excerpt_bytes: case.max_excerpt_bytes,
+                max_candidate_claims: 3,
+                max_candidate_artifact_refs: 3,
                 min_commit_seq: None,
                 recency: RecencyBiasInput::default(),
             },
@@ -283,6 +474,20 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
             &ambient,
         )
         .await?;
+        let candidate_pool = service.store().search(
+            &ambient,
+            &SearchInput {
+                query: case.query.clone(),
+                horizon: case.horizon,
+                reason: case.reason.clone(),
+                limit: CANDIDATE_POOL_DIAGNOSTIC_K,
+                include_historical: false,
+                min_commit_seq: None,
+                // Candidate membership must describe retrieval itself, before
+                // the independently bounded presentation-time recency policy.
+                recency: RecencyBiasInput { enabled: false },
+            },
+        )?;
         let bundle: crate::protocol::ContextBundle = read_operation(
             &service,
             Operation::ContextBuild,
@@ -316,16 +521,70 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
             ));
         }
 
-        let returned_claims = labels_for_ids(
+        let returned_claims = ranked_labels_for_ids(
             recall.claims.iter().map(|claim| claim.claim_id.as_str()),
             &labels_by_id,
             &mut failures,
         );
-        let returned_artifacts = labels_for_ids(
+        let returned_artifacts = ranked_labels_for_ids(
             recall
                 .artifact_refs
                 .iter()
                 .map(|artifact| artifact.artifact_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let suggested_candidate_claims = ranked_labels_for_ids(
+            recall
+                .candidate_claims
+                .iter()
+                .map(|claim| claim.claim_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let suggested_candidate_artifacts = ranked_labels_for_ids(
+            recall
+                .candidate_artifact_refs
+                .iter()
+                .map(|artifact| artifact.artifact_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let candidate_pool_claims = ranked_labels_for_ids(
+            candidate_pool
+                .hits
+                .iter()
+                .filter(|hit| matches!(hit.entity_type, EntityType::Claim))
+                .map(|hit| hit.entity_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let candidate_pool_artifacts = ranked_labels_for_ids(
+            candidate_pool
+                .hits
+                .iter()
+                .filter(|hit| matches!(hit.entity_type, EntityType::Artifact))
+                .map(|hit| hit.entity_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let candidate_pool_claims_at_16 = ranked_labels_for_ids(
+            candidate_pool
+                .hits
+                .iter()
+                .take(CANDIDATE_POOL_PRIMARY_K)
+                .filter(|hit| matches!(hit.entity_type, EntityType::Claim))
+                .map(|hit| hit.entity_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let candidate_pool_artifacts_at_16 = ranked_labels_for_ids(
+            candidate_pool
+                .hits
+                .iter()
+                .take(CANDIDATE_POOL_PRIMARY_K)
+                .filter(|hit| matches!(hit.entity_type, EntityType::Artifact))
+                .map(|hit| hit.entity_id.as_str()),
             &labels_by_id,
             &mut failures,
         );
@@ -341,10 +600,16 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
             &returned_artifacts,
             &mut failures,
         );
-        for forbidden in &case.forbidden {
-            if returned_claims.contains(forbidden) || returned_artifacts.contains(forbidden) {
-                failures.push(format!("forbidden label {forbidden} was returned"));
-            }
+        let forbidden_returned = case
+            .forbidden
+            .iter()
+            .filter(|forbidden| {
+                returned_claims.contains(forbidden) || returned_artifacts.contains(forbidden)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for forbidden in &forbidden_returned {
+            failures.push(format!("forbidden label {forbidden} was returned"));
         }
         check_conflicts(case, &recall.conflicts, &entities, &mut failures)?;
 
@@ -370,6 +635,25 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
             }
         }
         validate_evidence_refs(&recall, &entities, &mut failures)?;
+        validate_artifact_refs(&recall, &entities, &mut failures)?;
+        validate_candidate_refs(&recall, &entities, &mut failures)?;
+        if case.require_artifact_spans {
+            for label in &case.relevant_artifacts {
+                let Some(entity) = entities.get(label) else {
+                    continue;
+                };
+                if let Some(reference) = recall
+                    .artifact_refs
+                    .iter()
+                    .find(|reference| reference.artifact_id == entity.entity_id)
+                    && !reference.citation.contains('#')
+                {
+                    failures.push(format!(
+                        "relevant artifact {label} did not return an exact byte span"
+                    ));
+                }
+            }
+        }
 
         if bundle.used_bytes > bundle.max_bytes || bundle.max_bytes != case.max_context_bytes {
             budget_violations += 1;
@@ -380,7 +664,12 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
         }
         validate_bundle_evidence_rendering(&bundle, &mut failures);
 
-        for label in returned_claims.iter().chain(returned_artifacts.iter()) {
+        for label in returned_claims
+            .iter()
+            .chain(returned_artifacts.iter())
+            .chain(suggested_candidate_claims.iter())
+            .chain(suggested_candidate_artifacts.iter())
+        {
             let entity = entities.get(label).ok_or_else(|| {
                 MemoryError::Integrity(format!("returned label {label} was not seeded"))
             })?;
@@ -393,22 +682,89 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
             }
         }
 
+        let answerable = case.is_answerable();
+        let abstained = recall.presence == RecallPresence::None;
         let claim_recall = recall_ratio(&case.relevant_claims, &returned_claims);
         let artifact_recall = recall_ratio(&case.relevant_artifacts, &returned_artifacts);
+        let semantic_scores = search
+            .hits
+            .iter()
+            .filter_map(|hit| {
+                hit.ranking.semantic_similarity.and_then(|similarity| {
+                    labels_by_id
+                        .get(&hit.entity_id)
+                        .map(|label| (label.clone(), similarity))
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         let report = RetrievalCaseReport {
             case_id: case.case_id.clone(),
+            slice: case.slice.clone(),
+            tags: case.tags.clone(),
             gate: match case.gate {
                 CaseGate::Hard => "hard",
                 CaseGate::Report => "report",
             }
             .into(),
+            answerable,
+            abstained,
             presence: recall.presence,
-            returned_claims: returned_claims.iter().cloned().collect(),
-            returned_artifacts: returned_artifacts.iter().cloned().collect(),
+            returned_claims: returned_claims.clone(),
+            returned_artifacts: returned_artifacts.clone(),
+            candidate_suggestion_claim_recall: recall_ratio(
+                &case.relevant_claims,
+                &suggested_candidate_claims,
+            ),
+            candidate_suggestion_artifact_recall: recall_ratio(
+                &case.relevant_artifacts,
+                &suggested_candidate_artifacts,
+            ),
+            suggested_candidate_claims,
+            suggested_candidate_artifacts,
+            candidate_pool_claim_recall_at_16: recall_ratio(
+                &case.relevant_claims,
+                &candidate_pool_claims_at_16,
+            ),
+            candidate_pool_claim_recall_at_32: recall_ratio(
+                &case.relevant_claims,
+                &candidate_pool_claims,
+            ),
+            candidate_pool_artifact_recall_at_16: recall_ratio(
+                &case.relevant_artifacts,
+                &candidate_pool_artifacts_at_16,
+            ),
+            candidate_pool_artifact_recall_at_32: recall_ratio(
+                &case.relevant_artifacts,
+                &candidate_pool_artifacts,
+            ),
+            candidate_pool_claims,
+            candidate_pool_artifacts,
+            semantic_scores,
             claim_recall,
-            claim_precision: precision(&case.relevant_claims, &returned_claims),
+            claim_precision: precision(
+                &case.relevant_claims,
+                &case.helpful_claims,
+                &returned_claims,
+            ),
+            claim_ndcg: ndcg(
+                &case.relevant_claims,
+                &case.helpful_claims,
+                &returned_claims,
+            ),
+            claim_mrr: reciprocal_rank(&case.relevant_claims, &returned_claims),
             artifact_recall,
-            artifact_precision: precision(&case.relevant_artifacts, &returned_artifacts),
+            artifact_precision: precision(
+                &case.relevant_artifacts,
+                &case.helpful_artifacts,
+                &returned_artifacts,
+            ),
+            artifact_ndcg: ndcg(
+                &case.relevant_artifacts,
+                &case.helpful_artifacts,
+                &returned_artifacts,
+            ),
+            artifact_mrr: reciprocal_rank(&case.relevant_artifacts, &returned_artifacts),
+            forbidden_returned,
             context_used_bytes: bundle.used_bytes,
             context_max_bytes: bundle.max_bytes,
             failures: failures.clone(),
@@ -423,19 +779,17 @@ pub async fn run_retrieval_eval(corpus_dir: &Path) -> Result<RetrievalEvalReport
         case_reports.push(report);
     }
 
-    let aggregate = RetrievalAggregate {
-        macro_claim_recall: mean(case_reports.iter().filter_map(|case| case.claim_recall)),
-        macro_claim_precision: mean(case_reports.iter().map(|case| case.claim_precision)),
-        macro_artifact_recall: mean(case_reports.iter().filter_map(|case| case.artifact_recall)),
-        macro_artifact_precision: mean(case_reports.iter().map(|case| case.artifact_precision)),
+    let aggregate = aggregate_reports(
+        &case_reports,
         budget_violations,
         citation_parity_violations,
         scope_violations,
-    };
+    );
+    let report_schema_version = baseline.schema_version;
     let baseline = compare_baseline(&aggregate, &baseline);
     let passed = hard_failures.is_empty() && baseline.passed;
     Ok(RetrievalEvalReport {
-        schema_version: EVAL_SCHEMA_VERSION,
+        schema_version: report_schema_version,
         corpus_version,
         isolated_temporary_store: true,
         cases: case_reports,
@@ -457,14 +811,15 @@ fn validate_corpus(
             "retrieval corpus needs at least one seed and one case".into(),
         ));
     }
-    if baseline.schema_version != EVAL_SCHEMA_VERSION
+    let schema_version = baseline.schema_version;
+    if !(MIN_EVAL_SCHEMA_VERSION..=EVAL_SCHEMA_VERSION).contains(&schema_version)
         || baseline.corpus_version != corpus_version
         || seeds
             .iter()
-            .any(|seed| seed.schema_version != EVAL_SCHEMA_VERSION)
+            .any(|seed| seed.schema_version != schema_version)
         || cases
             .iter()
-            .any(|case| case.schema_version != EVAL_SCHEMA_VERSION)
+            .any(|case| case.schema_version != schema_version)
     {
         return Err(MemoryError::InvalidRequest(format!(
             "eval schema/corpus version mismatch for {corpus_version}"
@@ -498,10 +853,55 @@ fn validate_corpus(
                 case.case_id
             )));
         }
+        if !EVAL_SLICES.contains(&case.slice.as_str()) {
+            return Err(MemoryError::InvalidRequest(format!(
+                "case {} uses unknown slice {}",
+                case.case_id, case.slice
+            )));
+        }
+        for tag in &case.tags {
+            if !EVAL_TAGS.contains(&tag.as_str()) {
+                return Err(MemoryError::InvalidRequest(format!(
+                    "case {} uses unknown tag {tag}",
+                    case.case_id
+                )));
+            }
+        }
+        if schema_version >= 2 && case.provenance.is_none() {
+            return Err(MemoryError::InvalidRequest(format!(
+                "schema v2 case {} requires provenance",
+                case.case_id
+            )));
+        }
+        if let Some(provenance) = &case.provenance {
+            if provenance.author.trim().is_empty() {
+                return Err(MemoryError::InvalidRequest(format!(
+                    "case {} has an empty provenance author",
+                    case.case_id
+                )));
+            }
+            let _ = (
+                provenance.source,
+                provenance.labeled_at,
+                provenance.second_label.as_deref(),
+            );
+        }
+        let has_direct = !case.relevant_claims.is_empty() || !case.relevant_artifacts.is_empty();
+        if case
+            .answerable
+            .is_some_and(|answerable| answerable != has_direct)
+        {
+            return Err(MemoryError::InvalidRequest(format!(
+                "case {} answerable disagrees with its direct gold labels",
+                case.case_id
+            )));
+        }
         for label in case
             .relevant_claims
             .iter()
             .chain(case.relevant_artifacts.iter())
+            .chain(case.helpful_claims.iter())
+            .chain(case.helpful_artifacts.iter())
             .chain(case.forbidden.iter())
             .chain(case.expected_conflicts.iter().flatten())
         {
@@ -535,7 +935,9 @@ async fn seed_store(
                 title,
                 media_type,
                 content,
+                content_repeat,
             } => {
+                let content = materialize_seed_content(content, content_repeat.as_ref())?;
                 let mutation: MutationResult<ArtifactRecord> = mutation_operation(
                     service,
                     Operation::ArtifactPut,
@@ -554,7 +956,7 @@ async fn seed_store(
                     &format!("eval:{index}:{}", seed.label),
                 )
                 .await?;
-                let text = match content {
+                let text = match &content {
                     ArtifactContent::Text(text) => Some(text.clone()),
                     ArtifactContent::Base64(_) => None,
                 };
@@ -648,6 +1050,37 @@ async fn seed_store(
     Ok(entities)
 }
 
+fn materialize_seed_content(
+    content: &ArtifactContent,
+    repeat: Option<&SeedContentRepeat>,
+) -> Result<ArtifactContent> {
+    let Some(repeat) = repeat else {
+        return Ok(content.clone());
+    };
+    let ArtifactContent::Text(prefix) = content else {
+        return Err(MemoryError::InvalidRequest(
+            "eval content_repeat requires text artifact content".into(),
+        ));
+    };
+    let repeated_bytes = repeat
+        .unit
+        .len()
+        .checked_mul(repeat.count)
+        .and_then(|bytes| bytes.checked_add(prefix.len()))
+        .and_then(|bytes| bytes.checked_add(repeat.suffix.len()))
+        .ok_or(MemoryError::ContentTooLarge)?;
+    if repeated_bytes > crate::protocol::MAX_ARTIFACT_BYTES {
+        return Err(MemoryError::ContentTooLarge);
+    }
+    let mut expanded = String::with_capacity(repeated_bytes);
+    expanded.push_str(prefix);
+    for _ in 0..repeat.count {
+        expanded.push_str(&repeat.unit);
+    }
+    expanded.push_str(&repeat.suffix);
+    Ok(ArtifactContent::Text(expanded))
+}
+
 fn seed_evidence(
     seed: &SeedEvidence,
     entities: &BTreeMap<String, SeededEntity>,
@@ -739,16 +1172,19 @@ fn response_result<T: DeserializeOwned>(response: crate::protocol::Response) -> 
     .map_err(Into::into)
 }
 
-fn labels_for_ids<'a>(
+fn ranked_labels_for_ids<'a>(
     ids: impl Iterator<Item = &'a str>,
     labels_by_id: &BTreeMap<String, String>,
     failures: &mut Vec<String>,
-) -> BTreeSet<String> {
-    let mut labels = BTreeSet::new();
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut seen = BTreeSet::new();
     for id in ids {
         match labels_by_id.get(id) {
             Some(label) => {
-                labels.insert(label.clone());
+                if seen.insert(label.clone()) {
+                    labels.push(label.clone());
+                }
             }
             None => failures.push(format!("returned unseeded entity {id}")),
         }
@@ -759,7 +1195,7 @@ fn labels_for_ids<'a>(
 fn check_expected_labels(
     kind: &str,
     expected: &[String],
-    returned: &BTreeSet<String>,
+    returned: &[String],
     failures: &mut Vec<String>,
 ) {
     for label in expected {
@@ -850,6 +1286,193 @@ fn validate_evidence_refs(
     Ok(())
 }
 
+fn validate_artifact_refs(
+    recall: &RecallResult,
+    entities: &BTreeMap<String, SeededEntity>,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    for reference in &recall.artifact_refs {
+        let artifact = entities
+            .values()
+            .find(|entity| entity.entity_id == reference.artifact_id)
+            .ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "artifact reference {} was not seeded",
+                    reference.artifact_id
+                ))
+            })?;
+        let base = format!(
+            "memoree://artifact/{}@{}",
+            artifact.entity_id, artifact.revision_id
+        );
+        let Some(suffix) = reference.citation.strip_prefix(&base) else {
+            failures.push(format!(
+                "artifact reference {} has a citation for a different revision",
+                reference.artifact_id
+            ));
+            continue;
+        };
+        if suffix.is_empty() {
+            // Revision-only citations are valid for title matches, binary
+            // artifacts, and conservative boundary fallbacks.
+            continue;
+        }
+        let Some(span) = suffix.strip_prefix('#') else {
+            failures.push(format!(
+                "artifact reference {} has an invalid citation suffix {suffix}",
+                reference.artifact_id
+            ));
+            continue;
+        };
+        let Some((start, end)) = span.split_once('-') else {
+            failures.push(format!(
+                "artifact reference {} has an invalid byte span {span}",
+                reference.artifact_id
+            ));
+            continue;
+        };
+        let Ok(start) = start.parse::<usize>() else {
+            failures.push(format!(
+                "artifact citation {} has invalid start",
+                reference.citation
+            ));
+            continue;
+        };
+        let Ok(end) = end.parse::<usize>() else {
+            failures.push(format!(
+                "artifact citation {} has invalid end",
+                reference.citation
+            ));
+            continue;
+        };
+        let Some(text) = artifact.text.as_deref() else {
+            failures.push(format!(
+                "binary artifact {} unexpectedly returned a byte span",
+                reference.artifact_id
+            ));
+            continue;
+        };
+        if start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            failures.push(format!(
+                "artifact citation {} is out of bounds",
+                reference.citation
+            ));
+            continue;
+        }
+        let exact = &text[start..end];
+        if !exact.starts_with(&reference.excerpt)
+            || (!reference.excerpt_truncated && exact != reference.excerpt)
+        {
+            failures.push(format!(
+                "artifact citation {} excerpt did not round-trip",
+                reference.citation
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_candidate_refs(
+    recall: &RecallResult,
+    entities: &BTreeMap<String, SeededEntity>,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    for candidate in &recall.candidate_claims {
+        let claim = entities
+            .values()
+            .find(|entity| entity.entity_id == candidate.claim_id)
+            .ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "candidate claim {} was not seeded",
+                    candidate.claim_id
+                ))
+            })?;
+        let expected = format!("memoree://claim/{}@{}", claim.entity_id, claim.revision_id);
+        if !matches!(claim.entity_type, EntityType::Claim)
+            || candidate.retrieval_tier != "unqualified_candidate"
+            || candidate.revision_id != claim.revision_id
+            || candidate.citation != expected
+        {
+            failures.push(format!(
+                "candidate claim {} has invalid tier or citation",
+                candidate.claim_id
+            ));
+        }
+    }
+    for candidate in &recall.candidate_artifact_refs {
+        let artifact = entities
+            .values()
+            .find(|entity| entity.entity_id == candidate.artifact_id)
+            .ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "candidate artifact {} was not seeded",
+                    candidate.artifact_id
+                ))
+            })?;
+        let base = format!(
+            "memoree://artifact/{}@{}",
+            artifact.entity_id, artifact.revision_id
+        );
+        if !matches!(artifact.entity_type, EntityType::Artifact)
+            || candidate.retrieval_tier != "unqualified_candidate"
+            || candidate.revision_id != artifact.revision_id
+            || !candidate.citation.starts_with(&base)
+        {
+            failures.push(format!(
+                "candidate artifact {} has invalid tier or citation",
+                candidate.artifact_id
+            ));
+            continue;
+        }
+        let Some(suffix) = candidate.citation.strip_prefix(&base) else {
+            continue;
+        };
+        if suffix.is_empty() {
+            continue;
+        }
+        let Some((start, end)) = suffix
+            .strip_prefix('#')
+            .and_then(|span| span.split_once('-'))
+        else {
+            failures.push(format!(
+                "candidate artifact {} has an invalid byte span",
+                candidate.artifact_id
+            ));
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+            failures.push(format!(
+                "candidate artifact {} has non-numeric byte bounds",
+                candidate.artifact_id
+            ));
+            continue;
+        };
+        let Some(text) = artifact.text.as_deref() else {
+            failures.push(format!(
+                "binary candidate artifact {} returned a byte span",
+                candidate.artifact_id
+            ));
+            continue;
+        };
+        if start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+            || !text[start..end].starts_with(&candidate.excerpt)
+        {
+            failures.push(format!(
+                "candidate artifact citation {} did not round-trip",
+                candidate.citation
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_bundle_evidence_rendering(
     bundle: &crate::protocol::ContextBundle,
     failures: &mut Vec<String>,
@@ -908,27 +1531,69 @@ fn visible_at_horizon(ambient: &AmbientContext, owner: &AmbientContext, horizon:
     }
 }
 
-fn recall_ratio(expected: &[String], returned: &BTreeSet<String>) -> Option<f64> {
+fn recall_ratio(expected: &[String], returned: &[String]) -> Option<f64> {
     if expected.is_empty() {
         return None;
     }
     let relevant = expected
         .iter()
-        .filter(|label| returned.contains(label.as_str()))
+        .filter(|label| returned.contains(label))
         .count();
     Some(relevant as f64 / expected.len() as f64)
 }
 
-fn precision(expected: &[String], returned: &BTreeSet<String>) -> f64 {
+fn precision(direct: &[String], helpful: &[String], returned: &[String]) -> f64 {
     if returned.is_empty() {
-        return if expected.is_empty() { 1.0 } else { 0.0 };
+        return if direct.is_empty() { 1.0 } else { 0.0 };
     }
-    let expected: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
+    let relevant: BTreeSet<&str> = direct.iter().chain(helpful).map(String::as_str).collect();
     returned
         .iter()
-        .filter(|label| expected.contains(label.as_str()))
+        .filter(|label| relevant.contains(label.as_str()))
         .count() as f64
         / returned.len() as f64
+}
+
+fn reciprocal_rank(direct: &[String], returned: &[String]) -> Option<f64> {
+    if direct.len() != 1 {
+        return None;
+    }
+    returned
+        .iter()
+        .position(|label| label == &direct[0])
+        .map(|index| 1.0 / (index + 1) as f64)
+        .or(Some(0.0))
+}
+
+fn ndcg(direct: &[String], helpful: &[String], returned: &[String]) -> Option<f64> {
+    if direct.is_empty() && helpful.is_empty() {
+        return None;
+    }
+    let direct: BTreeSet<&str> = direct.iter().map(String::as_str).collect();
+    let helpful: BTreeSet<&str> = helpful.iter().map(String::as_str).collect();
+    let gain = |label: &str| {
+        if direct.contains(label) {
+            2.0
+        } else if helpful.contains(label) {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    let dcg = returned
+        .iter()
+        .enumerate()
+        .map(|(index, label)| gain(label) / ((index + 2) as f64).log2())
+        .sum::<f64>();
+    let mut ideal = vec![2.0; direct.len()];
+    ideal.extend(vec![1.0; helpful.len()]);
+    ideal.truncate(returned.len().max(1));
+    let idcg = ideal
+        .iter()
+        .enumerate()
+        .map(|(index, gain)| gain / ((index + 2) as f64).log2())
+        .sum::<f64>();
+    Some(if idcg == 0.0 { 0.0 } else { dcg / idcg })
 }
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
@@ -940,8 +1605,162 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
+fn rate(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn slice_aggregate(reports: &[&RetrievalCaseReport]) -> RetrievalSliceAggregate {
+    let answerable_count = reports.iter().filter(|case| case.answerable).count();
+    let unanswerable_count = reports.len() - answerable_count;
+    RetrievalSliceAggregate {
+        case_count: reports.len(),
+        answerable_count,
+        unanswerable_count,
+        macro_claim_recall: mean(reports.iter().filter_map(|case| case.claim_recall)),
+        macro_claim_precision: mean(reports.iter().map(|case| case.claim_precision)),
+        macro_claim_ndcg: mean(reports.iter().filter_map(|case| case.claim_ndcg)),
+        macro_artifact_recall: mean(reports.iter().filter_map(|case| case.artifact_recall)),
+        macro_artifact_precision: mean(reports.iter().map(|case| case.artifact_precision)),
+        macro_artifact_ndcg: mean(reports.iter().filter_map(|case| case.artifact_ndcg)),
+        candidate_pool_claim_recall_at_16: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_claim_recall_at_16),
+        ),
+        candidate_pool_claim_recall_at_32: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_claim_recall_at_32),
+        ),
+        candidate_pool_artifact_recall_at_16: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_artifact_recall_at_16),
+        ),
+        candidate_pool_artifact_recall_at_32: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_artifact_recall_at_32),
+        ),
+        candidate_suggestion_claim_recall: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_suggestion_claim_recall),
+        ),
+        candidate_suggestion_artifact_recall: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_suggestion_artifact_recall),
+        ),
+        false_answer_rate: rate(
+            reports
+                .iter()
+                .filter(|case| !case.answerable && !case.abstained)
+                .count(),
+            unanswerable_count,
+        ),
+        false_abstain_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.answerable && case.abstained)
+                .count(),
+            answerable_count,
+        ),
+        forbidden_returns: reports
+            .iter()
+            .map(|case| case.forbidden_returned.len())
+            .sum(),
+    }
+}
+
+fn aggregate_reports(
+    reports: &[RetrievalCaseReport],
+    budget_violations: usize,
+    citation_parity_violations: usize,
+    scope_violations: usize,
+) -> RetrievalAggregate {
+    let answerable_count = reports.iter().filter(|case| case.answerable).count();
+    let unanswerable_count = reports.len() - answerable_count;
+    let mut grouped: BTreeMap<String, Vec<&RetrievalCaseReport>> = BTreeMap::new();
+    for report in reports {
+        grouped
+            .entry(report.slice.clone())
+            .or_default()
+            .push(report);
+    }
+    RetrievalAggregate {
+        case_count: reports.len(),
+        macro_claim_recall: mean(reports.iter().filter_map(|case| case.claim_recall)),
+        macro_claim_precision: mean(reports.iter().map(|case| case.claim_precision)),
+        macro_claim_ndcg: mean(reports.iter().filter_map(|case| case.claim_ndcg)),
+        macro_artifact_recall: mean(reports.iter().filter_map(|case| case.artifact_recall)),
+        macro_artifact_precision: mean(reports.iter().map(|case| case.artifact_precision)),
+        macro_artifact_ndcg: mean(reports.iter().filter_map(|case| case.artifact_ndcg)),
+        candidate_pool_claim_recall_at_16: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_claim_recall_at_16),
+        ),
+        candidate_pool_claim_recall_at_32: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_claim_recall_at_32),
+        ),
+        candidate_pool_artifact_recall_at_16: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_artifact_recall_at_16),
+        ),
+        candidate_pool_artifact_recall_at_32: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_pool_artifact_recall_at_32),
+        ),
+        candidate_suggestion_claim_recall: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_suggestion_claim_recall),
+        ),
+        candidate_suggestion_artifact_recall: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.candidate_suggestion_artifact_recall),
+        ),
+        false_answer_rate: rate(
+            reports
+                .iter()
+                .filter(|case| !case.answerable && !case.abstained)
+                .count(),
+            unanswerable_count,
+        ),
+        false_abstain_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.answerable && case.abstained)
+                .count(),
+            answerable_count,
+        ),
+        forbidden_returns: reports
+            .iter()
+            .map(|case| case.forbidden_returned.len())
+            .sum(),
+        slices: grouped
+            .into_iter()
+            .map(|(slice, reports)| (slice, slice_aggregate(&reports)))
+            .collect(),
+        budget_violations,
+        citation_parity_violations,
+        scope_violations,
+    }
+}
+
 fn compare_baseline(aggregate: &RetrievalAggregate, baseline: &EvalBaseline) -> BaselineComparison {
     let mut regressions = Vec::new();
+    let mut checked_metrics = Vec::new();
     for (name, current, expected) in [
         (
             "macro_claim_recall",
@@ -964,6 +1783,10 @@ fn compare_baseline(aggregate: &RetrievalAggregate, baseline: &EvalBaseline) -> 
             baseline.macro_artifact_precision,
         ),
     ] {
+        let Some(expected) = expected else {
+            continue;
+        };
+        checked_metrics.push(name.into());
         if current + baseline.epsilon < expected {
             regressions.push(format!(
                 "{name} regressed from {expected:.6} to {current:.6} (epsilon {:.6})",
@@ -971,8 +1794,41 @@ fn compare_baseline(aggregate: &RetrievalAggregate, baseline: &EvalBaseline) -> 
             ));
         }
     }
+    for (name, current, maximum) in [
+        (
+            "false_answer_rate",
+            aggregate.false_answer_rate,
+            baseline.max_false_answer_rate,
+        ),
+        (
+            "false_abstain_rate",
+            aggregate.false_abstain_rate,
+            baseline.max_false_abstain_rate,
+        ),
+    ] {
+        let Some(maximum) = maximum else {
+            continue;
+        };
+        checked_metrics.push(name.into());
+        if current > maximum + baseline.epsilon {
+            regressions.push(format!(
+                "{name} exceeded maximum {maximum:.6} at {current:.6} (epsilon {:.6})",
+                baseline.epsilon
+            ));
+        }
+    }
+    if let Some(maximum) = baseline.max_forbidden_returns {
+        checked_metrics.push("forbidden_returns".into());
+        if aggregate.forbidden_returns > maximum {
+            regressions.push(format!(
+                "forbidden_returns exceeded maximum {maximum} at {}",
+                aggregate.forbidden_returns
+            ));
+        }
+    }
     BaselineComparison {
         epsilon: baseline.epsilon,
+        checked_metrics,
         passed: regressions.is_empty(),
         regressions,
     }
@@ -1019,13 +1875,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn committed_v2_corpus_reports_ranked_realistic_slices_deterministically() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/corpus/v2");
+        let first = run_retrieval_eval(&corpus).await.unwrap();
+        let second = run_retrieval_eval(&corpus).await.unwrap();
+        assert!(first.passed, "{:?}", first.hard_failures);
+        assert_eq!(first.schema_version, 2);
+        assert_eq!(first.aggregate.case_count, 68);
+        assert_eq!(first.aggregate.forbidden_returns, 0);
+        assert_eq!(first.aggregate.false_answer_rate, 0.0);
+        assert!(first.aggregate.false_abstain_rate > 0.0);
+        assert_eq!(first.aggregate.slices["exact_identifier"].case_count, 10);
+        assert_eq!(first.aggregate.slices["paraphrase"].case_count, 10);
+        assert_eq!(first.aggregate.slices["typo_abbreviation"].case_count, 10);
+        assert_eq!(first.aggregate.slices["long_document"].case_count, 4);
+        assert_eq!(
+            first.aggregate.slices["exact_identifier"].macro_claim_recall,
+            1.0
+        );
+        assert!(first.aggregate.slices["exact_identifier"].macro_claim_precision >= 0.9);
+        assert_eq!(first.aggregate.slices["lexical"].macro_claim_recall, 1.0);
+        assert!(first.aggregate.slices["lexical"].macro_claim_precision >= 0.7);
+        assert!(first.aggregate.slices["typo_abbreviation"].macro_claim_recall >= 0.8);
+        assert_eq!(
+            first.aggregate.slices["long_document"].macro_artifact_ndcg,
+            1.0
+        );
+        assert_eq!(first.aggregate.slices["honest_none"].false_answer_rate, 0.0);
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn graded_rank_metrics_reward_direct_before_helpful() {
+        let direct = vec!["direct".into()];
+        let helpful = vec!["helpful".into()];
+        let ideal = vec!["direct".into(), "helpful".into()];
+        let reversed = vec!["helpful".into(), "direct".into()];
+        assert_eq!(reciprocal_rank(&direct, &ideal), Some(1.0));
+        assert_eq!(precision(&direct, &helpful, &reversed), 1.0);
+        assert_eq!(ndcg(&direct, &helpful, &ideal), Some(1.0));
+        assert!(ndcg(&direct, &helpful, &reversed) < ndcg(&direct, &helpful, &ideal));
+    }
+
     #[test]
     fn baseline_comparison_rejects_a_metric_regression() {
         let aggregate = RetrievalAggregate {
+            case_count: 1,
             macro_claim_recall: 0.75,
             macro_claim_precision: 1.0,
+            macro_claim_ndcg: 1.0,
             macro_artifact_recall: 1.0,
             macro_artifact_precision: 1.0,
+            macro_artifact_ndcg: 1.0,
+            candidate_pool_claim_recall_at_16: 1.0,
+            candidate_pool_claim_recall_at_32: 1.0,
+            candidate_pool_artifact_recall_at_16: 1.0,
+            candidate_pool_artifact_recall_at_32: 1.0,
+            candidate_suggestion_claim_recall: 1.0,
+            candidate_suggestion_artifact_recall: 1.0,
+            false_answer_rate: 0.0,
+            false_abstain_rate: 0.0,
+            forbidden_returns: 0,
+            slices: BTreeMap::new(),
             budget_violations: 0,
             citation_parity_violations: 0,
             scope_violations: 0,
@@ -1033,10 +1948,13 @@ mod tests {
         let baseline = EvalBaseline {
             schema_version: 1,
             corpus_version: "v1".into(),
-            macro_claim_recall: 1.0,
-            macro_claim_precision: 1.0,
-            macro_artifact_recall: 1.0,
-            macro_artifact_precision: 1.0,
+            macro_claim_recall: Some(1.0),
+            macro_claim_precision: Some(1.0),
+            macro_artifact_recall: Some(1.0),
+            macro_artifact_precision: Some(1.0),
+            max_false_answer_rate: None,
+            max_false_abstain_rate: None,
+            max_forbidden_returns: None,
             epsilon: 0.02,
         };
         let comparison = compare_baseline(&aggregate, &baseline);

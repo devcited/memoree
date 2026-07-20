@@ -62,6 +62,33 @@ fn invoke_local(cwd: &Path, home: &Path, args: &[&str]) -> (Output, Value) {
     (output, envelope)
 }
 
+fn invoke_upgrade(
+    cwd: &Path,
+    memoree_home: &Path,
+    user_home: &Path,
+    args: &[&str],
+) -> (Output, Value) {
+    let output = Command::new(binary())
+        .current_dir(cwd)
+        .env("MEMOREE_HOME", memoree_home)
+        .env("HOME", user_home)
+        .env("CODEX_HOME", user_home.join(".codex"))
+        .env("CLAUDE_CONFIG_DIR", user_home.join(".claude"))
+        .env_remove("MEMOREE_ENDPOINT")
+        .env_remove("MEMOREE_NO_AUTOSTART")
+        .args(args)
+        .output()
+        .expect("run local memoree upgrade");
+    let envelope = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "upgrade stdout was not JSON: {error}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output, envelope)
+}
+
 fn invoke_call(cwd: &Path, home: &Path, request: &Value) -> (Output, Value) {
     let mut child = Command::new(binary())
         .current_dir(cwd)
@@ -396,7 +423,7 @@ fn checkpoints_are_private_last_write_wins_and_absent_from_recall() {
 }
 
 #[test]
-fn failed_codex_login_path_never_writes_or_enables_api_key_fallback() {
+fn missing_compiler_logins_fail_loudly_without_writing_or_using_api_keys() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().join("client");
     let home = root.path().join("home");
@@ -427,19 +454,25 @@ fn failed_codex_login_path_never_writes_or_enables_api_key_fallback() {
         .output()
         .unwrap();
     let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(output.status.code(), Some(1), "{envelope}");
-    assert_eq!(envelope["error"]["code"], "REASONER_ERROR");
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "CONFIG_ERROR");
     assert!(
-        envelope["error"]["hint"]
+        envelope["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("explicit permission")
+            .contains("codex login")
     );
     assert!(
-        envelope["error"]["hint"]
+        envelope["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("--allow-api-key")
+            .contains("claude auth login")
+    );
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("memoree compiler configure")
     );
 
     let (status, stopped) = invoke_local(&cwd, &home, &["daemon", "status"]);
@@ -633,9 +666,12 @@ fn cli_round_trip_context_isolation_and_explicit_broadening() {
     );
     assert!(status.status.success(), "{search}");
     assert_eq!(search["result"]["hits"][0]["entity_id"], artifact_id);
-    assert_eq!(
-        search["result"]["hits"][0]["citation"],
-        format!("memoree://artifact/{artifact_id}@{revision_id}")
+    let citation = search["result"]["hits"][0]["citation"]
+        .as_str()
+        .expect("search citation");
+    assert!(
+        citation.starts_with(&format!("memoree://artifact/{artifact_id}@{revision_id}#")),
+        "artifact body matches must expose an exact immutable byte span: {citation}"
     );
     let (status, bundle) = invoke(
         &first,
@@ -835,6 +871,12 @@ fn auto_started_daemon_has_machine_readable_lifecycle_controls() {
     assert!(status.status.success(), "{started}");
     assert_eq!(started["result"]["running"], true);
     assert!(started["result"]["daemon_pid"].as_u64().unwrap() > 1);
+    assert_eq!(
+        started["result"]["binary_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(started["result"]["schema_version"], 4);
+    assert_eq!(started["result"]["lifecycle_owner"], "memoree");
 
     let (status, running) = invoke_local(&cwd, &home, &["daemon", "status"]);
     assert!(status.status.success(), "{running}");
@@ -852,6 +894,183 @@ fn auto_started_daemon_has_machine_readable_lifecycle_controls() {
     let (status, stopped) = invoke_local(&cwd, &home, &["daemon", "status"]);
     assert_eq!(status.status.code(), Some(1), "{stopped}");
     assert_eq!(stopped["result"]["running"], false);
+}
+
+#[test]
+fn upgrade_apply_preserves_stopped_state_and_syncs_skills_idempotently() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("client");
+    let memoree_home = root.path().join("memoree home");
+    let user_home = root.path().join("user home");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(user_home.join(".codex")).unwrap();
+    fs::create_dir_all(user_home.join(".claude")).unwrap();
+    let _guard = LocalDaemonGuard {
+        cwd: cwd.clone(),
+        home: memoree_home.clone(),
+    };
+
+    let (status, first) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &["upgrade", "apply", "--previous-version", "0.2.0"],
+    );
+    assert!(status.status.success(), "{first}");
+    assert_eq!(first["result"]["daemon"]["state"], "remained_stopped");
+    assert_eq!(first["result"]["state"]["phase"], "complete");
+    assert_eq!(first["result"]["skills"]["items"][0]["action"], "installed");
+    assert_eq!(first["result"]["skills"]["items"][1]["action"], "installed");
+    assert!(!memoree_home.join("run/memoree.sock").exists());
+
+    let (status, second) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &["upgrade", "apply", "--previous-version", "0.2.0"],
+    );
+    assert!(status.status.success(), "{second}");
+    assert_eq!(second["result"]["daemon"]["state"], "remained_stopped");
+    assert!(
+        second["result"]["skills"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["action"] == "unchanged")
+    );
+    assert!(!memoree_home.join("data/memoree.sqlite3").exists());
+}
+
+#[test]
+fn upgrade_apply_never_touches_an_explicit_supervisor_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("client");
+    let memoree_home = root.path().join("memoree-home");
+    let user_home = root.path().join("user-home");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(user_home.join(".codex")).unwrap();
+
+    let endpoint = format!("unix://{}", root.path().join("supervisor.sock").display());
+    let (status, report) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &[
+            "--endpoint",
+            &endpoint,
+            "upgrade",
+            "apply",
+            "--previous-version",
+            "0.2.0",
+        ],
+    );
+    assert_eq!(status.status.code(), Some(20), "{report}");
+    assert_eq!(
+        report["result"]["daemon"]["state"],
+        "external_action_required"
+    );
+    assert_eq!(report["result"]["authority"]["state"], "deferred");
+    assert!(!memoree_home.join("data/memoree.sqlite3").exists());
+}
+
+#[test]
+fn upgrade_apply_refuses_a_nondefault_daemon_holding_the_same_store() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("client");
+    let memoree_home = root.path().join("memoree-home");
+    let user_home = root.path().join("user-home");
+    let data_dir = memoree_home.join("data");
+    let external_socket = root.path().join("external.sock");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(user_home.join(".codex")).unwrap();
+    let mut child = Command::new(binary())
+        .current_dir(&cwd)
+        .env("MEMOREE_HOME", &memoree_home)
+        .args([
+            "serve",
+            "--listen",
+            &format!("unix://{}", external_socket.display()),
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&external_socket, &mut child);
+    let mut guard = ServerGuard(child);
+
+    let (status, report) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &["upgrade", "apply", "--previous-version", "0.2.0"],
+    );
+    assert_eq!(status.status.code(), Some(20), "{report}");
+    assert_eq!(report["result"]["authority"]["state"], "deferred");
+    assert_eq!(
+        report["result"]["daemon"]["state"],
+        "external_action_required"
+    );
+    assert!(guard.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn interrupted_upgrade_state_resumes_running_and_blocks_binary_downgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("client");
+    let memoree_home = root.path().join("memoree-home");
+    let user_home = root.path().join("user-home");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(user_home.join(".codex")).unwrap();
+    let _guard = LocalDaemonGuard {
+        cwd: cwd.clone(),
+        home: memoree_home.clone(),
+    };
+
+    let (status, initialized) = invoke_local(&cwd, &memoree_home, &["init", "--name", "resume"]);
+    assert!(status.status.success(), "{initialized}");
+    let (status, started) = invoke_local(&cwd, &memoree_home, &["doctor"]);
+    assert!(status.status.success(), "{started}");
+    let (status, stopped) = invoke_local(&cwd, &memoree_home, &["daemon", "stop"]);
+    assert!(status.status.success(), "{stopped}");
+
+    let state_path = memoree_home.join("data/upgrade-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "target_version": env!("CARGO_PKG_VERSION"),
+            "phase": "authority_committed",
+            "prior_daemon_running": true,
+            "previous_daemon_version": "0.2.0",
+            "migration_backup": null,
+            "store_schema_version": 4,
+            "skill_digest": "0".repeat(64),
+            "updated_at": "2026-07-20T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (status, resumed) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &["upgrade", "apply", "--previous-version", "0.2.0"],
+    );
+    assert!(status.status.success(), "{resumed}");
+    assert_eq!(resumed["result"]["daemon"]["state"], "restarted");
+    assert_eq!(resumed["result"]["state"]["phase"], "complete");
+
+    let (status, guard) = invoke_upgrade(
+        &cwd,
+        &memoree_home,
+        &user_home,
+        &["upgrade", "rollback-safe"],
+    );
+    assert_eq!(status.status.code(), Some(20), "{guard}");
+    assert_eq!(guard["result"]["rollback_safe"], false);
 }
 
 #[test]

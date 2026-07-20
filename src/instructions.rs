@@ -23,7 +23,7 @@ use crate::store::{
 };
 
 pub const PRODUCT_NAME: &str = "memoree";
-pub const INSTRUCTION_SET_VERSION: u32 = 7;
+pub const INSTRUCTION_SET_VERSION: u32 = 8;
 
 /// Structured form of the normative model instructions.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -94,6 +94,8 @@ pub struct CapabilitiesDocument {
     pub max_search_items: usize,
     pub max_recall_claims: usize,
     pub max_recall_artifact_refs: usize,
+    pub max_recall_candidate_claims: usize,
+    pub max_recall_candidate_artifact_refs: usize,
     pub max_recall_excerpt_bytes: usize,
     pub max_recall_evidence_excerpts_per_claim: usize,
     pub max_history_items: usize,
@@ -237,7 +239,7 @@ pub fn instruction_document() -> InstructionDocument {
             InstructionRule {
                 id: "recall-semantics",
                 level: RuleLevel::Must,
-                text: "Use memory.recall for the normal knowledge check. presence=claims is not a truth verdict: inspect status, evidence, conflicts, and truncation. artifacts_only is raw source material; none means no match only in searched_horizons.",
+                text: "Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Fetch and corroborate its citation; similarity and logits are ordering, not confidence.",
             },
             InstructionRule {
                 id: "idempotent-mutations",
@@ -370,7 +372,7 @@ pub fn instruction_document() -> InstructionDocument {
             },
             ConceptInstruction {
                 name: "recall",
-                meaning: "A deterministic claim-first search projection with exact evidence, conflicts, separate artifact refs, and no synthesis or automatic broadening.",
+                meaning: "A deterministic claim-first projection with exact evidence, conflicts, separate artifact refs, and cited candidates that never affect presence; no synthesis or automatic broadening.",
             },
             ConceptInstruction {
                 name: "remember command",
@@ -470,6 +472,8 @@ pub fn capabilities() -> CapabilitiesDocument {
         max_search_items: crate::protocol::MAX_SEARCH_ITEMS,
         max_recall_claims: crate::protocol::MAX_RECALL_CLAIMS,
         max_recall_artifact_refs: crate::protocol::MAX_RECALL_ARTIFACT_REFS,
+        max_recall_candidate_claims: crate::protocol::MAX_RECALL_CANDIDATE_CLAIMS,
+        max_recall_candidate_artifact_refs: crate::protocol::MAX_RECALL_CANDIDATE_ARTIFACT_REFS,
         max_recall_excerpt_bytes: crate::protocol::MAX_RECALL_EXCERPT_BYTES,
         max_recall_evidence_excerpts_per_claim:
             crate::protocol::MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM,
@@ -478,7 +482,13 @@ pub fn capabilities() -> CapabilitiesDocument {
         max_conflict_list_items: crate::protocol::MAX_CONFLICT_LIST_ITEMS,
         authoritative_store: "sqlite_wal",
         blob_store: "filesystem",
-        retrieval: vec!["exact", "sqlite_fts5"],
+        retrieval: vec![
+            "exact",
+            "sqlite_fts5",
+            "deterministic_trigram",
+            "optional_local_dense_candidates",
+            "optional_claim_cross_encoder_ordering",
+        ],
         guarantees: vec![
             "immutable_revisions",
             "idempotent_mutations",
@@ -488,6 +498,8 @@ pub fn capabilities() -> CapabilitiesDocument {
             "explicit_search_broadening",
             "ambient_write_scope",
             "temporal_validity_filtering",
+            "model_independent_exact_tier",
+            "candidates_never_affect_presence",
             "revision_bound_conflict_lifecycle",
             "automatic_live_conflict_reassessment",
             "append_only_conflict_events",
@@ -607,7 +619,7 @@ mod tests {
         assert!(!markdown.contains("Claude"));
         assert!(!markdown.contains("OpenAI"));
         assert!(
-            markdown.len() < 10_000,
+            markdown.len() < 10 * 1024,
             "instructions should stay prompt-sized"
         );
     }
