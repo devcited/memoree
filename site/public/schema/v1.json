@@ -4252,6 +4252,10 @@
         "authoritative_store": {
           "type": "string"
         },
+        "binary_version": {
+          "default": "",
+          "type": "string"
+        },
         "daemon_pid": {
           "format": "uint32",
           "minimum": 0,
@@ -4261,11 +4265,20 @@
           "format": "int64",
           "type": "integer"
         },
+        "lifecycle_owner": {
+          "default": "",
+          "type": "string"
+        },
         "retrieval_mode": {
           "type": "string"
         },
         "running": {
           "type": "boolean"
+        },
+        "schema_version": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
         },
         "status": {
           "type": "string"

@@ -4,6 +4,8 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-20
+
 ### Added
 
 - Deterministic query analysis, typo-tolerant trigram qualification, exact long-document chunk citations, and conflict-aware result retention.
@@ -11,11 +13,14 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Bounded `unqualified_candidate` claim and artifact suggestions with exact citations, risk signals, and no effect on recall presence or context construction.
 - A disjoint reranker calibration evaluator and an opt-in claim-only ordering model with startup warm-up, fail-open behavior, and a latency circuit breaker.
 - A realistic v2 retrieval corpus covering paraphrase, typos, long documents, honest abstention, scope, temporal behavior, explicit broadening, and conflicts.
+- An idempotent upgrade reconciler with daemon version/ownership checks, durable phase state, and automatic synchronization of the canonical Codex/Claude skill.
+- Private, verified pre-migration snapshots for every schema 1–3 store before schema 4 is committed.
 
 ### Changed
 
 - Retrieval authority now filters scope, currentness, and lifecycle before any model work; exact-tier qualification and order remain model-independent.
 - The generated machine instructions and Codex/Claude skills now teach agents to fetch and corroborate candidate citations rather than treating suggestions as facts.
+- The stable installer now preserves running/stopped daemon state, reconciles existing local projections without downloading models, and rolls binaries back after a pre-migration failure.
 
 ## [0.2.0] - 2026-07-18
 
@@ -31,5 +36,6 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/devcited/memoree/releases/tag/v0.3.0
 [0.2.0]: https://github.com/devcited/memoree/releases/tag/v0.2.0

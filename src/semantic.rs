@@ -628,6 +628,10 @@ impl RerankerManager {
         self.root.join("model-manifest.json")
     }
 
+    pub(crate) fn is_installed(&self) -> bool {
+        self.manifest_path().is_file()
+    }
+
     fn initialize_runtime(&self) -> Result<()> {
         let _manifest = self.verified_manifest()?;
         let started = Instant::now();
@@ -1025,6 +1029,10 @@ impl SemanticManager {
 
     fn manifest_path(&self) -> PathBuf {
         self.root.join("model-manifest.json")
+    }
+
+    pub(crate) fn is_installed(&self) -> bool {
+        self.manifest_path().is_file()
     }
 
     fn projection_path(&self) -> PathBuf {

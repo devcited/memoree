@@ -226,6 +226,12 @@ pub struct DoctorResult {
     pub status: String,
     pub running: bool,
     pub daemon_pid: u32,
+    #[serde(default)]
+    pub binary_version: String,
+    #[serde(default)]
+    pub schema_version: i64,
+    #[serde(default)]
+    pub lifecycle_owner: String,
     pub authoritative_store: String,
     pub retrieval_mode: String,
     pub last_commit_seq: i64,

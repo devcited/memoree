@@ -6,13 +6,14 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use schemars::JsonSchema;
@@ -42,8 +43,10 @@ use crate::semantic::{
     SemanticInstallReport, SemanticManager,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 4;
 pub const MEMOREE_DATABASE_FILE: &str = "memoree.sqlite3";
+const SCHEMA_MIGRATION_LOCK_FILE: &str = "schema-migration.lock";
+const MIGRATION_BACKUP_DIRECTORY: &str = "migration-backups";
 const MAX_KIND_BYTES: usize = 128;
 const MAX_MEDIA_TYPE_BYTES: usize = 512;
 const MAX_ACTOR_BYTES: usize = 1024;
@@ -374,6 +377,16 @@ pub struct Store {
     db_path: PathBuf,
     semantic: SemanticManager,
     reranker: RerankerManager,
+    schema_migration: Option<SchemaMigrationReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SchemaMigrationReport {
+    pub from_schema: i64,
+    pub to_schema: i64,
+    pub backup_destination: String,
+    pub copied_external_blobs: usize,
+    pub completed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -561,6 +574,16 @@ pub struct BackupReport {
 }
 
 impl Store {
+    pub fn inspect_schema_version(data_dir: impl AsRef<Path>) -> Result<Option<i64>> {
+        let database = data_dir.as_ref().join(MEMOREE_DATABASE_FILE);
+        if !database.is_file() {
+            return Ok(None);
+        }
+        let connection =
+            Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        preflight_schema_version(&connection)
+    }
+
     /// Open a self-contained data directory (`memoree.sqlite3` plus `blobs/`).
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
@@ -570,15 +593,32 @@ impl Store {
 
     pub fn open_paths(db_path: impl AsRef<Path>, blob_dir: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
-        if let Some(parent) = db_path.parent() {
-            ensure_private_directory(parent)?;
-        }
+        let parent = db_path
+            .parent()
+            .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?;
+        ensure_private_directory(parent)?;
+        let migration_lock = open_private_migration_lock(&parent.join(SCHEMA_MIGRATION_LOCK_FILE))?;
+        migration_lock.lock_exclusive().map_err(|error| {
+            MemoryError::Config(format!(
+                "could not acquire schema migration lock for {}: {error}",
+                db_path.display()
+            ))
+        })?;
         let mut connection = Connection::open(&db_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let existing_schema_version = preflight_schema_version(&connection)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
+        let schema_migration = match existing_schema_version {
+            Some(version) if version < SCHEMA_VERSION => Some(create_pre_migration_backup(
+                &connection,
+                &db_path,
+                blob_dir.as_ref(),
+                version,
+            )?),
+            _ => None,
+        };
         if existing_schema_version == Some(2) {
             migrate_schema_v2_to_v3(&mut connection)?;
         }
@@ -600,17 +640,10 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             cas: Cas::new(blob_dir)?,
-            semantic: SemanticManager::new(
-                db_path
-                    .parent()
-                    .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?,
-            ),
-            reranker: RerankerManager::new(
-                db_path
-                    .parent()
-                    .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?,
-            ),
+            semantic: SemanticManager::new(parent),
+            reranker: RerankerManager::new(parent),
             db_path,
+            schema_migration,
         })
     }
 
@@ -620,6 +653,19 @@ impl Store {
 
     pub fn cas(&self) -> &Cas {
         &self.cas
+    }
+
+    pub fn schema_migration(&self) -> Option<&SchemaMigrationReport> {
+        self.schema_migration.as_ref()
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        let connection = self.connection.lock();
+        Ok(connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn last_commit_seq(&self) -> Result<i64> {
@@ -2398,6 +2444,10 @@ impl Store {
         self.semantic.status(current_commit_seq, &eligible)
     }
 
+    pub fn semantic_model_installed(&self) -> bool {
+        self.semantic.is_installed()
+    }
+
     /// Explicitly download and digest-pin the provisional ordering-only
     /// reranker. This never enables answer qualification.
     pub fn reranker_enable(&self) -> Result<RerankerInstallReport> {
@@ -2411,6 +2461,10 @@ impl Store {
 
     pub fn reranker_status(&self) -> Result<RerankerRetrievalStatus> {
         self.reranker.status()
+    }
+
+    pub fn reranker_model_installed(&self) -> bool {
+        self.reranker.is_installed()
     }
 
     fn semantic_documents(&self) -> Result<(Vec<SemanticDocument>, i64)> {
@@ -3063,6 +3117,182 @@ impl Store {
     }
 }
 
+fn open_private_migration_lock(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn create_pre_migration_backup(
+    connection: &Connection,
+    db_path: &Path,
+    blob_dir: &Path,
+    from_schema: i64,
+) -> Result<SchemaMigrationReport> {
+    let data_dir = db_path
+        .parent()
+        .ok_or_else(|| MemoryError::Config("database path has no parent".into()))?;
+    let backup_root = data_dir.join(MIGRATION_BACKUP_DIRECTORY);
+    ensure_private_directory(&backup_root)?;
+    preflight_migration_backup_space(db_path, blob_dir, &backup_root)?;
+
+    let completed_at = Utc::now();
+    let destination = backup_root.join(format!(
+        "schema-{from_schema}-to-{SCHEMA_VERSION}-{}-{}",
+        completed_at.format("%Y%m%dT%H%M%SZ"),
+        Ulid::r#gen()
+    ));
+    ensure_backup_destination_absent(&destination)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".memoree-migration-stage-")
+        .tempdir_in(&backup_root)?;
+    ensure_private_directory(staging.path())?;
+    let staged_database_path = staging.path().join(MEMOREE_DATABASE_FILE);
+    let staged_blobs_path = staging.path().join("blobs");
+
+    let mut destination_connection = Connection::open(&staged_database_path)?;
+    {
+        let backup = rusqlite::backup::Backup::new(connection, &mut destination_connection)?;
+        backup.run_to_completion(64, Duration::from_millis(5), None)?;
+    }
+    let integrity: String =
+        destination_connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(MemoryError::Integrity(format!(
+            "pre-migration SQLite snapshot failed integrity_check: {integrity}"
+        )));
+    }
+    drop(destination_connection);
+    set_sqlite_file_permissions(&staged_database_path)?;
+
+    let source_cas = Cas::new(blob_dir)?;
+    verify_referenced_external_blobs(connection, &source_cas)?;
+    let copied_external_blobs = source_cas.copy_external_to(&staged_blobs_path)?;
+    let copied_report = Cas::new(&staged_blobs_path)?.verify_all_external()?;
+    if !copied_report.is_ok() {
+        return Err(MemoryError::Integrity(format!(
+            "pre-migration CAS snapshot failed verification: {}",
+            copied_report.issues.join("; ")
+        )));
+    }
+
+    let manifest_path = staging.path().join("migration.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": 1,
+            "from_schema": from_schema,
+            "to_schema": SCHEMA_VERSION,
+            "database": MEMOREE_DATABASE_FILE,
+            "blobs": "blobs",
+            "copied_external_blobs": copied_external_blobs,
+            "created_at": completed_at,
+            "restore": "Stop Memoree, replace the data directory database and blobs with this snapshot, then reinstall the matching older binary."
+        }))?,
+    )?;
+    set_private_regular_file(&manifest_path)?;
+    sync_backup_tree(staging.path())?;
+    atomic_publish_backup(staging.path(), &destination)?;
+    sync_directory_best_effort(&backup_root);
+
+    Ok(SchemaMigrationReport {
+        from_schema,
+        to_schema: SCHEMA_VERSION,
+        backup_destination: destination.display().to_string(),
+        copied_external_blobs,
+        completed_at,
+    })
+}
+
+fn preflight_migration_backup_space(
+    db_path: &Path,
+    blob_dir: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let sqlite_bytes = sqlite_live_bytes(db_path)?;
+    let required = sqlite_bytes
+        .saturating_mul(4)
+        .saturating_add(directory_regular_file_bytes(blob_dir)?)
+        .saturating_add(64 * 1024 * 1024);
+    let available = fs2::available_space(destination)?;
+    if available < required {
+        return Err(MemoryError::Config(format!(
+            "insufficient free space for schema migration backup: need at least {required} bytes, have {available} bytes in {}",
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+fn sqlite_live_bytes(db_path: &Path) -> Result<u64> {
+    let mut total = fs::metadata(db_path)?.len();
+    for suffix in ["-wal", "-shm"] {
+        let mut value = db_path.as_os_str().to_owned();
+        value.push(suffix);
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            total = total.saturating_add(fs::metadata(path)?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn directory_regular_file_bytes(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            total = total.saturating_add(directory_regular_file_bytes(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn verify_referenced_external_blobs(connection: &Connection, cas: &Cas) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT blob_hash, blob_size
+           FROM artifact_revisions
+          WHERE inline_blob IS NULL",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(BlobRef {
+            hash: row.get(0)?,
+            size_bytes: row.get::<_, i64>(1)? as u64,
+            inline_bytes: None,
+        })
+    })?;
+    for row in rows {
+        cas.verify(&row?)?;
+    }
+    Ok(())
+}
+
+fn set_private_regular_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn preflight_schema_version(connection: &Connection) -> Result<Option<i64>> {
     let object_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master
@@ -3258,7 +3488,69 @@ fn migrate_schema_v3_to_v4(connection: &mut Connection) -> Result<()> {
         "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
         [],
     )?;
+    verify_schema_v4_transaction(&transaction)?;
     transaction.commit()?;
+    Ok(())
+}
+
+fn verify_schema_v4_transaction(transaction: &Transaction<'_>) -> Result<()> {
+    let integrity: String =
+        transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration failed SQLite integrity_check before commit: {integrity}"
+        )));
+    }
+    let foreign_key_violation: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if foreign_key_violation {
+        return Err(MemoryError::Integrity(
+            "schema migration introduced a foreign-key violation".into(),
+        ));
+    }
+    let version: i64 = transaction.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if version != SCHEMA_VERSION {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration staged version {version}, expected {SCHEMA_VERSION}"
+        )));
+    }
+    let missing_artifact_trigrams: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_revisions ar
+          WHERE NOT EXISTS (
+            SELECT 1 FROM artifact_trigram_fts tf WHERE tf.revision_id = ar.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_claim_trigrams: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM claim_revisions cr
+          WHERE NOT EXISTS (
+            SELECT 1 FROM claim_trigram_fts tf WHERE tf.revision_id = cr.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_artifact_chunks: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_revisions ar
+          WHERE NOT EXISTS (
+            SELECT 1 FROM artifact_chunk_fts cf WHERE cf.revision_id = ar.id
+          )",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_artifact_trigrams != 0 || missing_claim_trigrams != 0 || missing_artifact_chunks != 0
+    {
+        return Err(MemoryError::Integrity(format!(
+            "schema migration projection verification failed before commit: missing artifact trigrams={missing_artifact_trigrams}, claim trigrams={missing_claim_trigrams}, artifact chunks={missing_artifact_chunks}"
+        )));
+    }
     Ok(())
 }
 
@@ -7931,6 +8223,26 @@ mod tests {
                 .unwrap();
         }
         let migrated = Store::open(temporary.path()).unwrap();
+        let migration = migrated
+            .schema_migration()
+            .expect("schema 3 migration must publish a recovery snapshot");
+        assert_eq!(migration.from_schema, 3);
+        assert_eq!(migration.to_schema, 4);
+        let backup = PathBuf::from(&migration.backup_destination);
+        assert!(backup.join(MEMOREE_DATABASE_FILE).is_file());
+        assert!(backup.join("migration.json").is_file());
+        let backup_connection = Connection::open(backup.join(MEMOREE_DATABASE_FILE)).unwrap();
+        let backup_schema: i64 = backup_connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backup_schema, 3,
+            "recovery snapshot must remain pre-migration"
+        );
         assert_eq!(migrated.verify().unwrap().schema_version, 4);
         assert!(migrated.verify().unwrap().ok);
         let result = migrated

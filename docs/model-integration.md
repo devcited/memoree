@@ -17,6 +17,8 @@ For example, extract the generated Markdown from its normal JSON envelope:
 memoree instructions --format markdown | jq -r '.result.content' > memoree-agent-instructions.md
 ```
 
+The release binary also embeds the canonical `use-memoree` skill used by Codex and Claude. The stable installer runs `memoree skills sync` after an install or update. Sync touches only agent homes that already exist, refuses symlinked destinations, atomically writes the skill, and preserves any differing previous copy under Memoree's private `integration-backups/` directory. Set `MEMOREE_SKIP_SKILL_SYNC=true` when another package manager owns these files.
+
 ## Bounded claim compilation
 
 For the common write-side case, use `memoree remember`. It accepts inline UTF-8 text, `-` for stdin, or `--file PATH`. Without `--apply`, it is a read-only plan. With `--apply`, it stores the exact source artifact and any Luna-proposed claims that pass host validation:

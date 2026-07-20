@@ -32,7 +32,7 @@ Install the current checksummed release on macOS or Linux without `sudo`:
 curl --proto '=https' --tlsv1.2 -sfL https://memoree.dev/install.sh | sh
 ```
 
-The installer supports Apple Silicon and Intel macOS plus ARM64 and x86_64 Linux, downloads the matching checksummed release through `memoree.dev`, writes to `~/.local/bin` by default, and starts no service. Inspect the script first or choose a destination and version as documented at [memoree.dev/install](https://memoree.dev/install/). Windows is not yet a native target; use WSL2 until the local transport has Windows parity.
+The installer supports Apple Silicon and Intel macOS plus ARM64 and x86_64 Linux, downloads the matching checksummed release through `memoree.dev`, and writes to `~/.local/bin` by default. A fresh install starts no service. An update records whether the default Memoree-owned daemon was running, atomically replaces the binaries, creates a private verified pre-migration snapshot, migrates and verifies the store, rebuilds an already-enabled semantic projection without downloading models, synchronizes the canonical skill into existing Codex/Claude homes, and restores the original running/stopped state. Explicit or supervisor-owned endpoints are reported and never restarted. Inspect the script first or choose a destination and version as documented at [memoree.dev/install](https://memoree.dev/install/). Windows is not yet a native target; use WSL2 until the local transport has Windows parity.
 
 Memoree is not published to crates.io. The public GitHub repository is the immutable release origin; `memoree.dev` is the stable installation, version discovery, and download surface.
 
@@ -65,6 +65,16 @@ memoree daemon stop
 ```
 
 Stop and restart intentionally control only the default private Unix endpoint. For an explicit TCP/Unix endpoint, use the process supervisor or Docker Compose that owns it.
+
+Rerun the stable installer to upgrade. Reconciliation is idempotent and can also be inspected or retried directly:
+
+```sh
+memoree upgrade status
+memoree upgrade apply
+memoree skills sync
+```
+
+The CLI probes daemon version and ownership before ordinary operations, so a replaced binary cannot silently continue using an older resident daemon. Set `MEMOREE_SKIP_SKILL_SYNC=true` only when agent skills are managed independently.
 
 Initialize a project once; normal calls then inherit its stable identity:
 
@@ -99,7 +109,7 @@ Ambient lookup never broadens itself. If project-scoped retrieval is insufficien
 
 `relation.list` provides bounded, one-hop incoming/outgoing graph inspection. It is newest-first and cursor-paginated; exact artifact pins can identify a foreign anchor but do not grant ambient access to that anchor's relations.
 
-`conflict.list` provides the actionable contradiction queue. Every case has a stable `case_id` and freezes the exact two claim revisions it assessed. Revising either claim preserves that case as stale history and automatically opens one fresh case over the relation's two current non-terminal revisions, so a cosmetic edit cannot hide a still-live contradiction. Retraction or supersession resolves the current open case. Results include both frozen and current snapshots; visible `conflicted` status is derived only from the one surviving open case per relation. Pagination uses `next_before_case_sequence`/`before_case_sequence` (the wrapper flag is `--before-case-sequence`). SQLite schema v3 migrates v1 relation history and v2 conflict heads without rewriting claims, revisions, relations, logical events, or `commit_seq`.
+`conflict.list` provides the actionable contradiction queue. Every case has a stable `case_id` and freezes the exact two claim revisions it assessed. Revising either claim preserves that case as stale history and automatically opens one fresh case over the relation's two current non-terminal revisions, so a cosmetic edit cannot hide a still-live contradiction. Retraction or supersession resolves the current open case. Results include both frozen and current snapshots; visible `conflicted` status is derived only from the one surviving open case per relation. Pagination uses `next_before_case_sequence`/`before_case_sequence` (the wrapper flag is `--before-case-sequence`). SQLite schema v4 migrates v1 relation history and v2 conflict heads without rewriting claims, revisions, relations, logical events, or `commit_seq`, then adds exact chunk and deterministic trigram projections.
 
 Current-only search also enforces claim validity windows. Future and expired claims appear only when `include_historical` is explicitly enabled, with machine-readable currentness and temporal state in each claim hit's provenance.
 
@@ -188,6 +198,8 @@ Atomic no-replace backup publication is implemented on Apple and Linux targets. 
 `backup.create` is an atomic administrative side effect, not an idempotency-keyed logical mutation. If its success response is lost, inspect the requested destination before deciding what to do next; a retry will never overwrite it.
 
 The CLI converts relative backup destinations to absolute client paths before sending them; the daemon performs the write. With Compose, the destination therefore must be an absolute path visible inside the container. Write under `/data` so the backup remains in the named volume (for example `memoree backup create /data/backups/backup-001`), then export it explicitly if an independent copy is required.
+
+Schema migrations automatically publish a separate pre-migration recovery snapshot below the data directory's `migration-backups/` folder before changing authority. The snapshot retains the old schema, verified SQLite bytes, all external CAS objects, and a `migration.json` restore note. It is intentionally retained after a successful update; deletion is a deliberate user maintenance action.
 
 ## Design
 

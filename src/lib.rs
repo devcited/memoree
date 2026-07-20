@@ -11,6 +11,7 @@ pub mod semantic;
 pub mod service;
 pub mod store;
 pub mod transport;
+pub mod upgrade;
 
 pub use error::{MemoryError, Result};
 pub use protocol::{Request, Response};

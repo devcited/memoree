@@ -85,10 +85,19 @@ Individual paths can be overridden when embedding or packaging the daemon:
 - `MEMOREE_ENDPOINT` selects the daemon transport, for example `tcp://127.0.0.1:17878`; the global `--endpoint` CLI option overrides it.
 - `MEMOREE_NO_AUTOSTART=true` disables automatic daemon startup.
 - `MEMOREE_ACTOR` records the caller identity on supported mutations.
+- `MEMOREE_SKIP_SKILL_SYNC=true` keeps `upgrade apply` from changing Codex/Claude skills when those integrations are managed independently.
 
 On Unix, leave `MEMOREE_ENDPOINT` unset for the recommended default: an owner-private runtime directory and mode-`0600` Unix socket. This provides a per-user boundary that TCP does not.
 
 Server TCP binds are a separate concern from the client endpoint. `memoree serve` rejects wildcard and other non-loopback TCP listeners because this release has no authentication. Loopback TCP is host-local, not user-private: any local process/user able to connect can use the protocol. Container supervisors that must bind the process to a container interface can explicitly pass `--dangerously-allow-non-loopback-tcp`, but must enforce their own network boundary. The bundled Compose file makes that opt-in visible and publishes the port on host `127.0.0.1` only, but is intended for a trusted single-user host. It sets `MEMOREE_HOME=/data` and persists that directory in one named volume. The standalone Docker image remains loopback-only by default.
+
+The auto-started private daemon reports `lifecycle_owner=memoree`; a process started directly with `memoree serve` reports `external`. The stable installer may stop and restart only the former. The one-time v0.2 compatibility path accepts a missing ownership field only when the installer has independently observed a running legacy default daemon. Explicit endpoints and supervisor-owned processes are never reconciled by the installer.
+
+## Upgrade state
+
+`memoree upgrade apply` serializes reconciliation under a private lock and writes an atomic `upgrade-state.json` beside the store. The state records the target binary, prior daemon state, phase, schema, recovery snapshot, and embedded skill digest so a retry after interruption preserves “running before means running after.” `memoree upgrade status` reads this state without starting a daemon.
+
+Before schema 1–3 becomes schema 4, Memoree checks free space and publishes a private, verified pre-migration SQLite/CAS snapshot below `migration-backups/`. Optional models are never downloaded by upgrade reconciliation. An already-installed stale semantic projection is rebuilt locally; an unavailable projection or reranker degrades to deterministic retrieval.
 
 There is intentionally no setting for a default `workspace` or `personal` retrieval horizon. Broadening is a decision made explicitly by the caller for one search or context-build request and must include a reason.
 

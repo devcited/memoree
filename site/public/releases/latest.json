@@ -1,34 +1,35 @@
 {
   "schema": 1,
   "name": "memoree",
-  "version": "0.2.0",
-  "tag": "v0.2.0",
-  "published_at": "2026-07-18T00:00:00Z",
+  "version": "0.3.0",
+  "tag": "v0.3.0",
+  "store_schema_version": 4,
+  "published_at": "2026-07-20T00:00:00Z",
   "install_url": "https://memoree.dev/install.sh",
-  "release_url": "https://github.com/devcited/memoree/releases/tag/v0.2.0",
-  "download_base_url": "https://memoree.dev/releases/download/v0.2.0",
-  "artifact_origin": "https://github.com/devcited/memoree/releases/download/v0.2.0",
+  "release_url": "https://github.com/devcited/memoree/releases/tag/v0.3.0",
+  "download_base_url": "https://memoree.dev/releases/download/v0.3.0",
+  "artifact_origin": "https://github.com/devcited/memoree/releases/download/v0.3.0",
   "automatic_checks": false,
   "targets": [
     {
       "triple": "aarch64-apple-darwin",
-      "archive_url": "https://memoree.dev/releases/download/v0.2.0/memoree-aarch64-apple-darwin.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.2.0/memoree-aarch64-apple-darwin.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.3.0/memoree-aarch64-apple-darwin.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.3.0/memoree-aarch64-apple-darwin.tar.gz.sha256"
     },
     {
       "triple": "x86_64-apple-darwin",
-      "archive_url": "https://memoree.dev/releases/download/v0.2.0/memoree-x86_64-apple-darwin.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.2.0/memoree-x86_64-apple-darwin.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.3.0/memoree-x86_64-apple-darwin.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.3.0/memoree-x86_64-apple-darwin.tar.gz.sha256"
     },
     {
       "triple": "aarch64-unknown-linux-musl",
-      "archive_url": "https://memoree.dev/releases/download/v0.2.0/memoree-aarch64-unknown-linux-musl.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.2.0/memoree-aarch64-unknown-linux-musl.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.3.0/memoree-aarch64-unknown-linux-musl.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.3.0/memoree-aarch64-unknown-linux-musl.tar.gz.sha256"
     },
     {
       "triple": "x86_64-unknown-linux-musl",
-      "archive_url": "https://memoree.dev/releases/download/v0.2.0/memoree-x86_64-unknown-linux-musl.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.2.0/memoree-x86_64-unknown-linux-musl.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.3.0/memoree-x86_64-unknown-linux-musl.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.3.0/memoree-x86_64-unknown-linux-musl.tar.gz.sha256"
     }
   ]
 }

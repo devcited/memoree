@@ -20,7 +20,11 @@ One Rust binary provides the CLI and daemon. The CLI resolves client-local ambie
 - Consumption and echoing of the attached context, plus retrieval-horizon enforcement. Scoped storage and retrieval paths validate context before use.
 - The JSON request/response protocol.
 
+The CLI probes daemon version, schema, and lifecycle ownership before ordinary requests. Installer reconciliation may replace only the default daemon it owns (plus the explicitly observed one-time v0.2 legacy case); direct `serve` and explicit endpoints remain supervisor-owned.
+
 SQLite is authoritative. The CAS is immutable. FTS rows and any future vector index are derived projections that can be rebuilt.
+
+Every authority schema migration is serialized under a private lock. Before schema 1–3 becomes schema 4, Memoree checks available space and atomically publishes a verified old-schema SQLite/CAS recovery snapshot. The migration then rebuilds deterministic projections and verifies SQLite, foreign keys, and projection coverage before commit. Upgrade state records the prior daemon state and phase so interruption cannot turn a previously running installation into a silently stopped one.
 
 Running one process avoids separate Postgres, object-store, and search-server memory footprints. Docker Compose is packaging rather than an architectural dependency; the same binary can run directly on the host.
 

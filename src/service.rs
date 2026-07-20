@@ -27,6 +27,7 @@ use crate::{
 #[derive(Clone)]
 pub struct MemoryService {
     store: Store,
+    lifecycle_owner: String,
 }
 
 struct Handled {
@@ -64,7 +65,14 @@ impl Handled {
 
 impl MemoryService {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self::with_lifecycle_owner(store, "external")
+    }
+
+    pub fn with_lifecycle_owner(store: Store, lifecycle_owner: impl Into<String>) -> Self {
+        Self {
+            store,
+            lifecycle_owner: lifecycle_owner.into(),
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -300,8 +308,11 @@ impl MemoryService {
                         status: "ok".into(),
                         running: true,
                         daemon_pid: std::process::id(),
+                        binary_version: env!("CARGO_PKG_VERSION").into(),
+                        schema_version: self.store.schema_version()?,
+                        lifecycle_owner: self.lifecycle_owner.clone(),
                         authoritative_store: "sqlite_wal".into(),
-                        retrieval_mode: "fts5".into(),
+                        retrieval_mode: "fts5_trigram_hybrid".into(),
                         last_commit_seq: self.store.last_commit_seq()?,
                     },
                     context,
