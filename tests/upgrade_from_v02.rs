@@ -11,6 +11,16 @@ use std::{
 use rusqlite::Connection;
 use serde_json::Value;
 
+fn short_legacy_tempdir() -> tempfile::TempDir {
+    // v0.2 used one long derived Unix-socket path. GitHub-hosted runners set
+    // TMPDIR below an already long workspace path, which can exceed SUN_LEN
+    // before the legacy daemon binds. Keep this immutable-binary fixture short.
+    tempfile::Builder::new()
+        .prefix("m2-")
+        .tempdir_in("/tmp")
+        .expect("create short legacy fixture directory")
+}
+
 fn current_binary() -> &'static Path {
     assert_cmd::cargo::cargo_bin!("memoree")
 }
@@ -47,7 +57,7 @@ fn real_v02_running_store_upgrades_to_v04_automatically() {
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
     assert!(old_binary.is_file(), "{} is missing", old_binary.display());
 
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = short_legacy_tempdir();
     let cwd = temporary.path().join("project with spaces");
     let memoree_home = temporary.path().join("memoree home");
     let user_home = temporary.path().join("user home");
@@ -184,7 +194,7 @@ fn real_v02_running_store_upgrades_to_v04_automatically() {
 fn real_v02_stopped_store_upgrades_to_v04_without_starting_a_daemon() {
     let old_binary =
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = short_legacy_tempdir();
     let cwd = temporary.path().join("project");
     let memoree_home = temporary.path().join("memoree-home");
     let user_home = temporary.path().join("user-home");
