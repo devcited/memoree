@@ -229,7 +229,7 @@ jobs:
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MEMOREE_UPDATE_SIGNING_KEY_B64: ${{ secrets.MEMOREE_UPDATE_SIGNING_KEY_B64 }}
+    environment: release-signing
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
@@ -251,10 +251,13 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Build signed release manifest
+        env:
+          MEMOREE_UPDATE_SIGNING_KEY_B64: ${{ secrets.MEMOREE_UPDATE_SIGNING_KEY_B64 }}
+        run: sh scripts/build-signed-release-manifest.sh target/distrib "${{ needs.plan.outputs.tag }}"
       - id: host
         shell: bash
         run: |
-          sh scripts/build-signed-release-manifest.sh target/distrib "${{ needs.plan.outputs.tag }}"
           dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --output-format=json > upload-dist-manifest.json
           gh release upload "${{ needs.plan.outputs.tag }}" \
             target/distrib/memoree-release.json \
@@ -282,7 +285,7 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest || '{}').announcement_is_prerelease && '--prerelease' || '' }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # If we're editing a release in place, we need to upload things ahead of time

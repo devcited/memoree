@@ -4,7 +4,7 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-20
+## [0.4.1] - 2026-07-20
 
 ### Added
 
@@ -53,7 +53,7 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/devcited/memoree/releases/tag/v0.4.0
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/devcited/memoree/releases/tag/v0.4.1
 [0.3.0]: https://github.com/devcited/memoree/releases/tag/v0.3.0
 [0.2.0]: https://github.com/devcited/memoree/releases/tag/v0.2.0

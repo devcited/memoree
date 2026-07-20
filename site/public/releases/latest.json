@@ -1,37 +1,37 @@
 {
   "schema": 2,
   "name": "memoree",
-  "version": "0.4.0",
-  "tag": "v0.4.0",
+  "version": "0.4.1",
+  "tag": "v0.4.1",
   "store_schema_version": 5,
   "published_at": "2026-07-20T00:00:00Z",
   "install_url": "https://memoree.dev/install.sh",
-  "release_url": "https://github.com/devcited/memoree/releases/tag/v0.4.0",
-  "download_base_url": "https://memoree.dev/releases/download/v0.4.0",
-  "artifact_origin": "https://github.com/devcited/memoree/releases/download/v0.4.0",
-  "signed_manifest_url": "https://github.com/devcited/memoree/releases/download/v0.4.0/memoree-release.json",
-  "signature_url": "https://github.com/devcited/memoree/releases/download/v0.4.0/memoree-release.json.sig",
+  "release_url": "https://github.com/devcited/memoree/releases/tag/v0.4.1",
+  "download_base_url": "https://memoree.dev/releases/download/v0.4.1",
+  "artifact_origin": "https://github.com/devcited/memoree/releases/download/v0.4.1",
+  "signed_manifest_url": "https://github.com/devcited/memoree/releases/download/v0.4.1/memoree-release.json",
+  "signature_url": "https://github.com/devcited/memoree/releases/download/v0.4.1/memoree-release.json.sig",
   "automatic_checks": true,
   "targets": [
     {
       "triple": "aarch64-apple-darwin",
-      "archive_url": "https://memoree.dev/releases/download/v0.4.0/memoree-aarch64-apple-darwin.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.4.0/memoree-aarch64-apple-darwin.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.4.1/memoree-aarch64-apple-darwin.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.4.1/memoree-aarch64-apple-darwin.tar.gz.sha256"
     },
     {
       "triple": "x86_64-apple-darwin",
-      "archive_url": "https://memoree.dev/releases/download/v0.4.0/memoree-x86_64-apple-darwin.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.4.0/memoree-x86_64-apple-darwin.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.4.1/memoree-x86_64-apple-darwin.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.4.1/memoree-x86_64-apple-darwin.tar.gz.sha256"
     },
     {
       "triple": "aarch64-unknown-linux-musl",
-      "archive_url": "https://memoree.dev/releases/download/v0.4.0/memoree-aarch64-unknown-linux-musl.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.4.0/memoree-aarch64-unknown-linux-musl.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.4.1/memoree-aarch64-unknown-linux-musl.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.4.1/memoree-aarch64-unknown-linux-musl.tar.gz.sha256"
     },
     {
       "triple": "x86_64-unknown-linux-musl",
-      "archive_url": "https://memoree.dev/releases/download/v0.4.0/memoree-x86_64-unknown-linux-musl.tar.gz",
-      "checksum_url": "https://memoree.dev/releases/download/v0.4.0/memoree-x86_64-unknown-linux-musl.tar.gz.sha256"
+      "archive_url": "https://memoree.dev/releases/download/v0.4.1/memoree-x86_64-unknown-linux-musl.tar.gz",
+      "checksum_url": "https://memoree.dev/releases/download/v0.4.1/memoree-x86_64-unknown-linux-musl.tar.gz.sha256"
     }
   ]
 }
