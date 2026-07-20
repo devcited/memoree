@@ -53,7 +53,7 @@ marker="$test_root/installer-ran"
 cat > "$server_root/install.sh" <<'INSTALLER'
 #!/bin/sh
 set -eu
-[ "${MEMOREE_VERSION:-}" = "v0.4.1" ]
+[ "${MEMOREE_VERSION:-}" = "v0.4.2" ]
 [ -n "${MEMOREE_INSTALL_DIR:-}" ]
 [ -n "${MEMOREE_EXPECTED_ARCHIVE_SHA256:-}" ]
 replacement="${MEMOREE_TEST_REPLACEMENT_BINARY:?}"
@@ -76,8 +76,8 @@ cat > "$server_root/memoree-release.json" <<EOF
 {
   "schema": 1,
   "name": "memoree",
-  "version": "0.4.1",
-  "tag": "v0.4.1",
+  "version": "0.4.2",
+  "tag": "v0.4.2",
   "store_schema_version": 5,
   "published_at": "2026-07-20T00:00:00Z",
   "installer": {"url": "$base_url/install.sh", "sha256": "$installer_sha"},
@@ -92,8 +92,8 @@ cat > "$server_root/latest.json" <<EOF
 {
   "schema": 2,
   "name": "memoree",
-  "version": "0.4.1",
-  "tag": "v0.4.1",
+  "version": "0.4.2",
+  "tag": "v0.4.2",
   "signed_manifest_url": "$base_url/memoree-release.json",
   "signature_url": "$base_url/memoree-release.json.sig"
 }

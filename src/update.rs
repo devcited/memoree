@@ -38,7 +38,7 @@ const UPDATE_STATE_SCHEMA: u32 = 1;
 const UPDATE_STATE_FILE: &str = "update-state.json";
 pub const UPDATE_LOCK_FILE: &str = "auto-update.lock";
 const DEFAULT_FEED_URL: &str = "https://memoree.dev/releases/latest.json";
-const SIGNING_PUBLIC_KEY_B64: &str = "TAcugIqFVhA30V0q/+KOP2IIhSoY/H1KaN8PJySLh5Y=";
+const SIGNING_PUBLIC_KEY_B64: &str = "m64qvSA8wHiltREGcb/XvIqSSBfGb36JRvW9EOKnisA=";
 #[cfg(debug_assertions)]
 const TEST_SIGNING_PUBLIC_KEY_ENV: &str = "MEMOREE_TEST_UPDATE_PUBLIC_KEY";
 const CHECK_INTERVAL_HOURS: i64 = 6;
