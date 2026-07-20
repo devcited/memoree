@@ -24,7 +24,7 @@ The CLI probes daemon version, schema, and lifecycle ownership before ordinary r
 
 SQLite is authoritative. The CAS is immutable. FTS rows and any future vector index are derived projections that can be rebuilt.
 
-Every authority schema migration is serialized under a private lock. Before schema 1–3 becomes schema 4, Memoree checks available space and atomically publishes a verified old-schema SQLite/CAS recovery snapshot. The migration then rebuilds deterministic projections and verifies SQLite, foreign keys, and projection coverage before commit. Upgrade state records the prior daemon state and phase so interruption cannot turn a previously running installation into a silently stopped one.
+Every authority schema migration is serialized under a private lock. Before any older store becomes schema 5, Memoree checks available space and atomically publishes a verified old-schema SQLite/CAS recovery snapshot. The migration then rebuilds deterministic projections and verifies SQLite, foreign keys, and projection coverage before commit. Upgrade state records the prior daemon state and phase so interruption cannot turn a previously running installation into a silently stopped one.
 
 Running one process avoids separate Postgres, object-store, and search-server memory footprints. Docker Compose is packaging rather than an architectural dependency; the same binary can run directly on the host.
 
@@ -76,6 +76,10 @@ Recency is enabled by default for recall/search/context requests and can be disa
 
 SQLite authority and exact lexical/trigram tiers remain sufficient on their own. An explicitly installed Snowflake Arctic Embed S projection can add private candidate windows; cosine never qualifies an answer. A separately installed MiniLM-L12 cross-encoder may order non-exact claim candidates only. It never touches exact-tier order, artifact/mixed surfaces, qualification, scope, lifecycle, or citations. Model bytes are revision/digest pinned, installed deliberately, warmed before queries, and never downloaded by a retrieval call. Missing/error/slow ordering fails open to the deterministic fused order.
 
+Schema 5 also accepts adapter-produced summaries, aliases, entities, and hypothetical questions as cited derived projections. Each projection is bound to one immutable artifact revision and at least one exact raw byte span. It can add an artifact to the unqualified candidate pool, but cannot qualify `presence`, become claim evidence, or enter `context.build` by itself. Returned excerpts are the exact authority bytes, never the derived text.
+
+External systems synchronize through a connector-neutral source contract. Adapters remain separate processes and keep their credentials: they register source identity, ingest stable external id/revision pairs, and checkpoint cursors and health. Replaying identical bytes is a no-op; reusing an external revision for different bytes fails closed. Upstream removal calls `source.withdraw`, which excludes the artifact and its projections from future retrieval but deliberately performs no CAS or backup erasure.
+
 `memoree checkpoint` is also caller-side. It stores one private, bounded, last-write-wins continuity note per session under a pending directory that the daemon, database, CAS, search index, recall, and context builder never inspect. Review and compiler preview remain local; only explicit `memoree pending apply` crosses the normal remember write boundary. This prevents lifecycle capture from becoming background self-mutation or artifact-only retrieval noise.
 
 `context.build` is the explicit handoff from memory to an external reasoning system. It freezes the retrieval result, labels excerpts as untrusted, preserves exact citations, reports conflicts and truncation, and stays within the caller's byte budget. Ambient retrieval is the default; wider horizons still require a reason.
@@ -108,7 +112,7 @@ An explicit `derived_from`, `supports`, `contradicts`, `supersedes`, `references
 
 ### Chunk
 
-The schema-v4 lexical projection keeps private exact artifact chunks and immutable byte offsets for long content; the semantic projection uses overlapping, bounded windows no larger than 384 bytes. Projection identities never escape as authority. Search excerpts always cite a stable artifact/claim revision and, when derived from an artifact body span, the exact `[start_byte, end_byte)` bytes. Title-only matches reset to the revision citation rather than retaining a stale body span. Durable evidence locators remain exact artifact-revision spans, so rebuilding either projection cannot invalidate stored claims.
+The lexical projection keeps private exact artifact chunks and immutable byte offsets for long content; the semantic projection uses overlapping, bounded windows no larger than 384 bytes. Projection identities never escape as authority. Search excerpts always cite a stable artifact/claim revision and, when derived from an artifact body span, the exact `[start_byte, end_byte)` bytes. Title-only matches reset to the revision citation rather than retaining a stale body span. Durable evidence locators remain exact artifact-revision spans, so rebuilding any projection cannot invalidate stored claims.
 
 ### Recall result
 

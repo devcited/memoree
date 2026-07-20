@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,14 +29,20 @@ use crate::protocol::{
     AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput, ArtifactHistoryInput,
     ArtifactPutInput, ArtifactReviseInput, ClaimAssertInput, ClaimGetInput, ClaimHistoryInput,
     ClaimRetractInput, ClaimReviseInput, ClaimStatus, ClaimType, ConflictListInput, ConflictState,
-    EntityType, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES, MAX_CLAIM_STATEMENT_BYTES,
+    EntityType, EvidenceLocator, FeedbackExportInput, FeedbackGetInput, FeedbackListInput,
+    FeedbackOutcome, FeedbackRecordInput, Horizon, MAX_ARTIFACT_BYTES, MAX_CLAIM_STATEMENT_BYTES,
     MAX_CONFLICT_LIST_ITEMS, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS, MAX_ENCODED_CONTENT_BYTES,
-    MAX_EVIDENCE_ITEMS, MAX_HISTORY_ITEMS, MAX_METADATA_BYTES, MAX_PIN_BYTES, MAX_QUERY_BYTES,
-    MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RELATION_LIST_ITEMS,
-    MAX_SEARCH_ITEMS, MAX_TITLE_BYTES, QueryAnalysis, RecencyDecayClass, RecencyTimestampBasis,
-    RelationListInput, RelationListItem, RelationListResult, RelationPutInput, RelationType,
-    RerankerRetrievalStatus, SearchHit, SearchInput, SearchRanking, SearchResult,
-    SemanticRetrievalStatus,
+    MAX_EVIDENCE_ITEMS, MAX_EXTERNAL_ID_BYTES, MAX_FEEDBACK_ITEMS, MAX_FEEDBACK_NOTE_BYTES,
+    MAX_HISTORY_ITEMS, MAX_METADATA_BYTES, MAX_PIN_BYTES, MAX_PROJECTION_ITEMS,
+    MAX_PROJECTION_SPANS, MAX_PROJECTION_TEXT_BYTES, MAX_QUERY_BYTES,
+    MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RECALL_EXCERPT_BYTES,
+    MAX_RELATION_LIST_ITEMS, MAX_SEARCH_ITEMS, MAX_SOURCE_CURSOR_BYTES, MAX_TITLE_BYTES,
+    ProjectionDropInput, ProjectionListInput, ProjectionPutInput, ProjectionRetrievalStatus,
+    ProjectionSpan, QueryAnalysis, RecencyDecayClass, RecencyTimestampBasis, RelationListInput,
+    RelationListItem, RelationListResult, RelationPutInput, RelationType, RerankerRetrievalStatus,
+    SearchHit, SearchInput, SearchRanking, SearchResult, SemanticRetrievalStatus,
+    SourceCheckpointInput, SourceGetInput, SourceHealth, SourceIngestInput, SourceRegisterInput,
+    SourceWithdrawInput,
 };
 use crate::semantic::{
     EligibleSemanticRevision, RERANKER_ORDERING_CANDIDATE_LIMIT, RERANKER_POLICY_VERSION,
@@ -43,7 +50,7 @@ use crate::semantic::{
     SemanticInstallReport, SemanticManager,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 pub const MEMOREE_DATABASE_FILE: &str = "memoree.sqlite3";
 const SCHEMA_MIGRATION_LOCK_FILE: &str = "schema-migration.lock";
 const MIGRATION_BACKUP_DIRECTORY: &str = "migration-backups";
@@ -58,6 +65,7 @@ const RECENCY_MAX_PROMOTION: usize = 2;
 const LEXICAL_POLICY_VERSION: &str = "lexical_qualification_v1";
 const TRIGRAM_POLICY_VERSION: &str = "trigram_typo_v1";
 const FUSION_POLICY_VERSION: &str = "tiered_rrf_v2";
+const PROJECTION_POLICY_VERSION: &str = "cited_projection_candidate_v1";
 const RRF_K: f64 = 60.0;
 const ARTIFACT_CHUNKER_VERSION: i64 = 1;
 const ARTIFACT_CHUNK_TARGET_BYTES: usize = 2 * 1024;
@@ -80,7 +88,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 ) STRICT;
 INSERT OR IGNORE INTO meta(key, value) VALUES
-    ('schema_version', '4'),
+    ('schema_version', '5'),
     ('commit_seq', '0');
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -214,6 +222,80 @@ CREATE TABLE IF NOT EXISTS idempotency (
     created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS sources (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    task_id TEXT,
+    component TEXT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    locator TEXT,
+    metadata_json TEXT NOT NULL,
+    health TEXT NOT NULL CHECK(health IN ('unknown', 'healthy', 'degraded', 'error')),
+    cursor TEXT,
+    health_message TEXT,
+    last_observed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    commit_seq INTEGER NOT NULL,
+    UNIQUE(workspace_id, project_id, task_id, name)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS source_items (
+    source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+    external_id TEXT NOT NULL,
+    external_revision TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+    artifact_revision_id TEXT NOT NULL REFERENCES artifact_revisions(id) ON DELETE RESTRICT,
+    state TEXT NOT NULL CHECK(state IN ('live', 'withdrawn')),
+    observed_at TEXT NOT NULL,
+    withdrawn_at TEXT,
+    withdrawal_reason TEXT,
+    updated_at TEXT NOT NULL,
+    commit_seq INTEGER NOT NULL,
+    PRIMARY KEY(source_id, external_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS retrieval_projections (
+    id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+    revision_id TEXT NOT NULL REFERENCES artifact_revisions(id) ON DELETE RESTRICT,
+    projection_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    generator TEXT NOT NULL,
+    generator_version TEXT NOT NULL,
+    generator_digest TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active', 'dropped')),
+    dropped_reason TEXT,
+    actor TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    commit_seq INTEGER NOT NULL,
+    UNIQUE(revision_id, projection_key)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS retrieval_feedback (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    task_id TEXT,
+    component TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('miss', 'useful', 'incorrect', 'stale')),
+    query_fingerprint TEXT NOT NULL,
+    retained_query TEXT,
+    citations_json TEXT NOT NULL,
+    note TEXT,
+    actor TEXT,
+    created_at TEXT NOT NULL,
+    commit_seq INTEGER NOT NULL UNIQUE
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS artifacts_context_idx
     ON artifacts(workspace_id, project_id, task_id, status);
 CREATE INDEX IF NOT EXISTS claims_context_idx
@@ -234,6 +316,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS conflict_cases_one_open_per_relation
     ON conflict_cases(relation_id) WHERE state = 'open';
 CREATE INDEX IF NOT EXISTS conflict_events_case_idx
     ON conflict_events(case_id, created_at);
+CREATE INDEX IF NOT EXISTS sources_context_idx
+    ON sources(workspace_id, project_id, task_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS source_items_artifact_idx
+    ON source_items(artifact_id, state);
+CREATE INDEX IF NOT EXISTS projections_artifact_idx
+    ON retrieval_projections(artifact_id, revision_id, status);
+CREATE INDEX IF NOT EXISTS feedback_context_idx
+    ON retrieval_feedback(workspace_id, project_id, task_id, commit_seq DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS artifact_fts USING fts5(
     revision_id UNINDEXED,
@@ -278,6 +368,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS artifact_chunk_fts USING fts5(
     chunker_version UNINDEXED,
     title,
     body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+-- Candidate-only derived text. Rows always map back to one immutable raw
+-- artifact revision and can never qualify a search result by themselves.
+CREATE VIRTUAL TABLE IF NOT EXISTS projection_fts USING fts5(
+    projection_id UNINDEXED,
+    revision_id UNINDEXED,
+    artifact_id UNINDEXED,
+    text,
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
@@ -429,6 +528,141 @@ pub struct ArtifactHistoryPage {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before_revision_number: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceRecord {
+    pub source_id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
+    pub health: SourceHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<DateTime<Utc>>,
+    pub context: AmbientContext,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub commit_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceItemRecord {
+    pub source_id: String,
+    pub external_id: String,
+    pub external_revision: String,
+    pub artifact_id: String,
+    pub artifact_revision_id: String,
+    pub state: String,
+    pub observed_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_reason: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub commit_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceIngestRecord {
+    pub source: SourceRecord,
+    pub item: SourceItemRecord,
+    pub artifact: ArtifactRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceWithdrawRecord {
+    pub source: SourceRecord,
+    pub item: SourceItemRecord,
+    pub artifact: ArtifactRecord,
+    pub erasure_performed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectionRecord {
+    pub projection_id: String,
+    pub artifact_id: String,
+    pub revision_id: String,
+    pub projection_key: String,
+    pub kind: String,
+    pub text: String,
+    pub evidence_spans: Vec<ProjectionSpan>,
+    pub generator: String,
+    pub generator_version: String,
+    pub generator_digest: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub commit_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectionListResult {
+    pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    pub projections: Vec<ProjectionRecord>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackRecord {
+    pub feedback_id: String,
+    pub outcome: FeedbackOutcome,
+    pub query_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_query: Option<String>,
+    #[serde(default)]
+    pub citations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    pub context: AmbientContext,
+    pub created_at: DateTime<Utc>,
+    pub commit_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackListResult {
+    pub feedback: Vec<FeedbackRecord>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before_commit_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackEvalCase {
+    pub feedback_id: String,
+    pub query: String,
+    pub outcome: FeedbackOutcome,
+    pub citations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub commit_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackExportResult {
+    pub schema_version: u32,
+    pub format: String,
+    pub cases: Vec<FeedbackEvalCase>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before_commit_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -675,6 +909,1256 @@ impl Store {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn source_register(
+        &self,
+        context: &AmbientContext,
+        input: &SourceRegisterInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<SourceRecord>> {
+        validate_context(context)?;
+        require_bounded("source name", &input.name, MAX_TITLE_BYTES)?;
+        require_bounded("source kind", &input.kind, MAX_KIND_BYTES)?;
+        validate_optional_size(
+            "source locator",
+            input.locator.as_deref(),
+            MAX_METADATA_BYTES,
+        )?;
+        validate_serialized_size("source metadata", &input.metadata, MAX_METADATA_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(replay) = idempotency_replay::<SourceRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.register",
+        )? {
+            return Ok(replay);
+        }
+        let source_id = new_id("src");
+        let now = Utc::now();
+        let commit_seq = next_commit_seq(&transaction)?;
+        transaction.execute(
+            "INSERT INTO sources (
+                id, workspace_id, project_id, task_id, component, name, kind,
+                locator, metadata_json, health, created_at, updated_at, commit_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'unknown', ?10, ?10, ?11)",
+            params![
+                source_id,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                context.component,
+                input.name,
+                input.kind,
+                input.locator,
+                serde_json::to_string(&input.metadata)?,
+                now,
+                commit_seq,
+            ],
+        )?;
+        let record = SourceRecord {
+            source_id: source_id.clone(),
+            name: input.name.clone(),
+            kind: input.kind.clone(),
+            locator: input.locator.clone(),
+            metadata: input.metadata.clone(),
+            health: SourceHealth::Unknown,
+            cursor: None,
+            health_message: None,
+            last_observed_at: None,
+            context: context.clone(),
+            created_at: now,
+            updated_at: now,
+            commit_seq,
+        };
+        append_event(
+            &transaction,
+            commit_seq,
+            "source.register",
+            "source",
+            &source_id,
+            None,
+            input.actor.as_deref(),
+            &json!({"kind": input.kind, "locator": input.locator}),
+        )?;
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.register",
+            &record,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value: record,
+            commit_seq,
+            created: true,
+        })
+    }
+
+    pub fn source_get(
+        &self,
+        context: &AmbientContext,
+        input: &SourceGetInput,
+    ) -> Result<SourceRecord> {
+        validate_context(context)?;
+        require_bounded("source_id", &input.source_id, MAX_CONTEXT_ID_BYTES)?;
+        let connection = self.connection.lock();
+        let record = load_source(&connection, &input.source_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("source {}", input.source_id)))?;
+        ensure_write_scope(context, &record.context, "source", &input.source_id)?;
+        Ok(record)
+    }
+
+    pub fn source_checkpoint(
+        &self,
+        context: &AmbientContext,
+        input: &SourceCheckpointInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<SourceRecord>> {
+        validate_context(context)?;
+        require_bounded("source_id", &input.source_id, MAX_CONTEXT_ID_BYTES)?;
+        validate_optional_size("cursor", input.cursor.as_deref(), MAX_SOURCE_CURSOR_BYTES)?;
+        validate_optional_size("health message", input.message.as_deref(), MAX_REASON_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = load_source(&transaction, &input.source_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("source {}", input.source_id)))?;
+        ensure_write_scope(context, &previous.context, "source", &input.source_id)?;
+        if let Some(replay) = idempotency_replay::<SourceRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.checkpoint",
+        )? {
+            return Ok(replay);
+        }
+        let now = Utc::now();
+        let observed_at = input.observed_at.unwrap_or(now);
+        let commit_seq = next_commit_seq(&transaction)?;
+        let health = enum_string(&input.health)?;
+        transaction.execute(
+            "UPDATE sources
+                SET health = ?1, cursor = COALESCE(?2, cursor), health_message = ?3,
+                    last_observed_at = ?4, updated_at = ?5, commit_seq = ?6
+              WHERE id = ?7",
+            params![
+                health,
+                input.cursor,
+                input.message,
+                observed_at,
+                now,
+                commit_seq,
+                input.source_id,
+            ],
+        )?;
+        let record = load_source(&transaction, &input.source_id)?.ok_or_else(|| {
+            MemoryError::Integrity(format!(
+                "source {} vanished during checkpoint",
+                input.source_id
+            ))
+        })?;
+        append_event(
+            &transaction,
+            commit_seq,
+            "source.checkpoint",
+            "source",
+            &input.source_id,
+            None,
+            input.actor.as_deref(),
+            &json!({"health": input.health, "cursor_changed": input.cursor.is_some()}),
+        )?;
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.checkpoint",
+            &record,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value: record,
+            commit_seq,
+            created: true,
+        })
+    }
+
+    pub fn source_ingest(
+        &self,
+        context: &AmbientContext,
+        input: &SourceIngestInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<SourceIngestRecord>> {
+        validate_context(context)?;
+        require_bounded("source_id", &input.source_id, MAX_CONTEXT_ID_BYTES)?;
+        require_bounded("external_id", &input.external_id, MAX_EXTERNAL_ID_BYTES)?;
+        require_bounded(
+            "external_revision",
+            &input.external_revision,
+            MAX_EXTERNAL_ID_BYTES,
+        )?;
+        validate_artifact_input(&input.kind, &input.title, &input.media_type)?;
+        validate_serialized_size("provenance", &input.provenance, MAX_METADATA_BYTES)?;
+        validate_optional_size("cursor", input.cursor.as_deref(), MAX_SOURCE_CURSOR_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+        let bytes = content_bytes(&input.content)?;
+        let search_text = searchable_text(&input.media_type, &bytes);
+        let blob = self.cas.put(&bytes)?;
+        let observed_at = input.observed_at.unwrap_or_else(Utc::now);
+        let mut provenance = input.provenance.clone();
+        provenance.insert(
+            "memoree_source".into(),
+            json!({
+                "source_id": input.source_id,
+                "external_id": input.external_id,
+                "external_revision": input.external_revision,
+                "observed_at": observed_at,
+            }),
+        );
+        validate_serialized_size("enriched provenance", &provenance, MAX_METADATA_BYTES)?;
+        let payload_digest = source_payload_digest(
+            &input.kind,
+            &input.title,
+            &input.media_type,
+            &blob.hash,
+            &input.provenance,
+        )?;
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = load_source(&transaction, &input.source_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("source {}", input.source_id)))?;
+        ensure_write_scope(context, &source.context, "source", &input.source_id)?;
+        if let Some(replay) = idempotency_replay::<SourceIngestRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.ingest",
+        )? {
+            return Ok(replay);
+        }
+
+        let previous_item = load_source_item(&transaction, &input.source_id, &input.external_id)?;
+        if let Some(previous) = &previous_item
+            && previous.state == "live"
+            && previous.external_revision == input.external_revision
+        {
+            if previous.payload_digest != payload_digest {
+                return Err(MemoryError::RevisionConflict {
+                    entity_type: "source_item",
+                    entity_id: format!("{}:{}", input.source_id, input.external_id),
+                    current_revision: previous.external_revision.clone(),
+                    requested_revision: input.external_revision.clone(),
+                });
+            }
+            let artifact = load_artifact_raw(
+                &transaction,
+                &previous.artifact_id,
+                Some(&previous.artifact_revision_id),
+            )?
+            .ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "source item {}:{} references a missing artifact revision",
+                    input.source_id, input.external_id
+                ))
+            })?
+            .into_record(&self.cas, false)?;
+            let value = SourceIngestRecord {
+                source,
+                item: previous.clone().into_record(),
+                artifact,
+            };
+            record_idempotency(
+                &transaction,
+                idempotency_key,
+                request_hash,
+                "source.ingest",
+                &value,
+                previous.commit_seq,
+            )?;
+            transaction.commit()?;
+            return Ok(MutationResult {
+                value,
+                commit_seq: previous.commit_seq,
+                created: false,
+            });
+        }
+
+        let now = Utc::now();
+        let commit_seq = next_commit_seq(&transaction)?;
+        let provenance_json = serde_json::to_string(&provenance)?;
+        let (artifact_id, revision_id, revision_number, artifact_created_at, created) =
+            if let Some(previous) = &previous_item
+                && previous.state == "live"
+            {
+                let head = load_artifact_raw(&transaction, &previous.artifact_id, None)?
+                    .ok_or_else(|| {
+                        MemoryError::Integrity(format!(
+                            "source item {}:{} references missing artifact {}",
+                            input.source_id, input.external_id, previous.artifact_id
+                        ))
+                    })?;
+                ensure_write_scope(context, &head.context, "artifact", &head.artifact_id)?;
+                if head.status != "active" {
+                    return Err(MemoryError::Integrity(format!(
+                        "live source item {}:{} points to forgotten artifact {}",
+                        input.source_id, input.external_id, head.artifact_id
+                    )));
+                }
+                if head.kind != input.kind {
+                    return Err(MemoryError::InvalidRequest(format!(
+                        "source item kind is immutable (stored {}, received {})",
+                        head.kind, input.kind
+                    )));
+                }
+                let revision_id = new_id("arev");
+                let revision_number = head.revision_number + 1;
+                transaction.execute(
+                    "INSERT INTO artifact_revisions (
+                        id, artifact_id, revision_number, title, media_type, blob_hash,
+                        blob_size, inline_blob, search_text, provenance_json, actor,
+                        created_at, commit_seq
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        revision_id,
+                        head.artifact_id,
+                        revision_number,
+                        input.title,
+                        input.media_type,
+                        blob.hash,
+                        i64::try_from(blob.size_bytes).map_err(|_| MemoryError::ContentTooLarge)?,
+                        blob.inline_bytes,
+                        search_text,
+                        provenance_json,
+                        input.actor,
+                        now,
+                        commit_seq,
+                    ],
+                )?;
+                index_artifact_revision_chunks(
+                    &transaction,
+                    &revision_id,
+                    &head.artifact_id,
+                    &input.title,
+                    &search_text,
+                )?;
+                transaction.execute(
+                    "UPDATE artifacts SET current_revision_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![revision_id, now, head.artifact_id],
+                )?;
+                (
+                    head.artifact_id,
+                    revision_id,
+                    revision_number,
+                    head.created_at,
+                    false,
+                )
+            } else {
+                let artifact_id = new_id("art");
+                let revision_id = new_id("arev");
+                transaction.execute(
+                    "INSERT INTO artifacts (
+                        id, workspace_id, project_id, task_id, component, kind,
+                        current_revision_id, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8)",
+                    params![
+                        artifact_id,
+                        context.workspace_id,
+                        context.project_id,
+                        context.task_id,
+                        context.component,
+                        input.kind,
+                        revision_id,
+                        now,
+                    ],
+                )?;
+                transaction.execute(
+                    "INSERT INTO artifact_revisions (
+                        id, artifact_id, revision_number, title, media_type, blob_hash,
+                        blob_size, inline_blob, search_text, provenance_json, actor,
+                        created_at, commit_seq
+                     ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![
+                        revision_id,
+                        artifact_id,
+                        input.title,
+                        input.media_type,
+                        blob.hash,
+                        i64::try_from(blob.size_bytes).map_err(|_| MemoryError::ContentTooLarge)?,
+                        blob.inline_bytes,
+                        search_text,
+                        provenance_json,
+                        input.actor,
+                        now,
+                        commit_seq,
+                    ],
+                )?;
+                index_artifact_revision_chunks(
+                    &transaction,
+                    &revision_id,
+                    &artifact_id,
+                    &input.title,
+                    &search_text,
+                )?;
+                (artifact_id, revision_id, 1, now, true)
+            };
+
+        transaction.execute(
+            "INSERT INTO source_items (
+                source_id, external_id, external_revision, payload_digest,
+                artifact_id, artifact_revision_id, state, observed_at,
+                updated_at, commit_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'live', ?7, ?8, ?9)
+             ON CONFLICT(source_id, external_id) DO UPDATE SET
+                external_revision = excluded.external_revision,
+                payload_digest = excluded.payload_digest,
+                artifact_id = excluded.artifact_id,
+                artifact_revision_id = excluded.artifact_revision_id,
+                state = 'live', observed_at = excluded.observed_at,
+                withdrawn_at = NULL, withdrawal_reason = NULL,
+                updated_at = excluded.updated_at, commit_seq = excluded.commit_seq",
+            params![
+                input.source_id,
+                input.external_id,
+                input.external_revision,
+                payload_digest,
+                artifact_id,
+                revision_id,
+                observed_at,
+                now,
+                commit_seq,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE sources
+                SET health = 'healthy', cursor = COALESCE(?1, cursor),
+                    health_message = NULL, last_observed_at = ?2,
+                    updated_at = ?3, commit_seq = ?4
+              WHERE id = ?5",
+            params![input.cursor, observed_at, now, commit_seq, input.source_id],
+        )?;
+        append_event(
+            &transaction,
+            commit_seq,
+            "source.ingest",
+            "source_item",
+            &format!("{}:{}", input.source_id, input.external_id),
+            Some(&revision_id),
+            input.actor.as_deref(),
+            &json!({
+                "source_id": input.source_id,
+                "external_id": input.external_id,
+                "external_revision": input.external_revision,
+                "artifact_id": artifact_id,
+                "artifact_revision_id": revision_id,
+            }),
+        )?;
+        let source = load_source(&transaction, &input.source_id)?.ok_or_else(|| {
+            MemoryError::Integrity(format!("source {} vanished during ingest", input.source_id))
+        })?;
+        let item = load_source_item(&transaction, &input.source_id, &input.external_id)?
+            .ok_or_else(|| MemoryError::Integrity("source item vanished during ingest".into()))?
+            .into_record();
+        let artifact = ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            revision_id: revision_id.clone(),
+            revision_number,
+            kind: input.kind.clone(),
+            title: input.title.clone(),
+            media_type: input.media_type.clone(),
+            content: None,
+            blob_hash: blob.hash,
+            size_bytes: blob.size_bytes,
+            status: "active".into(),
+            context: context.clone(),
+            provenance,
+            actor: input.actor.clone(),
+            created_at: artifact_created_at,
+            revision_created_at: now,
+            commit_seq,
+            forgotten_reason: None,
+        };
+        let value = SourceIngestRecord {
+            source,
+            item,
+            artifact,
+        };
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.ingest",
+            &value,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value,
+            commit_seq,
+            created,
+        })
+    }
+
+    pub fn source_withdraw(
+        &self,
+        context: &AmbientContext,
+        input: &SourceWithdrawInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<SourceWithdrawRecord>> {
+        validate_context(context)?;
+        require_bounded("source_id", &input.source_id, MAX_CONTEXT_ID_BYTES)?;
+        require_bounded("external_id", &input.external_id, MAX_EXTERNAL_ID_BYTES)?;
+        require_bounded("reason", &input.reason, MAX_REASON_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = load_source(&transaction, &input.source_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("source {}", input.source_id)))?;
+        ensure_write_scope(context, &source.context, "source", &input.source_id)?;
+        if let Some(replay) = idempotency_replay::<SourceWithdrawRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.withdraw",
+        )? {
+            return Ok(replay);
+        }
+        let previous = load_source_item(&transaction, &input.source_id, &input.external_id)?
+            .ok_or_else(|| {
+                MemoryError::NotFound(format!(
+                    "source item {}:{}",
+                    input.source_id, input.external_id
+                ))
+            })?;
+        let head =
+            load_artifact_raw(&transaction, &previous.artifact_id, None)?.ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "source item {}:{} references missing artifact {}",
+                    input.source_id, input.external_id, previous.artifact_id
+                ))
+            })?;
+        ensure_write_scope(context, &head.context, "artifact", &head.artifact_id)?;
+        if previous.state == "withdrawn" {
+            let value = SourceWithdrawRecord {
+                source,
+                item: previous.clone().into_record(),
+                artifact: head.into_record(&self.cas, false)?,
+                erasure_performed: false,
+            };
+            record_idempotency(
+                &transaction,
+                idempotency_key,
+                request_hash,
+                "source.withdraw",
+                &value,
+                previous.commit_seq,
+            )?;
+            transaction.commit()?;
+            return Ok(MutationResult {
+                value,
+                commit_seq: previous.commit_seq,
+                created: false,
+            });
+        }
+        let now = Utc::now();
+        let observed_at = input.observed_at.unwrap_or(now);
+        let commit_seq = next_commit_seq(&transaction)?;
+        transaction.execute(
+            "UPDATE artifacts
+                SET status = 'forgotten', forgotten_reason = ?1, updated_at = ?2
+              WHERE id = ?3",
+            params![input.reason, now, previous.artifact_id],
+        )?;
+        transaction.execute(
+            "UPDATE source_items
+                SET state = 'withdrawn', withdrawn_at = ?1, withdrawal_reason = ?2,
+                    observed_at = ?1, updated_at = ?3, commit_seq = ?4
+              WHERE source_id = ?5 AND external_id = ?6",
+            params![
+                observed_at,
+                input.reason,
+                now,
+                commit_seq,
+                input.source_id,
+                input.external_id,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE sources
+                SET last_observed_at = ?1, updated_at = ?2, commit_seq = ?3
+              WHERE id = ?4",
+            params![observed_at, now, commit_seq, input.source_id],
+        )?;
+        append_event(
+            &transaction,
+            commit_seq,
+            "source.withdraw",
+            "source_item",
+            &format!("{}:{}", input.source_id, input.external_id),
+            Some(&previous.artifact_revision_id),
+            input.actor.as_deref(),
+            &json!({
+                "reason": input.reason,
+                "artifact_id": previous.artifact_id,
+                "erasure_performed": false,
+            }),
+        )?;
+        let mut artifact = head.into_record(&self.cas, false)?;
+        artifact.status = "forgotten".into();
+        artifact.forgotten_reason = Some(input.reason.clone());
+        let value = SourceWithdrawRecord {
+            source: load_source(&transaction, &input.source_id)?.ok_or_else(|| {
+                MemoryError::Integrity(format!(
+                    "source {} vanished during withdrawal",
+                    input.source_id
+                ))
+            })?,
+            item: load_source_item(&transaction, &input.source_id, &input.external_id)?
+                .ok_or_else(|| {
+                    MemoryError::Integrity("source item vanished during withdrawal".into())
+                })?
+                .into_record(),
+            artifact,
+            erasure_performed: false,
+        };
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "source.withdraw",
+            &value,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value,
+            commit_seq,
+            created: true,
+        })
+    }
+
+    pub fn projection_put(
+        &self,
+        context: &AmbientContext,
+        input: &ProjectionPutInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<ProjectionRecord>> {
+        validate_context(context)?;
+        require_bounded("artifact_id", &input.artifact_id, MAX_CONTEXT_ID_BYTES)?;
+        require_bounded("revision_id", &input.revision_id, MAX_CONTEXT_ID_BYTES)?;
+        require_bounded(
+            "projection_key",
+            &input.projection_key,
+            MAX_EXTERNAL_ID_BYTES,
+        )?;
+        require_bounded("projection kind", &input.kind, MAX_KIND_BYTES)?;
+        require_bounded("projection text", &input.text, MAX_PROJECTION_TEXT_BYTES)?;
+        require_bounded("generator", &input.generator, MAX_TITLE_BYTES)?;
+        require_bounded(
+            "generator_version",
+            &input.generator_version,
+            MAX_EXTERNAL_ID_BYTES,
+        )?;
+        require_bounded(
+            "generator_digest",
+            &input.generator_digest,
+            MAX_EXTERNAL_ID_BYTES,
+        )?;
+        validate_serialized_size("projection metadata", &input.metadata, MAX_METADATA_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+        if input.evidence_spans.is_empty() || input.evidence_spans.len() > MAX_PROJECTION_SPANS {
+            return Err(MemoryError::InvalidRequest(format!(
+                "evidence_spans must contain 1..={MAX_PROJECTION_SPANS} items"
+            )));
+        }
+
+        let raw = {
+            let connection = self.connection.lock();
+            load_artifact_raw(&connection, &input.artifact_id, Some(&input.revision_id))?
+                .ok_or_else(|| {
+                    MemoryError::NotFound(format!(
+                        "artifact {} revision {}",
+                        input.artifact_id, input.revision_id
+                    ))
+                })?
+        };
+        ensure_write_scope(context, &raw.context, "artifact", &input.artifact_id)?;
+        if raw.status != "active" {
+            return Err(MemoryError::InvalidRequest(format!(
+                "artifact {} is not active",
+                input.artifact_id
+            )));
+        }
+        let current_revision = {
+            let connection = self.connection.lock();
+            load_artifact_raw(&connection, &input.artifact_id, None)?
+                .ok_or_else(|| MemoryError::NotFound(format!("artifact {}", input.artifact_id)))?
+                .revision_id
+        };
+        if current_revision != input.revision_id {
+            return Err(MemoryError::RevisionConflict {
+                entity_type: "artifact",
+                entity_id: input.artifact_id.clone(),
+                current_revision,
+                requested_revision: input.revision_id.clone(),
+            });
+        }
+        validate_projection_spans(&input.evidence_spans, raw.blob.size_bytes)?;
+        let payload_digest = projection_payload_digest(input)?;
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transactional_raw = load_artifact_raw(&transaction, &input.artifact_id, None)?
+            .ok_or_else(|| MemoryError::NotFound(format!("artifact {}", input.artifact_id)))?;
+        ensure_write_scope(
+            context,
+            &transactional_raw.context,
+            "artifact",
+            &input.artifact_id,
+        )?;
+        if transactional_raw.status != "active" {
+            return Err(MemoryError::InvalidRequest(format!(
+                "artifact {} is not active",
+                input.artifact_id
+            )));
+        }
+        if transactional_raw.revision_id != input.revision_id {
+            return Err(MemoryError::RevisionConflict {
+                entity_type: "artifact",
+                entity_id: input.artifact_id.clone(),
+                current_revision: transactional_raw.revision_id,
+                requested_revision: input.revision_id.clone(),
+            });
+        }
+        validate_projection_spans(&input.evidence_spans, transactional_raw.blob.size_bytes)?;
+        if let Some(replay) = idempotency_replay::<ProjectionRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "projection.put",
+        )? {
+            return Ok(replay);
+        }
+        let existing =
+            load_projection_by_key(&transaction, &input.revision_id, &input.projection_key)?;
+        if let Some(existing_projection) = existing.as_ref()
+            && existing_projection.status == "active"
+            && existing_projection.payload_digest == payload_digest
+        {
+            let record = existing_projection.clone().into_record()?;
+            record_idempotency(
+                &transaction,
+                idempotency_key,
+                request_hash,
+                "projection.put",
+                &record,
+                record.commit_seq,
+            )?;
+            transaction.commit()?;
+            return Ok(MutationResult {
+                commit_seq: record.commit_seq,
+                value: record,
+                created: false,
+            });
+        }
+
+        let projection_id = existing
+            .as_ref()
+            .map(|projection| projection.projection_id.clone())
+            .unwrap_or_else(|| new_id("proj"));
+        let created_at = existing
+            .as_ref()
+            .map(|projection| projection.created_at)
+            .unwrap_or_else(Utc::now);
+        let now = Utc::now();
+        let commit_seq = next_commit_seq(&transaction)?;
+        transaction.execute(
+            "INSERT INTO retrieval_projections (
+                id, artifact_id, revision_id, projection_key, kind, text,
+                evidence_json, generator, generator_version, generator_digest,
+                payload_digest, metadata_json, status, actor, created_at,
+                updated_at, commit_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       'active', ?13, ?14, ?15, ?16)
+             ON CONFLICT(revision_id, projection_key) DO UPDATE SET
+                kind = excluded.kind, text = excluded.text,
+                evidence_json = excluded.evidence_json,
+                generator = excluded.generator,
+                generator_version = excluded.generator_version,
+                generator_digest = excluded.generator_digest,
+                payload_digest = excluded.payload_digest,
+                metadata_json = excluded.metadata_json,
+                status = 'active', dropped_reason = NULL, actor = excluded.actor,
+                updated_at = excluded.updated_at, commit_seq = excluded.commit_seq",
+            params![
+                projection_id,
+                input.artifact_id,
+                input.revision_id,
+                input.projection_key,
+                input.kind,
+                input.text,
+                serde_json::to_string(&input.evidence_spans)?,
+                input.generator,
+                input.generator_version,
+                input.generator_digest,
+                payload_digest,
+                serde_json::to_string(&input.metadata)?,
+                input.actor,
+                created_at,
+                now,
+                commit_seq,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM projection_fts WHERE projection_id = ?1",
+            [&projection_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO projection_fts(projection_id, revision_id, artifact_id, text)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                projection_id,
+                input.revision_id,
+                input.artifact_id,
+                input.text,
+            ],
+        )?;
+        append_event(
+            &transaction,
+            commit_seq,
+            "projection.put",
+            "projection",
+            &projection_id,
+            Some(&input.revision_id),
+            input.actor.as_deref(),
+            &json!({
+                "artifact_id": input.artifact_id,
+                "projection_key": input.projection_key,
+                "kind": input.kind,
+                "generator": input.generator,
+                "generator_version": input.generator_version,
+            }),
+        )?;
+        let record = load_projection(&transaction, &projection_id)?
+            .ok_or_else(|| MemoryError::Integrity("projection vanished during put".into()))?
+            .into_record()?;
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "projection.put",
+            &record,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value: record,
+            commit_seq,
+            created: existing.is_none(),
+        })
+    }
+
+    pub fn projection_list(
+        &self,
+        context: &AmbientContext,
+        input: &ProjectionListInput,
+    ) -> Result<ProjectionListResult> {
+        validate_context(context)?;
+        require_bounded("artifact_id", &input.artifact_id, MAX_CONTEXT_ID_BYTES)?;
+        validate_optional_size(
+            "revision_id",
+            input.revision_id.as_deref(),
+            MAX_CONTEXT_ID_BYTES,
+        )?;
+        if input.limit == 0 || input.limit > MAX_PROJECTION_ITEMS {
+            return Err(MemoryError::InvalidRequest(format!(
+                "projection list limit must be between 1 and {MAX_PROJECTION_ITEMS}"
+            )));
+        }
+        let connection = self.connection.lock();
+        let artifact = load_artifact_raw(&connection, &input.artifact_id, None)?
+            .ok_or_else(|| MemoryError::NotFound(format!("artifact {}", input.artifact_id)))?;
+        ensure_write_scope(context, &artifact.context, "artifact", &input.artifact_id)?;
+        let mut statement = connection.prepare(
+            "SELECT id, artifact_id, revision_id, projection_key, kind, text,
+                    evidence_json, generator, generator_version, generator_digest,
+                    payload_digest, metadata_json, status, dropped_reason, actor,
+                    created_at, updated_at, commit_seq
+               FROM retrieval_projections
+              WHERE artifact_id = ?1 AND (?2 IS NULL OR revision_id = ?2)
+              ORDER BY updated_at DESC, id
+              LIMIT ?3",
+        )?;
+        let fetch_limit = i64::try_from(input.limit + 1)
+            .map_err(|_| MemoryError::InvalidRequest("projection limit is too large".into()))?;
+        let rows = statement.query_map(
+            params![input.artifact_id, input.revision_id, fetch_limit],
+            RawProjection::from_row,
+        )?;
+        let mut projections = Vec::new();
+        for row in rows {
+            projections.push(row?.into_record()?);
+        }
+        let truncated = projections.len() > input.limit;
+        projections.truncate(input.limit);
+        Ok(ProjectionListResult {
+            artifact_id: input.artifact_id.clone(),
+            revision_id: input.revision_id.clone(),
+            projections,
+            truncated,
+        })
+    }
+
+    pub fn projection_drop(
+        &self,
+        context: &AmbientContext,
+        input: &ProjectionDropInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<ProjectionRecord>> {
+        validate_context(context)?;
+        require_bounded("projection_id", &input.projection_id, MAX_CONTEXT_ID_BYTES)?;
+        require_bounded("reason", &input.reason, MAX_REASON_BYTES)?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = load_projection(&transaction, &input.projection_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("projection {}", input.projection_id)))?;
+        let artifact = load_artifact_raw(&transaction, &previous.artifact_id, None)?
+            .ok_or_else(|| MemoryError::NotFound(format!("artifact {}", previous.artifact_id)))?;
+        ensure_write_scope(
+            context,
+            &artifact.context,
+            "artifact",
+            &previous.artifact_id,
+        )?;
+        if let Some(replay) = idempotency_replay::<ProjectionRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "projection.drop",
+        )? {
+            return Ok(replay);
+        }
+        if previous.status == "dropped" {
+            let record = previous.into_record()?;
+            record_idempotency(
+                &transaction,
+                idempotency_key,
+                request_hash,
+                "projection.drop",
+                &record,
+                record.commit_seq,
+            )?;
+            transaction.commit()?;
+            return Ok(MutationResult {
+                commit_seq: record.commit_seq,
+                value: record,
+                created: false,
+            });
+        }
+        let now = Utc::now();
+        let commit_seq = next_commit_seq(&transaction)?;
+        transaction.execute(
+            "UPDATE retrieval_projections
+                SET status = 'dropped', dropped_reason = ?1, actor = ?2,
+                    updated_at = ?3, commit_seq = ?4
+              WHERE id = ?5",
+            params![
+                input.reason,
+                input.actor,
+                now,
+                commit_seq,
+                input.projection_id
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM projection_fts WHERE projection_id = ?1",
+            [&input.projection_id],
+        )?;
+        append_event(
+            &transaction,
+            commit_seq,
+            "projection.drop",
+            "projection",
+            &input.projection_id,
+            Some(&previous.revision_id),
+            input.actor.as_deref(),
+            &json!({"reason": input.reason}),
+        )?;
+        let record = load_projection(&transaction, &input.projection_id)?
+            .ok_or_else(|| MemoryError::Integrity("projection vanished during drop".into()))?
+            .into_record()?;
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "projection.drop",
+            &record,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value: record,
+            commit_seq,
+            created: true,
+        })
+    }
+
+    pub fn feedback_record(
+        &self,
+        context: &AmbientContext,
+        input: &FeedbackRecordInput,
+        idempotency_key: Option<&str>,
+        request_hash: &str,
+    ) -> Result<MutationResult<FeedbackRecord>> {
+        validate_context(context)?;
+        let analysis = analyze_query(&input.query)?;
+        if input.citations.len() > MAX_EVIDENCE_ITEMS {
+            return Err(MemoryError::InvalidRequest(format!(
+                "feedback citations must not contain more than {MAX_EVIDENCE_ITEMS} items"
+            )));
+        }
+        for citation in &input.citations {
+            require_bounded("feedback citation", citation, MAX_PIN_BYTES)?;
+        }
+        validate_optional_size(
+            "feedback note",
+            input.note.as_deref(),
+            MAX_FEEDBACK_NOTE_BYTES,
+        )?;
+        validate_optional_size("actor", input.actor.as_deref(), MAX_ACTOR_BYTES)?;
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(replay) = idempotency_replay::<FeedbackRecord>(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "feedback.record",
+        )? {
+            return Ok(replay);
+        }
+        let key = feedback_fingerprint_key(&transaction)?;
+        let query_fingerprint = keyed_query_fingerprint(&key, &analysis.normalized_query);
+        let feedback_id = new_id("fb");
+        let now = Utc::now();
+        let commit_seq = next_commit_seq(&transaction)?;
+        let outcome = enum_string(&input.outcome)?;
+        let retained_query = input.retain_query.then(|| input.query.clone());
+        transaction.execute(
+            "INSERT INTO retrieval_feedback (
+                id, workspace_id, project_id, task_id, component, outcome,
+                query_fingerprint, retained_query, citations_json, note, actor,
+                created_at, commit_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                feedback_id,
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                context.component,
+                outcome,
+                query_fingerprint,
+                retained_query,
+                serde_json::to_string(&input.citations)?,
+                input.note,
+                input.actor,
+                now,
+                commit_seq,
+            ],
+        )?;
+        let record = FeedbackRecord {
+            feedback_id: feedback_id.clone(),
+            outcome: input.outcome,
+            query_fingerprint,
+            retained_query,
+            citations: input.citations.clone(),
+            note: input.note.clone(),
+            actor: input.actor.clone(),
+            context: context.clone(),
+            created_at: now,
+            commit_seq,
+        };
+        append_event(
+            &transaction,
+            commit_seq,
+            "feedback.record",
+            "feedback",
+            &feedback_id,
+            None,
+            input.actor.as_deref(),
+            &json!({
+                "outcome": input.outcome,
+                "query_fingerprint": record.query_fingerprint,
+                "query_retained": input.retain_query,
+                "citation_count": input.citations.len(),
+            }),
+        )?;
+        record_idempotency(
+            &transaction,
+            idempotency_key,
+            request_hash,
+            "feedback.record",
+            &record,
+            commit_seq,
+        )?;
+        transaction.commit()?;
+        Ok(MutationResult {
+            value: record,
+            commit_seq,
+            created: true,
+        })
+    }
+
+    pub fn feedback_get(
+        &self,
+        context: &AmbientContext,
+        input: &FeedbackGetInput,
+    ) -> Result<FeedbackRecord> {
+        validate_context(context)?;
+        require_bounded("feedback_id", &input.feedback_id, MAX_CONTEXT_ID_BYTES)?;
+        let connection = self.connection.lock();
+        let record = load_feedback(&connection, &input.feedback_id)?
+            .ok_or_else(|| MemoryError::NotFound(format!("feedback {}", input.feedback_id)))?;
+        ensure_write_scope(context, &record.context, "feedback", &input.feedback_id)?;
+        Ok(record)
+    }
+
+    pub fn feedback_list(
+        &self,
+        context: &AmbientContext,
+        input: &FeedbackListInput,
+    ) -> Result<FeedbackListResult> {
+        validate_context(context)?;
+        if input.limit == 0 || input.limit > MAX_FEEDBACK_ITEMS {
+            return Err(MemoryError::InvalidRequest(format!(
+                "feedback list limit must be between 1 and {MAX_FEEDBACK_ITEMS}"
+            )));
+        }
+        let connection = self.connection.lock();
+        let fetch_limit = i64::try_from(input.limit + 1)
+            .map_err(|_| MemoryError::InvalidRequest("feedback limit is too large".into()))?;
+        let mut statement = connection.prepare(
+            "SELECT id, outcome, query_fingerprint, retained_query, citations_json,
+                    note, actor, workspace_id, project_id, task_id, component,
+                    created_at, commit_seq
+               FROM retrieval_feedback
+              WHERE workspace_id = ?1 AND project_id = ?2
+                AND (?3 IS NULL OR task_id IS NULL OR task_id = ?3)
+                AND (?4 IS NULL OR commit_seq < ?4)
+              ORDER BY commit_seq DESC LIMIT ?5",
+        )?;
+        let rows = statement.query_map(
+            params![
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                input.before_commit_seq,
+                fetch_limit,
+            ],
+            feedback_row,
+        )?;
+        let mut feedback = Vec::new();
+        for row in rows {
+            feedback.push(row?);
+        }
+        let truncated = feedback.len() > input.limit;
+        feedback.truncate(input.limit);
+        let next_before_commit_seq = truncated
+            .then(|| feedback.last().map(|record| record.commit_seq))
+            .flatten();
+        Ok(FeedbackListResult {
+            feedback,
+            truncated,
+            next_before_commit_seq,
+        })
+    }
+
+    pub fn feedback_export(
+        &self,
+        context: &AmbientContext,
+        input: &FeedbackExportInput,
+    ) -> Result<FeedbackExportResult> {
+        validate_context(context)?;
+        if input.limit == 0 || input.limit > MAX_FEEDBACK_ITEMS {
+            return Err(MemoryError::InvalidRequest(format!(
+                "feedback export limit must be between 1 and {MAX_FEEDBACK_ITEMS}"
+            )));
+        }
+        let connection = self.connection.lock();
+        let fetch_limit = i64::try_from(input.limit + 1)
+            .map_err(|_| MemoryError::InvalidRequest("feedback limit is too large".into()))?;
+        let mut statement = connection.prepare(
+            "SELECT id, outcome, retained_query, citations_json, note, created_at, commit_seq
+               FROM retrieval_feedback
+              WHERE workspace_id = ?1 AND project_id = ?2
+                AND (?3 IS NULL OR task_id IS NULL OR task_id = ?3)
+                AND retained_query IS NOT NULL
+                AND (?4 IS NULL OR commit_seq < ?4)
+              ORDER BY commit_seq DESC LIMIT ?5",
+        )?;
+        let rows = statement.query_map(
+            params![
+                context.workspace_id,
+                context.project_id,
+                context.task_id,
+                input.before_commit_seq,
+                fetch_limit,
+            ],
+            |row| {
+                let outcome = serde_json::from_value(Value::String(row.get::<_, String>(1)?))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let citations_json: String = row.get(3)?;
+                let citations = serde_json::from_str(&citations_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(FeedbackEvalCase {
+                    feedback_id: row.get(0)?,
+                    outcome,
+                    query: row.get(2)?,
+                    citations,
+                    note: row.get(4)?,
+                    created_at: row.get(5)?,
+                    commit_seq: row.get(6)?,
+                })
+            },
+        )?;
+        let mut cases = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = cases.len() > input.limit;
+        cases.truncate(input.limit);
+        let next_before_commit_seq = truncated
+            .then(|| cases.last().map(|record| record.commit_seq))
+            .flatten();
+        Ok(FeedbackExportResult {
+            schema_version: 1,
+            format: "memoree_retrieval_feedback_v1".into(),
+            cases,
+            truncated,
+            next_before_commit_seq,
+        })
     }
 
     pub fn artifact_put(
@@ -2106,6 +3590,54 @@ impl Store {
             )?;
             annotate_lexical_matches(&connection, &mut hits, &query_analysis)?;
         }
+        let projection = if matches!(entity_type, Some(EntityType::Claim)) {
+            ProjectionRetrievalStatus {
+                state: "not_applicable".into(),
+                policy_version: PROJECTION_POLICY_VERSION.into(),
+                candidate_count: 0,
+                reason: Some("derived projections are available only for artifacts".into()),
+            }
+        } else {
+            // Candidate-only channels must never make authoritative lexical
+            // retrieval unavailable. Stage mutations so a corrupt disposable
+            // projection row cannot leak partial ordering signals either.
+            let mut staged_hits = hits.clone();
+            match append_projection_candidates(
+                &connection,
+                &self.cas,
+                context,
+                input,
+                &query_analysis,
+                candidate_limit,
+                &mut staged_hits,
+            ) {
+                Ok(()) => {
+                    let candidate_count = staged_hits
+                        .iter()
+                        .filter(|candidate| candidate.projection_score.is_some())
+                        .count();
+                    hits = staged_hits;
+                    ProjectionRetrievalStatus {
+                        state: if candidate_count == 0 {
+                            "no_candidates".into()
+                        } else {
+                            "ready".into()
+                        },
+                        policy_version: PROJECTION_POLICY_VERSION.into(),
+                        candidate_count,
+                        reason: None,
+                    }
+                }
+                Err(error) => ProjectionRetrievalStatus {
+                    state: "error".into(),
+                    policy_version: PROJECTION_POLICY_VERSION.into(),
+                    candidate_count: 0,
+                    reason: Some(format!(
+                        "derived projection retrieval failed open; authoritative lexical retrieval remains available: {error}"
+                    )),
+                },
+            }
+        };
         let eligible_semantic =
             eligible_semantic_revisions(&connection, context, input, entity_type, evaluated_at)?;
         let semantic_limit = usize::try_from(candidate_limit)
@@ -2207,7 +3739,7 @@ impl Store {
             && semantic.state != "error")
             .then_some(SEMANTIC_POLICY_VERSION);
         let mut retrieval_mode = format!(
-            "sqlite_fts5_bm25+{LEXICAL_POLICY_VERSION}+{TRIGRAM_POLICY_VERSION}+{FUSION_POLICY_VERSION}"
+            "sqlite_fts5_bm25+{LEXICAL_POLICY_VERSION}+{TRIGRAM_POLICY_VERSION}+{PROJECTION_POLICY_VERSION}+{FUSION_POLICY_VERSION}"
         );
         if let Some(component) = semantic_component {
             retrieval_mode.push('+');
@@ -2226,6 +3758,7 @@ impl Store {
             query_analysis: query_analysis.public(),
             horizon: input.horizon,
             retrieval_mode,
+            projection,
             semantic,
             reranker,
             qualification_applied: qualification_policy
@@ -2741,6 +4274,87 @@ impl Store {
         if mismatched_claim_trigrams > 0 {
             issues.push(format!(
                 "{mismatched_claim_trigrams} claim trigram rows differ from their authoritative revision text"
+            ));
+        }
+        let malformed_projection_fts: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM retrieval_projections rp
+             WHERE (rp.status = 'active' AND (
+                       (SELECT COUNT(*) FROM projection_fts f
+                         WHERE f.projection_id = rp.id) <> 1
+                       OR NOT EXISTS (
+                         SELECT 1 FROM projection_fts f
+                          WHERE f.projection_id = rp.id
+                            AND f.revision_id = rp.revision_id
+                            AND f.artifact_id = rp.artifact_id AND f.text = rp.text)))
+                OR (rp.status = 'dropped' AND EXISTS (
+                      SELECT 1 FROM projection_fts f WHERE f.projection_id = rp.id))",
+            [],
+            |row| row.get(0),
+        )?;
+        let orphaned_projection_fts: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM projection_fts f
+             LEFT JOIN retrieval_projections rp ON rp.id = f.projection_id
+             WHERE rp.id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if malformed_projection_fts > 0 || orphaned_projection_fts > 0 {
+            issues.push(format!(
+                "projection FTS differs from cited projection authority ({malformed_projection_fts} malformed, {orphaned_projection_fts} orphaned)"
+            ));
+        }
+        let projection_sources = {
+            let mut statement = connection.prepare(
+                "SELECT rp.id, rp.evidence_json, ar.blob_size
+                   FROM retrieval_projections rp
+                   LEFT JOIN artifact_revisions ar
+                     ON ar.id = rp.revision_id AND ar.artifact_id = rp.artifact_id
+                  ORDER BY rp.commit_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (projection_id, evidence_json, blob_size) in projection_sources {
+            let Some(blob_size) = blob_size.and_then(|size| u64::try_from(size).ok()) else {
+                issues.push(format!(
+                    "projection {projection_id} references a missing artifact revision"
+                ));
+                continue;
+            };
+            match serde_json::from_str::<Vec<ProjectionSpan>>(&evidence_json) {
+                Ok(spans)
+                    if !spans.is_empty()
+                        && spans.len() <= MAX_PROJECTION_SPANS
+                        && validate_projection_spans(&spans, blob_size).is_ok() => {}
+                Ok(_) => issues.push(format!(
+                    "projection {projection_id} has invalid exact evidence spans"
+                )),
+                Err(error) => issues.push(format!(
+                    "projection {projection_id} has invalid evidence JSON: {error}"
+                )),
+            }
+        }
+        let broken_source_items: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM source_items si
+             LEFT JOIN sources s ON s.id = si.source_id
+             LEFT JOIN artifact_revisions ar
+               ON ar.id = si.artifact_revision_id AND ar.artifact_id = si.artifact_id
+             LEFT JOIN artifacts a ON a.id = si.artifact_id
+             WHERE s.id IS NULL OR ar.id IS NULL OR a.id IS NULL
+                OR (si.state = 'live' AND a.status <> 'active')
+                OR (si.state = 'withdrawn' AND a.status <> 'forgotten')",
+            [],
+            |row| row.get(0),
+        )?;
+        if broken_source_items > 0 {
+            issues.push(format!(
+                "{broken_source_items} source items have inconsistent artifact authority or lifecycle"
             ));
         }
         let malformed_chunk_rows: i64 = connection.query_row(
@@ -3346,6 +4960,9 @@ fn migrate_schema(connection: &mut Connection) -> Result<()> {
     if version == SCHEMA_VERSION {
         return Ok(());
     }
+    if version == 4 {
+        return migrate_schema_v4_to_v5(connection);
+    }
     if version == 3 {
         return migrate_schema_v3_to_v4(connection);
     }
@@ -3490,7 +5107,7 @@ fn migrate_schema_v3_to_v4(connection: &mut Connection) -> Result<()> {
     )?;
     verify_schema_v4_transaction(&transaction)?;
     transaction.commit()?;
-    Ok(())
+    migrate_schema_v4_to_v5(connection)
 }
 
 fn verify_schema_v4_transaction(transaction: &Transaction<'_>) -> Result<()> {
@@ -3516,9 +5133,9 @@ fn verify_schema_v4_transaction(transaction: &Transaction<'_>) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if version != SCHEMA_VERSION {
+    if version != 4 {
         return Err(MemoryError::Integrity(format!(
-            "schema migration staged version {version}, expected {SCHEMA_VERSION}"
+            "schema-v4 migration staged version {version}, expected 4"
         )));
     }
     let missing_artifact_trigrams: i64 = transaction.query_row(
@@ -3551,6 +5168,36 @@ fn verify_schema_v4_transaction(transaction: &Transaction<'_>) -> Result<()> {
             "schema migration projection verification failed before commit: missing artifact trigrams={missing_artifact_trigrams}, claim trigrams={missing_claim_trigrams}, artifact chunks={missing_artifact_chunks}"
         )));
     }
+    Ok(())
+}
+
+fn migrate_schema_v4_to_v5(connection: &mut Connection) -> Result<()> {
+    // The idempotent SCHEMA pass creates every v5 table and index before this
+    // transaction. v5 adds no authoritative rows during migration, so the
+    // only state transition is the version marker after integrity checks.
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+        [],
+    )?;
+    let integrity: String =
+        transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(MemoryError::Integrity(format!(
+            "schema-v5 migration failed SQLite integrity_check before commit: {integrity}"
+        )));
+    }
+    let foreign_key_violation: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if foreign_key_violation {
+        return Err(MemoryError::Integrity(
+            "schema-v5 migration introduced a foreign-key violation".into(),
+        ));
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -3937,6 +5584,330 @@ fn load_artifact_raw(
     }
 }
 
+fn load_source(connection: &Connection, source_id: &str) -> Result<Option<SourceRecord>> {
+    let raw = connection
+        .query_row(
+            "SELECT id, name, kind, locator, metadata_json, health, cursor,
+                    health_message, last_observed_at, workspace_id, project_id,
+                    task_id, component, created_at, updated_at, commit_seq
+               FROM sources WHERE id = ?1",
+            [source_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<DateTime<Utc>>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, DateTime<Utc>>(13)?,
+                    row.get::<_, DateTime<Utc>>(14)?,
+                    row.get::<_, i64>(15)?,
+                ))
+            },
+        )
+        .optional()?;
+    raw.map(
+        |(
+            source_id,
+            name,
+            kind,
+            locator,
+            metadata_json,
+            health,
+            cursor,
+            health_message,
+            last_observed_at,
+            workspace_id,
+            project_id,
+            task_id,
+            component,
+            created_at,
+            updated_at,
+            commit_seq,
+        )| {
+            Ok(SourceRecord {
+                source_id,
+                name,
+                kind,
+                locator,
+                metadata: serde_json::from_str(&metadata_json)?,
+                health: parse_enum(&health)?,
+                cursor,
+                health_message,
+                last_observed_at,
+                context: AmbientContext {
+                    workspace_id,
+                    project_id,
+                    task_id,
+                    component,
+                    pins: Vec::new(),
+                },
+                created_at,
+                updated_at,
+                commit_seq,
+            })
+        },
+    )
+    .transpose()
+}
+
+#[derive(Debug, Clone)]
+struct RawSourceItem {
+    source_id: String,
+    external_id: String,
+    external_revision: String,
+    payload_digest: String,
+    artifact_id: String,
+    artifact_revision_id: String,
+    state: String,
+    observed_at: DateTime<Utc>,
+    withdrawn_at: Option<DateTime<Utc>>,
+    withdrawal_reason: Option<String>,
+    updated_at: DateTime<Utc>,
+    commit_seq: i64,
+}
+
+impl RawSourceItem {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            source_id: row.get(0)?,
+            external_id: row.get(1)?,
+            external_revision: row.get(2)?,
+            payload_digest: row.get(3)?,
+            artifact_id: row.get(4)?,
+            artifact_revision_id: row.get(5)?,
+            state: row.get(6)?,
+            observed_at: row.get(7)?,
+            withdrawn_at: row.get(8)?,
+            withdrawal_reason: row.get(9)?,
+            updated_at: row.get(10)?,
+            commit_seq: row.get(11)?,
+        })
+    }
+
+    fn into_record(self) -> SourceItemRecord {
+        SourceItemRecord {
+            source_id: self.source_id,
+            external_id: self.external_id,
+            external_revision: self.external_revision,
+            artifact_id: self.artifact_id,
+            artifact_revision_id: self.artifact_revision_id,
+            state: self.state,
+            observed_at: self.observed_at,
+            withdrawn_at: self.withdrawn_at,
+            withdrawal_reason: self.withdrawal_reason,
+            updated_at: self.updated_at,
+            commit_seq: self.commit_seq,
+        }
+    }
+}
+
+fn load_source_item(
+    connection: &Connection,
+    source_id: &str,
+    external_id: &str,
+) -> Result<Option<RawSourceItem>> {
+    Ok(connection
+        .query_row(
+            "SELECT source_id, external_id, external_revision, payload_digest,
+                    artifact_id, artifact_revision_id, state, observed_at,
+                    withdrawn_at, withdrawal_reason, updated_at, commit_seq
+               FROM source_items WHERE source_id = ?1 AND external_id = ?2",
+            params![source_id, external_id],
+            RawSourceItem::from_row,
+        )
+        .optional()?)
+}
+
+#[derive(Debug, Clone)]
+struct RawProjection {
+    projection_id: String,
+    artifact_id: String,
+    revision_id: String,
+    projection_key: String,
+    kind: String,
+    text: String,
+    evidence_json: String,
+    generator: String,
+    generator_version: String,
+    generator_digest: String,
+    payload_digest: String,
+    metadata_json: String,
+    status: String,
+    dropped_reason: Option<String>,
+    actor: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    commit_seq: i64,
+}
+
+impl RawProjection {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            projection_id: row.get(0)?,
+            artifact_id: row.get(1)?,
+            revision_id: row.get(2)?,
+            projection_key: row.get(3)?,
+            kind: row.get(4)?,
+            text: row.get(5)?,
+            evidence_json: row.get(6)?,
+            generator: row.get(7)?,
+            generator_version: row.get(8)?,
+            generator_digest: row.get(9)?,
+            payload_digest: row.get(10)?,
+            metadata_json: row.get(11)?,
+            status: row.get(12)?,
+            dropped_reason: row.get(13)?,
+            actor: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+            commit_seq: row.get(17)?,
+        })
+    }
+
+    fn into_record(self) -> Result<ProjectionRecord> {
+        Ok(ProjectionRecord {
+            projection_id: self.projection_id,
+            artifact_id: self.artifact_id,
+            revision_id: self.revision_id,
+            projection_key: self.projection_key,
+            kind: self.kind,
+            text: self.text,
+            evidence_spans: serde_json::from_str(&self.evidence_json)?,
+            generator: self.generator,
+            generator_version: self.generator_version,
+            generator_digest: self.generator_digest,
+            metadata: serde_json::from_str(&self.metadata_json)?,
+            status: self.status,
+            dropped_reason: self.dropped_reason,
+            actor: self.actor,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            commit_seq: self.commit_seq,
+        })
+    }
+}
+
+fn projection_select() -> &'static str {
+    "SELECT id, artifact_id, revision_id, projection_key, kind, text,
+            evidence_json, generator, generator_version, generator_digest,
+            payload_digest, metadata_json, status, dropped_reason, actor,
+            created_at, updated_at, commit_seq
+       FROM retrieval_projections"
+}
+
+fn load_projection(connection: &Connection, projection_id: &str) -> Result<Option<RawProjection>> {
+    Ok(connection
+        .query_row(
+            &format!("{} WHERE id = ?1", projection_select()),
+            [projection_id],
+            RawProjection::from_row,
+        )
+        .optional()?)
+}
+
+fn load_projection_by_key(
+    connection: &Connection,
+    revision_id: &str,
+    projection_key: &str,
+) -> Result<Option<RawProjection>> {
+    Ok(connection
+        .query_row(
+            &format!(
+                "{} WHERE revision_id = ?1 AND projection_key = ?2",
+                projection_select()
+            ),
+            params![revision_id, projection_key],
+            RawProjection::from_row,
+        )
+        .optional()?)
+}
+
+#[derive(Debug)]
+struct RawFeedback {
+    feedback_id: String,
+    outcome: String,
+    query_fingerprint: String,
+    retained_query: Option<String>,
+    citations_json: String,
+    note: Option<String>,
+    actor: Option<String>,
+    context: AmbientContext,
+    created_at: DateTime<Utc>,
+    commit_seq: i64,
+}
+
+impl RawFeedback {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            feedback_id: row.get(0)?,
+            outcome: row.get(1)?,
+            query_fingerprint: row.get(2)?,
+            retained_query: row.get(3)?,
+            citations_json: row.get(4)?,
+            note: row.get(5)?,
+            actor: row.get(6)?,
+            context: AmbientContext {
+                workspace_id: row.get(7)?,
+                project_id: row.get(8)?,
+                task_id: row.get(9)?,
+                component: row.get(10)?,
+                pins: Vec::new(),
+            },
+            created_at: row.get(11)?,
+            commit_seq: row.get(12)?,
+        })
+    }
+
+    fn into_record(self) -> Result<FeedbackRecord> {
+        Ok(FeedbackRecord {
+            feedback_id: self.feedback_id,
+            outcome: parse_enum(&self.outcome)?,
+            query_fingerprint: self.query_fingerprint,
+            retained_query: self.retained_query,
+            citations: serde_json::from_str(&self.citations_json)?,
+            note: self.note,
+            actor: self.actor,
+            context: self.context,
+            created_at: self.created_at,
+            commit_seq: self.commit_seq,
+        })
+    }
+}
+
+fn feedback_select() -> &'static str {
+    "SELECT id, outcome, query_fingerprint, retained_query, citations_json,
+            note, actor, workspace_id, project_id, task_id, component,
+            created_at, commit_seq
+       FROM retrieval_feedback"
+}
+
+fn load_feedback(connection: &Connection, feedback_id: &str) -> Result<Option<FeedbackRecord>> {
+    connection
+        .query_row(
+            &format!("{} WHERE id = ?1", feedback_select()),
+            [feedback_id],
+            RawFeedback::from_row,
+        )
+        .optional()?
+        .map(RawFeedback::into_record)
+        .transpose()
+}
+
+fn feedback_row(row: &Row<'_>) -> rusqlite::Result<FeedbackRecord> {
+    RawFeedback::from_row(row)?.into_record().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
 #[derive(Debug)]
 struct RawClaim {
     claim_id: String,
@@ -4304,6 +6275,7 @@ impl ArtifactSearchRow {
             index_rowid: self.index_rowid,
             lexical_candidate: true,
             trigram_score: None,
+            projection_score: None,
             semantic_score: None,
         })
     }
@@ -4428,6 +6400,7 @@ impl ClaimSearchRow {
             index_rowid: self.index_rowid,
             lexical_candidate: true,
             trigram_score: None,
+            projection_score: None,
             semantic_score: None,
         })
     }
@@ -4446,6 +6419,7 @@ struct SearchCandidate {
     index_rowid: i64,
     lexical_candidate: bool,
     trigram_score: Option<f64>,
+    projection_score: Option<f64>,
     semantic_score: Option<f64>,
 }
 
@@ -4813,6 +6787,17 @@ fn normalized_rank(rank: f64) -> f64 {
     }
 }
 
+fn bounded_utf8_preview(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn horizon_filter_sql(alias: &str, include_pins: bool) -> String {
     let pins = if include_pins {
         format!(" OR {alias}.id IN (SELECT value FROM json_each(?7))")
@@ -4970,6 +6955,214 @@ fn eligible_semantic_revisions(
     }
 
     Ok(eligible)
+}
+
+fn append_projection_candidates(
+    connection: &Connection,
+    cas: &Cas,
+    context: &AmbientContext,
+    input: &SearchInput,
+    analysis: &AnalyzedQuery,
+    candidate_limit: i64,
+    candidates: &mut Vec<SearchCandidate>,
+) -> Result<()> {
+    let pins = serde_json::to_string(&normalized_artifact_pins(&context.pins).0)?;
+    let horizon = enum_string(&input.horizon)?;
+    let sql = "SELECT a.id, ar.id, ar.title, ar.title,
+                      a.status, a.workspace_id, a.project_id, a.task_id, a.component,
+                      a.kind, ar.provenance_json, ar.created_at,
+                      a.current_revision_id = ar.id, 0.0, ar.commit_seq,
+                      COALESCE((SELECT rowid FROM artifact_fts
+                                WHERE revision_id = ar.id LIMIT 1), 0),
+                      rp.id, rp.kind, rp.text, rp.evidence_json,
+                      rp.generator, rp.generator_version, rp.generator_digest,
+                      bm25(projection_fts, 0.0, 0.0, 0.0, 1.0),
+                      projection_fts.rowid
+                 FROM projection_fts
+                 JOIN retrieval_projections rp ON rp.id = projection_fts.projection_id
+                 JOIN artifact_revisions ar ON ar.id = rp.revision_id
+                 JOIN artifacts a ON a.id = rp.artifact_id
+                WHERE projection_fts MATCH ?1
+                  AND rp.status = 'active' AND a.status = 'active'
+                  AND a.current_revision_id = rp.revision_id
+                  AND (
+                    ?2 = 'personal'
+                    OR (?2 = 'workspace' AND a.workspace_id = ?3)
+                    OR (?2 = 'ambient' AND a.workspace_id = ?3 AND a.project_id = ?4
+                        AND (?5 IS NULL OR a.task_id IS NULL OR a.task_id = ?5))
+                    OR a.id IN (SELECT value FROM json_each(?6))
+                  )
+                ORDER BY bm25(projection_fts, 0.0, 0.0, 0.0, 1.0),
+                         rp.commit_seq DESC
+                LIMIT ?7";
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map(
+        params![
+            analysis.fts_expression(),
+            horizon,
+            context.workspace_id,
+            context.project_id,
+            context.task_id,
+            pins,
+            candidate_limit,
+        ],
+        |row| {
+            Ok((
+                search_artifact_row(row)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, String>(17)?,
+                row.get::<_, String>(18)?,
+                row.get::<_, String>(19)?,
+                row.get::<_, String>(20)?,
+                row.get::<_, String>(21)?,
+                row.get::<_, String>(22)?,
+                row.get::<_, f64>(23)?,
+                row.get::<_, i64>(24)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (
+            artifact_row,
+            projection_id,
+            projection_kind,
+            projection_text,
+            evidence_json,
+            generator,
+            generator_version,
+            generator_digest,
+            rank,
+            projection_rowid,
+        ) = row?;
+        let spans: Vec<ProjectionSpan> = serde_json::from_str(&evidence_json)?;
+        let first = spans.first().ok_or_else(|| {
+            MemoryError::Integrity(format!("projection {projection_id} has no evidence spans"))
+        })?;
+        let raw = load_artifact_raw(
+            connection,
+            &artifact_row.id,
+            Some(&artifact_row.revision_id),
+        )?
+        .ok_or_else(|| {
+            MemoryError::Integrity(format!(
+                "projection {projection_id} references missing artifact revision"
+            ))
+        })?;
+        let bytes = cas.get(&raw.blob)?;
+        let start = usize::try_from(first.start_byte).map_err(|_| MemoryError::ContentTooLarge)?;
+        let end = usize::try_from(first.end_byte).map_err(|_| MemoryError::ContentTooLarge)?;
+        if start >= end || end > bytes.len() {
+            return Err(MemoryError::Integrity(format!(
+                "projection {projection_id} evidence is outside its artifact revision"
+            )));
+        }
+        let exact_excerpt = String::from_utf8(bytes[start..end].to_vec()).map_err(|_| {
+            MemoryError::Integrity(format!(
+                "projection {projection_id} evidence is not an exact UTF-8 span"
+            ))
+        })?;
+        let score = normalized_rank(rank);
+        let mut matched_units = Vec::new();
+        for unit in &analysis.units {
+            if matching_fts_rowids(
+                connection,
+                "projection_fts",
+                &unit.expression,
+                &[projection_rowid],
+            )?
+            .contains(&projection_rowid)
+            {
+                matched_units.push(unit.display.clone());
+            }
+        }
+        let mut candidate = artifact_row.into_candidate()?;
+        candidate.lexical_candidate = false;
+        candidate.projection_score = Some(score);
+        candidate.hit.score = 0.0;
+        candidate.hit.ranking.lexical_score = 0.0;
+        candidate.hit.ranking.query_unit_count = analysis.units.len();
+        candidate.hit.ranking.required_matches = analysis.required_matches;
+        candidate.hit.ranking.matched_unit_count = matched_units.len();
+        candidate.hit.ranking.lexical_coverage = if analysis.units.is_empty() {
+            0.0
+        } else {
+            matched_units.len() as f64 / analysis.units.len() as f64
+        };
+        candidate.hit.ranking.matched_terms = matched_units;
+        candidate.hit.excerpt = exact_excerpt;
+        candidate.hit.citation = format!(
+            "memoree://artifact/{}@{}#{}-{}",
+            candidate.hit.entity_id, candidate.hit.revision_id, first.start_byte, first.end_byte
+        );
+        candidate.hit.matched_by.clear();
+        candidate
+            .hit
+            .matched_by
+            .push(PROJECTION_POLICY_VERSION.into());
+        candidate.hit.provenance.insert(
+            "derived_projection".into(),
+            json!({
+                "projection_id": projection_id,
+                "kind": projection_kind,
+                "generator": generator,
+                "generator_version": generator_version,
+                "generator_digest": generator_digest,
+                "candidate_only": true,
+                "projection_score": score,
+                "matched_text_preview": bounded_utf8_preview(&projection_text, 512),
+                "evidence_spans": spans,
+            }),
+        );
+        candidate.hit.provenance.insert(
+            "retrieval_span".into(),
+            json!({
+                "start_byte": first.start_byte,
+                "end_byte": first.end_byte,
+                "coordinate_space": "immutable_artifact_bytes",
+                "selected_by": PROJECTION_POLICY_VERSION,
+            }),
+        );
+        if let Some(existing) = candidates.iter_mut().find(|existing| {
+            existing.hit.entity_type == EntityType::Artifact
+                && existing.hit.entity_id == candidate.hit.entity_id
+                && existing.hit.revision_id == candidate.hit.revision_id
+        }) {
+            let replace = existing
+                .projection_score
+                .is_none_or(|existing_score| score > existing_score);
+            existing.projection_score = Some(
+                existing
+                    .projection_score
+                    .map_or(score, |existing_score| existing_score.max(score)),
+            );
+            if !existing
+                .hit
+                .matched_by
+                .iter()
+                .any(|channel| channel == PROJECTION_POLICY_VERSION)
+            {
+                existing
+                    .hit
+                    .matched_by
+                    .push(PROJECTION_POLICY_VERSION.into());
+            }
+            if replace && !existing.hit.ranking.qualified {
+                existing.hit.excerpt = candidate.hit.excerpt;
+                existing.hit.citation = candidate.hit.citation;
+                existing.hit.provenance.insert(
+                    "derived_projection".into(),
+                    candidate.hit.provenance["derived_projection"].clone(),
+                );
+                existing.hit.provenance.insert(
+                    "retrieval_span".into(),
+                    candidate.hit.provenance["retrieval_span"].clone(),
+                );
+            }
+        } else {
+            candidates.push(candidate);
+        }
+    }
+    Ok(())
 }
 
 fn append_semantic_candidates(
@@ -5543,9 +7736,31 @@ fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate])
                     .cmp(&candidates[*right].hit.revision_id)
             })
     });
+    let mut projection_order = (0..candidates.len())
+        .filter(|index| candidates[*index].projection_score.is_some())
+        .collect::<Vec<_>>();
+    projection_order.sort_by(|left, right| {
+        candidates[*right]
+            .projection_score
+            .unwrap_or_default()
+            .partial_cmp(&candidates[*left].projection_score.unwrap_or_default())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                candidates[*right]
+                    .commit_seq
+                    .cmp(&candidates[*left].commit_seq)
+            })
+            .then_with(|| {
+                candidates[*left]
+                    .hit
+                    .revision_id
+                    .cmp(&candidates[*right].hit.revision_id)
+            })
+    });
     let mut lexical_ranks = vec![None; candidates.len()];
     let mut trigram_ranks = vec![None; candidates.len()];
     let mut semantic_ranks = vec![None; candidates.len()];
+    let mut projection_ranks = vec![None; candidates.len()];
     for (rank, index) in lexical_order.into_iter().enumerate() {
         lexical_ranks[index] = Some(rank + 1);
     }
@@ -5554,6 +7769,9 @@ fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate])
     }
     for (rank, index) in semantic_order.into_iter().enumerate() {
         semantic_ranks[index] = Some(rank + 1);
+    }
+    for (rank, index) in projection_order.into_iter().enumerate() {
+        projection_ranks[index] = Some(rank + 1);
     }
     for (index, candidate) in candidates.iter_mut().enumerate() {
         let ranking = &mut candidate.hit.ranking;
@@ -5566,6 +7784,8 @@ fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate])
         let lexical_rrf = lexical_ranks[index].map_or(0.0, |rank| 1.0 / (RRF_K + rank as f64));
         let trigram_rrf = trigram_ranks[index].map_or(0.0, |rank| 0.7 / (RRF_K + rank as f64));
         let semantic_rrf = semantic_ranks[index].map_or(0.0, |rank| 0.85 / (RRF_K + rank as f64));
+        let projection_rrf =
+            projection_ranks[index].map_or(0.0, |rank| 0.75 / (RRF_K + rank as f64));
         // Quantization prevents platform-level floating-point noise from
         // becoming an observable ordering decision. Stable authority fields
         // remain the final tie-breakers.
@@ -5574,7 +7794,7 @@ fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate])
             // or dense channels may annotate them but can never reorder them.
             lexical_rrf
         } else {
-            lexical_rrf + trigram_rrf + semantic_rrf
+            lexical_rrf + trigram_rrf + semantic_rrf + projection_rrf
         };
         ranking.fusion_score = (fused * 1e12).round() / 1e12;
         candidate.hit.score = ranking.fusion_score;
@@ -5928,6 +8148,15 @@ fn select_artifact_citation_spans(
             // `apply_semantic_hit` already selected and validated the exact
             // immutable chunk span (or the spanless title). Do not replace it
             // with a weak lexical OR-term match.
+            continue;
+        }
+        if candidate.hit.provenance.contains_key("derived_projection")
+            && !candidate.hit.ranking.lexical_qualified
+            && !candidate.hit.ranking.trigram_qualified
+        {
+            // The projection path already resolved the derived match back to
+            // an exact span in the immutable source artifact. Preserve it;
+            // weak raw OR-term matches must not replace its cited evidence.
             continue;
         }
         let best = if let Some(best) = best_by_revision.remove(&candidate.hit.revision_id) {
@@ -6787,6 +9016,103 @@ fn validate_artifact_input(kind: &str, title: &str, media_type: &str) -> Result<
     Ok(())
 }
 
+fn source_payload_digest(
+    kind: &str,
+    title: &str,
+    media_type: &str,
+    blob_hash: &str,
+    provenance: &BTreeMap<String, Value>,
+) -> Result<String> {
+    let encoded = serde_json::to_vec(&json!({
+        "kind": kind,
+        "title": title,
+        "media_type": media_type,
+        "blob_hash": blob_hash,
+        "provenance": provenance,
+    }))?;
+    Ok(blake3::hash(&encoded).to_hex().to_string())
+}
+
+fn projection_payload_digest(input: &ProjectionPutInput) -> Result<String> {
+    let encoded = serde_json::to_vec(&json!({
+        "artifact_id": input.artifact_id,
+        "revision_id": input.revision_id,
+        "projection_key": input.projection_key,
+        "kind": input.kind,
+        "text": input.text,
+        "evidence_spans": input.evidence_spans,
+        "generator": input.generator,
+        "generator_version": input.generator_version,
+        "generator_digest": input.generator_digest,
+        "metadata": input.metadata,
+    }))?;
+    Ok(blake3::hash(&encoded).to_hex().to_string())
+}
+
+fn validate_projection_spans(spans: &[ProjectionSpan], artifact_size: u64) -> Result<()> {
+    let mut previous_end = 0;
+    for (index, span) in spans.iter().enumerate() {
+        if span.start_byte >= span.end_byte
+            || span.end_byte > artifact_size
+            || span.end_byte - span.start_byte > MAX_RECALL_EXCERPT_BYTES as u64
+        {
+            return Err(MemoryError::InvalidRequest(format!(
+                "projection evidence span {index} must be non-empty, inside 0..{artifact_size}, and no larger than {MAX_RECALL_EXCERPT_BYTES} bytes"
+            )));
+        }
+        if index > 0 && span.start_byte < previous_end {
+            return Err(MemoryError::InvalidRequest(
+                "projection evidence spans must be sorted and non-overlapping".into(),
+            ));
+        }
+        previous_end = span.end_byte;
+    }
+    Ok(())
+}
+
+const FEEDBACK_FINGERPRINT_KEY_META: &str = "feedback_fingerprint_key_v1";
+
+fn feedback_fingerprint_key(connection: &Connection) -> Result<[u8; 32]> {
+    let encoded: Option<String> = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [FEEDBACK_FINGERPRINT_KEY_META],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let bytes = match encoded {
+        Some(encoded) => base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(encoded)
+            .map_err(|error| {
+                MemoryError::Integrity(format!("feedback fingerprint key is invalid: {error}"))
+            })?,
+        None => {
+            let mut bytes = vec![0u8; 32];
+            let mut random = File::open("/dev/urandom").map_err(|error| {
+                MemoryError::Config(format!(
+                    "secure randomness is required for feedback fingerprints: {error}"
+                ))
+            })?;
+            random.read_exact(&mut bytes)?;
+            let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes.as_slice());
+            connection.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+                params![FEEDBACK_FINGERPRINT_KEY_META, encoded],
+            )?;
+            bytes
+        }
+    };
+    bytes.try_into().map_err(|_| {
+        MemoryError::Integrity("feedback fingerprint key must contain exactly 32 bytes".into())
+    })
+}
+
+fn keyed_query_fingerprint(key: &[u8; 32], normalized_query: &str) -> String {
+    blake3::keyed_hash(key, normalized_query.as_bytes())
+        .to_hex()
+        .to_string()
+}
+
 fn content_bytes(content: &ArtifactContent) -> Result<Vec<u8>> {
     let bytes = match content {
         ArtifactContent::Text(text) => text.as_bytes().to_vec(),
@@ -7407,6 +9733,7 @@ mod tests {
             index_rowid: 0,
             lexical_candidate: true,
             trigram_score: None,
+            projection_score: None,
             semantic_score: None,
         }
     }
@@ -8125,6 +10452,276 @@ mod tests {
         }
     }
 
+    #[test]
+    fn source_projection_candidates_are_cited_but_never_qualify() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = context("projection-contract");
+        let source = store
+            .source_register(
+                &ambient,
+                &SourceRegisterInput {
+                    name: "Test knowledge base".into(),
+                    kind: "test_adapter".into(),
+                    locator: Some("test://knowledge".into()),
+                    metadata: BTreeMap::new(),
+                    actor: Some("test".into()),
+                },
+                Some("source-register"),
+                "source-register",
+            )
+            .unwrap();
+        let raw = "Falcon processors use wafer-scale execution for inference.";
+        let ingest_input = SourceIngestInput {
+            source_id: source.value.source_id.clone(),
+            external_id: "document-1".into(),
+            external_revision: "etag-1".into(),
+            kind: "source_document".into(),
+            title: "Falcon architecture".into(),
+            media_type: "text/plain; charset=utf-8".into(),
+            content: ArtifactContent::Text(raw.into()),
+            provenance: BTreeMap::new(),
+            observed_at: None,
+            cursor: Some("cursor-1".into()),
+            actor: Some("test".into()),
+        };
+        let ingested = store
+            .source_ingest(
+                &ambient,
+                &ingest_input,
+                Some("source-ingest"),
+                "source-ingest",
+            )
+            .unwrap();
+        let replay = store
+            .source_ingest(
+                &ambient,
+                &ingest_input,
+                Some("source-ingest-replay"),
+                "source-ingest-replay",
+            )
+            .unwrap();
+        assert!(!replay.created);
+        assert_eq!(replay.commit_seq, ingested.commit_seq);
+
+        store
+            .projection_put(
+                &ambient,
+                &ProjectionPutInput {
+                    artifact_id: ingested.value.artifact.artifact_id.clone(),
+                    revision_id: ingested.value.artifact.revision_id.clone(),
+                    projection_key: "summary-1".into(),
+                    kind: "summary".into(),
+                    text: "A supercalifragilistic retrieval accelerator".into(),
+                    evidence_spans: vec![ProjectionSpan {
+                        start_byte: 0,
+                        end_byte: 6,
+                    }],
+                    generator: "test".into(),
+                    generator_version: "1".into(),
+                    generator_digest: "blake3:test".into(),
+                    metadata: BTreeMap::new(),
+                    actor: Some("test".into()),
+                },
+                Some("projection-put"),
+                "projection-put",
+            )
+            .unwrap();
+
+        let search = SearchInput {
+            query: "supercalifragilistic".into(),
+            horizon: Horizon::Ambient,
+            reason: None,
+            limit: 10,
+            include_historical: false,
+            min_commit_seq: None,
+            recency: Default::default(),
+        };
+        let broad = store.search(&ambient, &search).unwrap();
+        assert_eq!(broad.projection.state, "ready");
+        assert_eq!(broad.projection.candidate_count, 1);
+        assert_eq!(broad.hits.len(), 1);
+        assert!(!broad.hits[0].ranking.qualified);
+        assert_eq!(broad.hits[0].excerpt, "Falcon");
+        assert!(broad.hits[0].citation.ends_with("#0-6"));
+        assert_eq!(
+            broad.hits[0].provenance["derived_projection"]["candidate_only"],
+            true
+        );
+        assert!(
+            store
+                .search_qualified(&ambient, &search)
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+
+        let withdrawn = store
+            .source_withdraw(
+                &ambient,
+                &SourceWithdrawInput {
+                    source_id: source.value.source_id,
+                    external_id: "document-1".into(),
+                    reason: "removed upstream".into(),
+                    observed_at: None,
+                    actor: Some("test".into()),
+                },
+                Some("source-withdraw"),
+                "source-withdraw",
+            )
+            .unwrap();
+        assert!(!withdrawn.value.erasure_performed);
+        assert!(store.search(&ambient, &search).unwrap().hits.is_empty());
+    }
+
+    #[test]
+    fn corrupt_candidate_projection_fails_open_without_partial_ranking() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = context("projection-fail-open");
+        let inserted = store
+            .artifact_put(
+                &ambient,
+                &artifact("Authority", "authoritative source evidence"),
+                Some("projection-fail-open-artifact"),
+                "projection-fail-open-artifact",
+            )
+            .unwrap();
+        let projection = store
+            .projection_put(
+                &ambient,
+                &ProjectionPutInput {
+                    artifact_id: inserted.value.artifact_id.clone(),
+                    revision_id: inserted.value.revision_id.clone(),
+                    projection_key: "summary".into(),
+                    kind: "summary".into(),
+                    text: "authoritative".into(),
+                    evidence_spans: vec![ProjectionSpan {
+                        start_byte: 0,
+                        end_byte: 13,
+                    }],
+                    generator: "test".into(),
+                    generator_version: "1".into(),
+                    generator_digest: "blake3:test".into(),
+                    metadata: BTreeMap::new(),
+                    actor: Some("test".into()),
+                },
+                Some("projection-fail-open-put"),
+                "projection-fail-open-put",
+            )
+            .unwrap();
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "UPDATE retrieval_projections SET evidence_json = '[]' WHERE id = ?1",
+                    [&projection.value.projection_id],
+                )
+                .unwrap();
+        }
+        let result = store
+            .search_qualified(
+                &ambient,
+                &SearchInput {
+                    query: "authoritative".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 10,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.projection.state, "error");
+        assert_eq!(result.projection.candidate_count, 0);
+        assert!(
+            result
+                .projection
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed open"))
+        );
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entity_id, inserted.value.artifact_id);
+        assert!(
+            !result.hits[0]
+                .matched_by
+                .iter()
+                .any(|channel| channel == PROJECTION_POLICY_VERSION)
+        );
+    }
+
+    #[test]
+    fn feedback_uses_a_keyed_fingerprint_unless_query_retention_is_explicit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = context("feedback-privacy");
+        let private = store
+            .feedback_record(
+                &ambient,
+                &FeedbackRecordInput {
+                    query: "sensitive customer retrieval".into(),
+                    outcome: FeedbackOutcome::Miss,
+                    retain_query: false,
+                    citations: vec![],
+                    note: None,
+                    actor: Some("test".into()),
+                },
+                Some("feedback-private"),
+                "feedback-private",
+            )
+            .unwrap();
+        assert!(private.value.retained_query.is_none());
+        assert_ne!(
+            private.value.query_fingerprint,
+            "sensitive customer retrieval"
+        );
+        assert_eq!(private.value.query_fingerprint.len(), 64);
+
+        let retained = store
+            .feedback_record(
+                &ambient,
+                &FeedbackRecordInput {
+                    query: "explicit evaluation query".into(),
+                    outcome: FeedbackOutcome::Useful,
+                    retain_query: true,
+                    citations: vec!["memoree://artifact/example@revision#0-4".into()],
+                    note: Some("approved for offline evaluation".into()),
+                    actor: Some("test".into()),
+                },
+                Some("feedback-retained"),
+                "feedback-retained",
+            )
+            .unwrap();
+        assert_eq!(
+            retained.value.retained_query.as_deref(),
+            Some("explicit evaluation query")
+        );
+        let listed = store
+            .feedback_list(
+                &ambient,
+                &FeedbackListInput {
+                    limit: 10,
+                    before_commit_seq: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(listed.feedback.len(), 2);
+        let exported = store
+            .feedback_export(
+                &ambient,
+                &FeedbackExportInput {
+                    limit: 10,
+                    before_commit_seq: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(exported.format, "memoree_retrieval_feedback_v1");
+        assert_eq!(exported.cases.len(), 1);
+        assert_eq!(exported.cases[0].query, "explicit evaluation query");
+    }
+
     fn claim(statement: &str, evidence: Vec<EvidenceLocator>) -> ClaimAssertInput {
         ClaimAssertInput {
             claim_type: ClaimType::Decision,
@@ -8227,7 +10824,7 @@ mod tests {
             .schema_migration()
             .expect("schema 3 migration must publish a recovery snapshot");
         assert_eq!(migration.from_schema, 3);
-        assert_eq!(migration.to_schema, 4);
+        assert_eq!(migration.to_schema, SCHEMA_VERSION);
         let backup = PathBuf::from(&migration.backup_destination);
         assert!(backup.join(MEMOREE_DATABASE_FILE).is_file());
         assert!(backup.join("migration.json").is_file());
@@ -8243,7 +10840,7 @@ mod tests {
             backup_schema, 3,
             "recovery snapshot must remain pre-migration"
         );
-        assert_eq!(migrated.verify().unwrap().schema_version, 4);
+        assert_eq!(migrated.verify().unwrap().schema_version, SCHEMA_VERSION);
         assert!(migrated.verify().unwrap().ok);
         let result = migrated
             .search_qualified(
@@ -8261,6 +10858,52 @@ mod tests {
             .unwrap();
         assert_eq!(result.hits.len(), 1);
         assert!(result.hits[0].citation.contains('#'));
+    }
+
+    #[test]
+    fn schema_v4_migrates_source_projection_and_feedback_contract_with_backup() {
+        let temporary = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(temporary.path()).unwrap();
+            store
+                .artifact_put(
+                    &context("migration-v4"),
+                    &artifact("v4 authority", "existing schema four authority survives"),
+                    Some("migration-v4-artifact"),
+                    "migration-v4-artifact",
+                )
+                .unwrap();
+            let connection = store.connection.lock();
+            connection
+                .execute_batch(
+                    "DROP TABLE projection_fts;
+                 DROP TABLE retrieval_feedback;
+                 DROP TABLE retrieval_projections;
+                 DROP TABLE source_items;
+                 DROP TABLE sources;
+                 UPDATE meta SET value = '4' WHERE key = 'schema_version';",
+                )
+                .unwrap();
+        }
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        let migration = migrated
+            .schema_migration()
+            .expect("schema 4 migration must publish a recovery snapshot");
+        assert_eq!(migration.from_schema, 4);
+        assert_eq!(migration.to_schema, SCHEMA_VERSION);
+        let backup = PathBuf::from(&migration.backup_destination);
+        let backup_connection = Connection::open(backup.join(MEMOREE_DATABASE_FILE)).unwrap();
+        let backup_schema: i64 = backup_connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backup_schema, 4);
+        assert_eq!(migrated.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(migrated.verify().unwrap().ok);
     }
 
     #[test]
@@ -8400,7 +11043,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(schema_version, 4);
+        assert_eq!(schema_version, SCHEMA_VERSION);
         assert_eq!(counts, (2, 3, 1, last_seq));
         drop(connection);
         assert!(migrated.verify().unwrap().ok);
@@ -8569,7 +11212,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
-        assert_eq!(schema_version, 4);
+        assert_eq!(schema_version, SCHEMA_VERSION);
         assert_eq!(migrated_event_ids, preserved_event_ids);
         drop(connection);
         assert!(migrated.verify().unwrap().ok);

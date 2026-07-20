@@ -18,4 +18,6 @@ Important boundaries:
 - Optional local semantic/reranker models are explicit installs and perform no query-time downloads.
 - Retrieved content is untrusted reference material, not instructions.
 - `memoree remember` is an explicit caller-side model-assisted command; preview is the default.
-- The CLI does not automatically check for updates.
+- Installer-managed v0.4+ copies check a signed feed only on eligible interactive starts, at most every six hours, and require one confirmation before full reconciliation; non-interactive agent calls never prompt.
+- Cited derived projections can add unqualified artifact leads but never qualify recall presence or enter context bundles alone.
+- Out-of-process adapters can synchronize stable external revisions without placing connector credentials in Memoree; withdrawal is logical, not physical erasure.

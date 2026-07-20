@@ -28,6 +28,10 @@ The v1 release gate is:
 - Pending checkpoints remain outside every daemon retrieval surface; matching only pending text returns `presence=none`. Promotion requires an explicit remember preview/apply boundary, and sensitive-content flags block promotion unless deliberately overridden.
 - Both sides of a known contradiction are retained and identified in context construction.
 - Context bundles never exceed `max_bytes`, remain valid UTF-8, label retrieved material as untrusted, render claim evidence citations, and disclose retrieval truncation separately from byte-budget omissions.
+- Derived projections can recover only unqualified artifact candidates, always resolve to exact immutable raw spans, never affect recall presence, and never enter `context.build` without independent raw qualification.
+- Source ingestion is stable and idempotent by external id/revision/payload; revision reuse with different bytes fails closed, while withdrawal removes future retrieval without claiming physical erasure.
+- Feedback capture is explicit, raw queries are absent by default, and only deliberately retained queries enter offline exports. Feedback never changes live ranking automatically.
+- Automatic updates execute only an Ed25519-verified release manifest and digest-verified installer/archive, prompt only in an eligible terminal, serialize application, reconcile before re-exec, and fail closed on integrity errors.
 - Context bundles provide enough revision-stable provenance for an external companion to validate citations without exposing internal search chunks as durable identities.
 - The daemon contains no remote model provider or credential loader. Optional local embedding and cross-encoder inference uses explicitly installed, revision/digest-pinned bytes, performs no query-time downloads, and fails open without changing authority or qualification. `memoree remember` is caller-side, preview-only by default, performs one tool-free/schema-constrained compilation through a live-catalog-validated Codex or Claude selection, freezes scope before inference, and host-validates every exact source span before explicit `--apply` mutations. Its deterministic quality findings disclose summary-only grounding, mutable observations, and absent automatic relations without allowing the model to certify authority or mutate lifecycle. API-key and third-party auth do not count as automatic login; API-key fallback remains impossible without an explicit per-invocation Codex permission flag.
 - The default private Unix socket remains owner-only; tests and documentation never describe loopback TCP as a per-user security boundary.
@@ -48,6 +52,8 @@ Build a judged corpus from real agent artifacts rather than synthetic prose alon
 - The downstream agent task and a deterministic scoring rubric where possible.
 
 Measure retrieval recall, precision, citation accuracy, contradiction/currentness accuracy, task success, context bytes, p50/p95 latency, peak and idle memory, index size, update visibility, and rebuild time.
+
+Keep explicit `miss`, `useful`, `incorrect`, and `stale` feedback as a privacy-aware failure-mining stream. Export only cases whose raw queries were deliberately retained, review/anonymize them, label gold evidence independently, and admit them to a versioned corpus before changing ranking. The live store does not learn from feedback online.
 
 The repository's `memoree-eval` binary implements the deterministic correctness/regression subset against the versioned corpora, including realistic v2 paraphrase, typo, long-document, scope, abstention, temporal, and conflict slices; see [Retrieval evaluation](evaluation.md). It deliberately excludes model-in-the-loop task success and noisy performance gates.
 

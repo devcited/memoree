@@ -63,6 +63,9 @@ jobs:
       - name: Verify stable installer reconciliation
         if: runner.os == 'Linux'
         run: sh scripts/test-installer-upgrade.sh
+      - name: Verify signed confirmation-based automatic update
+        if: runner.os == 'Linux'
+        run: sh scripts/test-auto-update.sh
       - name: Retrieval regression suite
         run: cargo run --locked --bin memoree-eval -- eval/corpus/v2
       - name: Verify generated web contracts

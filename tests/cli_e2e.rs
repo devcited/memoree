@@ -875,7 +875,7 @@ fn auto_started_daemon_has_machine_readable_lifecycle_controls() {
         started["result"]["binary_version"],
         env!("CARGO_PKG_VERSION")
     );
-    assert_eq!(started["result"]["schema_version"], 4);
+    assert_eq!(started["result"]["schema_version"], 5);
     assert_eq!(started["result"]["lifecycle_owner"], "memoree");
 
     let (status, running) = invoke_local(&cwd, &home, &["daemon", "status"]);

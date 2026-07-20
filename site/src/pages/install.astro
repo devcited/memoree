@@ -4,7 +4,7 @@ import SiteLayout from '../layouts/SiteLayout.astro';
 
 <SiteLayout title="Install Memoree" description="Install the Memoree CLI on macOS or Linux.">
   <article class="page shell">
-    <p class="eyebrow"><span></span> INSTALL / v0.3.0</p>
+    <p class="eyebrow"><span></span> INSTALL / v0.4.0</p>
     <h1>One binary.<br /><em>No runtime.</em></h1>
     <p class="lede">Memoree supports Apple Silicon and Intel macOS, plus x86_64 and ARM64 Linux. Windows support is not advertised until its local transport has native parity.</p>
 
@@ -28,15 +28,15 @@ sh install-memoree.sh</code></pre>
       </section>
       <section>
         <h2>Pin or upgrade</h2>
-        <pre><code>MEMOREE_VERSION=v0.3.0 \
+        <pre><code>MEMOREE_VERSION=v0.4.0 \
   sh install-memoree.sh</code></pre>
-        <p>Rerun the installer without a version to install the current release. There is no background update check.</p>
+        <p>From v0.4 onward, an installer-managed binary checks the signed release feed at most every six hours on eligible interactive starts. A new version is installed only after one terminal confirmation; non-interactive commands never prompt. Set <code>MEMOREE_AUTO_UPDATE=off</code> to disable checks. Existing v0.3 copies need this one manual installer run to cross the bootstrap boundary.</p>
       </section>
       <section>
         <h2>Build from public source</h2>
         <pre><code>cargo install --locked --git \
   https://github.com/devcited/memoree \
-  --tag v0.3.0</code></pre>
+  --tag v0.4.0</code></pre>
         <p>Requires Rust 1.94 or newer. Memoree is not published to crates.io.</p>
       </section>
     </div>

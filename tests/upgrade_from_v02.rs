@@ -11,6 +11,16 @@ use std::{
 use rusqlite::Connection;
 use serde_json::Value;
 
+fn short_legacy_tempdir() -> tempfile::TempDir {
+    // v0.2 used one long derived Unix-socket path. GitHub-hosted runners set
+    // TMPDIR below an already long workspace path, which can exceed SUN_LEN
+    // before the legacy daemon binds. Keep this immutable-binary fixture short.
+    tempfile::Builder::new()
+        .prefix("m2-")
+        .tempdir_in("/tmp")
+        .expect("create short legacy fixture directory")
+}
+
 fn current_binary() -> &'static Path {
     assert_cmd::cargo::cargo_bin!("memoree")
 }
@@ -42,12 +52,12 @@ fn json(output: &Output) -> Value {
 
 #[test]
 #[ignore = "requires MEMOREE_V02_BINARY pointing at the verified v0.2.0 release binary"]
-fn real_v02_running_store_upgrades_to_v03_automatically() {
+fn real_v02_running_store_upgrades_to_v04_automatically() {
     let old_binary =
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
     assert!(old_binary.is_file(), "{} is missing", old_binary.display());
 
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = short_legacy_tempdir();
     let cwd = temporary.path().join("project with spaces");
     let memoree_home = temporary.path().join("memoree home");
     let user_home = temporary.path().join("user home");
@@ -95,7 +105,7 @@ fn real_v02_running_store_upgrades_to_v03_automatically() {
     );
     let upgraded_json = json(&upgraded);
     assert!(upgraded.status.success(), "{upgraded_json}");
-    assert_eq!(upgraded_json["result"]["authority"]["schema_version"], 4);
+    assert_eq!(upgraded_json["result"]["authority"]["schema_version"], 5);
     assert_eq!(upgraded_json["result"]["daemon"]["state"], "restarted");
     assert_eq!(
         upgraded_json["result"]["daemon"]["doctor"]["binary_version"],
@@ -181,10 +191,10 @@ fn real_v02_running_store_upgrades_to_v03_automatically() {
 
 #[test]
 #[ignore = "requires MEMOREE_V02_BINARY pointing at the verified v0.2.0 release binary"]
-fn real_v02_stopped_store_upgrades_without_starting_a_daemon() {
+fn real_v02_stopped_store_upgrades_to_v04_without_starting_a_daemon() {
     let old_binary =
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = short_legacy_tempdir();
     let cwd = temporary.path().join("project");
     let memoree_home = temporary.path().join("memoree-home");
     let user_home = temporary.path().join("user-home");
@@ -230,7 +240,7 @@ fn real_v02_stopped_store_upgrades_without_starting_a_daemon() {
     );
     let report = json(&upgraded);
     assert!(upgraded.status.success(), "{report}");
-    assert_eq!(report["result"]["authority"]["schema_version"], 4);
+    assert_eq!(report["result"]["authority"]["schema_version"], 5);
     assert_eq!(report["result"]["daemon"]["state"], "remained_stopped");
     assert!(!memoree_home.join("run/memoree.sock").exists());
 }

@@ -15,6 +15,7 @@ feed_tag="$(sed -n 's/^[[:space:]]*"tag": "\([^"]*\)",/\1/p' site/public/release
 latest_tag="$(tr -d '\r\n' < site/public/releases/latest.txt)"
 schema_version="$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9][0-9]*\);/\1/p' src/store.rs | head -1)"
 feed_schema="$(sed -n 's/^[[:space:]]*"store_schema_version": \([0-9][0-9]*\),/\1/p' site/public/releases/latest.json | head -1)"
+feed_contract="$(sed -n 's/^[[:space:]]*"schema": \([0-9][0-9]*\),/\1/p' site/public/releases/latest.json | head -1)"
 
 test -n "$cargo_version"
 test "$cargo_version" = "$lock_version"
@@ -23,6 +24,10 @@ test "$cargo_version" = "$feed_version"
 test "v$cargo_version" = "$feed_tag"
 test "$feed_tag" = "$latest_tag"
 test "$schema_version" = "$feed_schema"
+test "$feed_contract" = "2"
+grep -F '"automatic_checks": true' site/public/releases/latest.json >/dev/null
+grep -F "/releases/download/$feed_tag/memoree-release.json" site/public/releases/latest.json >/dev/null
+grep -F "/releases/download/$feed_tag/memoree-release.json.sig" site/public/releases/latest.json >/dev/null
 grep -F "## [$cargo_version]" CHANGELOG.md >/dev/null
 
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then

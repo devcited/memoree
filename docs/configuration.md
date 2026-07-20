@@ -97,7 +97,9 @@ The auto-started private daemon reports `lifecycle_owner=memoree`; a process sta
 
 `memoree upgrade apply` serializes reconciliation under a private lock and writes an atomic `upgrade-state.json` beside the store. The state records the target binary, prior daemon state, phase, schema, recovery snapshot, and embedded skill digest so a retry after interruption preserves “running before means running after.” `memoree upgrade status` reads this state without starting a daemon.
 
-Before schema 1–3 becomes schema 4, Memoree checks free space and publishes a private, verified pre-migration SQLite/CAS snapshot below `migration-backups/`. Optional models are never downloaded by upgrade reconciliation. An already-installed stale semantic projection is rebuilt locally; an unavailable projection or reranker degrades to deterministic retrieval.
+Before schema 1–4 becomes schema 5, Memoree checks free space and publishes a private, verified pre-migration SQLite/CAS snapshot below `migration-backups/`. Optional models are never downloaded by upgrade reconciliation. An already-installed stale semantic projection is rebuilt locally; an unavailable projection or reranker degrades to deterministic retrieval.
+
+Installer-managed copies record their exact binary path during reconciliation. On eligible interactive starts they check for a release at most every six hours and ask once before applying a newly detected version. The signed release manifest pins the installer and platform archive digests; success re-executes the original command exactly once. Non-interactive, CI, protocol-stdin, daemon, upgrade, update, eval, and session surfaces never prompt. `MEMOREE_AUTO_UPDATE=off` disables automatic checks; `memoree update status|check|apply` provides explicit control. Versions before 0.4 have no startup checker and need one manual installer run.
 
 There is intentionally no setting for a default `workspace` or `personal` retrieval horizon. Broadening is a decision made explicitly by the caller for one search or context-build request and must include a reason.
 

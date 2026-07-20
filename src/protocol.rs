@@ -33,6 +33,14 @@ pub const MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM: usize = 4;
 pub const MAX_HISTORY_ITEMS: usize = 100;
 pub const MAX_RELATION_LIST_ITEMS: usize = 100;
 pub const MAX_CONFLICT_LIST_ITEMS: usize = 100;
+pub const MAX_SOURCE_ITEMS: usize = 100;
+pub const MAX_PROJECTION_ITEMS: usize = 100;
+pub const MAX_FEEDBACK_ITEMS: usize = 100;
+pub const MAX_EXTERNAL_ID_BYTES: usize = 4 * 1024;
+pub const MAX_SOURCE_CURSOR_BYTES: usize = 64 * 1024;
+pub const MAX_PROJECTION_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_PROJECTION_SPANS: usize = 64;
+pub const MAX_FEEDBACK_NOTE_BYTES: usize = 64 * 1024;
 
 const _: () = assert!(MAX_ENCODED_CONTENT_BYTES + MAX_METADATA_BYTES < MAX_FRAME_BYTES);
 
@@ -109,6 +117,30 @@ pub enum Operation {
     RelationPut,
     #[serde(rename = "relation.list")]
     RelationList,
+    #[serde(rename = "source.register")]
+    SourceRegister,
+    #[serde(rename = "source.get")]
+    SourceGet,
+    #[serde(rename = "source.ingest")]
+    SourceIngest,
+    #[serde(rename = "source.checkpoint")]
+    SourceCheckpoint,
+    #[serde(rename = "source.withdraw")]
+    SourceWithdraw,
+    #[serde(rename = "projection.put")]
+    ProjectionPut,
+    #[serde(rename = "projection.list")]
+    ProjectionList,
+    #[serde(rename = "projection.drop")]
+    ProjectionDrop,
+    #[serde(rename = "feedback.record")]
+    FeedbackRecord,
+    #[serde(rename = "feedback.get")]
+    FeedbackGet,
+    #[serde(rename = "feedback.list")]
+    FeedbackList,
+    #[serde(rename = "feedback.export")]
+    FeedbackExport,
     #[serde(rename = "conflict.list")]
     ConflictList,
     #[serde(rename = "search")]
@@ -136,6 +168,13 @@ impl Operation {
                 | Self::ClaimRevise
                 | Self::ClaimRetract
                 | Self::RelationPut
+                | Self::SourceRegister
+                | Self::SourceIngest
+                | Self::SourceCheckpoint
+                | Self::SourceWithdraw
+                | Self::ProjectionPut
+                | Self::ProjectionDrop
+                | Self::FeedbackRecord
         )
     }
 
@@ -158,6 +197,18 @@ impl Operation {
                 | Self::ClaimRetract
                 | Self::RelationPut
                 | Self::RelationList
+                | Self::SourceRegister
+                | Self::SourceGet
+                | Self::SourceIngest
+                | Self::SourceCheckpoint
+                | Self::SourceWithdraw
+                | Self::ProjectionPut
+                | Self::ProjectionList
+                | Self::ProjectionDrop
+                | Self::FeedbackRecord
+                | Self::FeedbackGet
+                | Self::FeedbackList
+                | Self::FeedbackExport
                 | Self::ConflictList
                 | Self::Search
                 | Self::MemoryRecall
@@ -459,6 +510,183 @@ fn default_history_limit() -> usize {
 pub struct ArtifactForgetInput {
     pub artifact_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceHealth {
+    Unknown,
+    Healthy,
+    Degraded,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRegisterInput {
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceGetInput {
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceIngestInput {
+    pub source_id: String,
+    pub external_id: String,
+    pub external_revision: String,
+    pub kind: String,
+    pub title: String,
+    #[serde(default = "default_text_media_type")]
+    pub media_type: String,
+    pub content: ArtifactContent,
+    #[serde(default)]
+    pub provenance: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCheckpointInput {
+    pub source_id: String,
+    pub health: SourceHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceWithdrawInput {
+    pub source_id: String,
+    pub external_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionSpan {
+    pub start_byte: u64,
+    pub end_byte: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionPutInput {
+    pub artifact_id: String,
+    pub revision_id: String,
+    /// Stable adapter-owned identity within one immutable artifact revision.
+    pub projection_key: String,
+    pub kind: String,
+    pub text: String,
+    pub evidence_spans: Vec<ProjectionSpan>,
+    pub generator: String,
+    pub generator_version: String,
+    pub generator_digest: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionListInput {
+    pub artifact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    #[serde(default = "default_projection_list_limit")]
+    pub limit: usize,
+}
+
+fn default_projection_list_limit() -> usize {
+    MAX_PROJECTION_ITEMS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionDropInput {
+    pub projection_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackOutcome {
+    Miss,
+    Useful,
+    Incorrect,
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackRecordInput {
+    pub query: String,
+    pub outcome: FeedbackOutcome,
+    #[serde(default)]
+    pub retain_query: bool,
+    #[serde(default)]
+    pub citations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackGetInput {
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackListInput {
+    #[serde(default = "default_feedback_list_limit")]
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_commit_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackExportInput {
+    #[serde(default = "default_feedback_list_limit")]
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_commit_seq: Option<i64>,
+}
+
+fn default_feedback_list_limit() -> usize {
+    MAX_FEEDBACK_ITEMS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -922,11 +1150,21 @@ pub struct RerankerRetrievalStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectionRetrievalStatus {
+    pub state: String,
+    pub policy_version: String,
+    pub candidate_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchResult {
     pub query: String,
     pub query_analysis: QueryAnalysis,
     pub horizon: Horizon,
     pub retrieval_mode: String,
+    pub projection: ProjectionRetrievalStatus,
     pub semantic: SemanticRetrievalStatus,
     pub reranker: RerankerRetrievalStatus,
     pub qualification_applied: bool,

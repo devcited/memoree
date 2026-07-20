@@ -12,14 +12,17 @@ use crate::{
         BundleManifestItem, CandidateRankingSignals, ClaimAssertInput, ClaimGetInput,
         ClaimHistoryInput, ClaimRetractInput, ClaimReviseInput, ConflictListInput, ConflictSummary,
         ContextBuildInput, ContextBundle, ContextResolveResult, DoctorResult, EntityType,
-        EvidenceLocator, Horizon, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS,
+        EvidenceLocator, FeedbackExportInput, FeedbackGetInput, FeedbackListInput,
+        FeedbackRecordInput, Horizon, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS,
         MAX_IDEMPOTENCY_KEY_BYTES, MAX_PIN_BYTES, MAX_RECALL_ARTIFACT_REFS,
         MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RECALL_CLAIMS,
         MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM, MAX_RECALL_EXCERPT_BYTES, MAX_REQUEST_ID_BYTES,
-        Operation, PROTOCOL_VERSION, RecallArtifactReference, RecallCandidateArtifactReference,
-        RecallCandidateClaim, RecallClaim, RecallClaimStatus, RecallEvidenceReference, RecallInput,
-        RecallPresence, RecallResult, RelationListInput, RelationPutInput, Request,
-        ResolvedContext, Response, SearchHit, SearchInput, SearchResult, Warning,
+        Operation, PROTOCOL_VERSION, ProjectionDropInput, ProjectionListInput, ProjectionPutInput,
+        RecallArtifactReference, RecallCandidateArtifactReference, RecallCandidateClaim,
+        RecallClaim, RecallClaimStatus, RecallEvidenceReference, RecallInput, RecallPresence,
+        RecallResult, RelationListInput, RelationPutInput, Request, ResolvedContext, Response,
+        SearchHit, SearchInput, SearchResult, SourceCheckpointInput, SourceGetInput,
+        SourceIngestInput, SourceRegisterInput, SourceWithdrawInput, Warning,
     },
     store::Store,
 };
@@ -260,6 +263,97 @@ impl MemoryService {
                 let input: RelationListInput = input(request)?;
                 let ambient = ambient(&context)?;
                 Handled::read(self.store.relation_list(ambient, &input)?, context)
+            }
+            Operation::SourceRegister => {
+                let input: SourceRegisterInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .source_register(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::SourceGet => {
+                let input: SourceGetInput = input(request)?;
+                let ambient = ambient(&context)?;
+                Handled::read(self.store.source_get(ambient, &input)?, context)
+            }
+            Operation::SourceIngest => {
+                let input: SourceIngestInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .source_ingest(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::SourceCheckpoint => {
+                let input: SourceCheckpointInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation = self.store.source_checkpoint(
+                    ambient,
+                    &input,
+                    idempotency_key,
+                    &request_hash,
+                )?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::SourceWithdraw => {
+                let input: SourceWithdrawInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .source_withdraw(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::ProjectionPut => {
+                let input: ProjectionPutInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .projection_put(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::ProjectionList => {
+                let input: ProjectionListInput = input(request)?;
+                let ambient = ambient(&context)?;
+                Handled::read(self.store.projection_list(ambient, &input)?, context)
+            }
+            Operation::ProjectionDrop => {
+                let input: ProjectionDropInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .projection_drop(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::FeedbackRecord => {
+                let input: FeedbackRecordInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let mutation =
+                    self.store
+                        .feedback_record(ambient, &input, idempotency_key, &request_hash)?;
+                let seq = mutation.commit_seq;
+                Handled::mutation(mutation, context, seq)
+            }
+            Operation::FeedbackGet => {
+                let input: FeedbackGetInput = input(request)?;
+                let ambient = ambient(&context)?;
+                Handled::read(self.store.feedback_get(ambient, &input)?, context)
+            }
+            Operation::FeedbackList => {
+                let input: FeedbackListInput = input(request)?;
+                let ambient = ambient(&context)?;
+                Handled::read(self.store.feedback_list(ambient, &input)?, context)
+            }
+            Operation::FeedbackExport => {
+                let input: FeedbackExportInput = input(request)?;
+                let ambient = ambient(&context)?;
+                Handled::read(self.store.feedback_export(ambient, &input)?, context)
             }
             Operation::ConflictList => {
                 let input: ConflictListInput = input(request)?;
@@ -1166,6 +1260,15 @@ mod tests {
         }
     }
 
+    fn test_projection_status() -> crate::protocol::ProjectionRetrievalStatus {
+        crate::protocol::ProjectionRetrievalStatus {
+            state: "no_candidates".into(),
+            policy_version: "cited_projection_candidate_v1".into(),
+            candidate_count: 0,
+            reason: None,
+        }
+    }
+
     fn search_with_hit(entity_type: EntityType, excerpt: &str) -> SearchResult {
         let (entity_id, revision_id, citation) = match entity_type {
             EntityType::Artifact => ("art_1", "arev_1", "memoree://artifact/art_1@arev_1"),
@@ -1176,6 +1279,7 @@ mod tests {
             query_analysis: crate::protocol::QueryAnalysis::default(),
             horizon: Horizon::Ambient,
             retrieval_mode: "fts5".into(),
+            projection: test_projection_status(),
             semantic: test_semantic_status(),
             reranker: test_reranker_status(),
             qualification_applied: false,
@@ -1248,6 +1352,7 @@ mod tests {
             query_analysis: crate::protocol::QueryAnalysis::default(),
             horizon: Horizon::Ambient,
             retrieval_mode: "fts5".into(),
+            projection: test_projection_status(),
             semantic: test_semantic_status(),
             reranker: test_reranker_status(),
             qualification_applied: false,
@@ -1297,6 +1402,7 @@ mod tests {
             query_analysis: crate::protocol::QueryAnalysis::default(),
             horizon: Horizon::Ambient,
             retrieval_mode: "fts5".into(),
+            projection: test_projection_status(),
             semantic: test_semantic_status(),
             reranker: test_reranker_status(),
             qualification_applied: false,
@@ -1320,6 +1426,7 @@ mod tests {
             query_analysis: crate::protocol::QueryAnalysis::default(),
             horizon: Horizon::Ambient,
             retrieval_mode: "fts5".into(),
+            projection: test_projection_status(),
             semantic: test_semantic_status(),
             reranker: test_reranker_status(),
             qualification_applied: false,
@@ -1370,6 +1477,7 @@ mod tests {
             query_analysis: crate::protocol::QueryAnalysis::default(),
             horizon: Horizon::Ambient,
             retrieval_mode: "fts5".into(),
+            projection: test_projection_status(),
             semantic: test_semantic_status(),
             reranker: test_reranker_status(),
             qualification_applied: false,

@@ -622,6 +622,114 @@
       "title": "EmptyInput",
       "type": "object"
     },
+    "feedback.export": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "FeedbackExportInput",
+      "type": "object"
+    },
+    "feedback.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "feedback_id"
+      ],
+      "title": "FeedbackGetInput",
+      "type": "object"
+    },
+    "feedback.list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "FeedbackListInput",
+      "type": "object"
+    },
+    "feedback.record": {
+      "$defs": {
+        "FeedbackOutcome": {
+          "enum": [
+            "miss",
+            "useful",
+            "incorrect",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/FeedbackOutcome"
+        },
+        "query": {
+          "type": "string"
+        },
+        "retain_query": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "query",
+        "outcome"
+      ],
+      "title": "FeedbackRecordInput",
+      "type": "object"
+    },
     "instructions": {
       "$defs": {
         "InstructionsFormat": {
@@ -732,6 +840,139 @@
         "query"
       ],
       "title": "RecallInput",
+      "type": "object"
+    },
+    "projection.drop": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projection_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projection_id",
+        "reason"
+      ],
+      "title": "ProjectionDropInput",
+      "type": "object"
+    },
+    "projection.list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "title": "ProjectionListInput",
+      "type": "object"
+    },
+    "projection.put": {
+      "$defs": {
+        "ProjectionSpan": {
+          "additionalProperties": false,
+          "properties": {
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "evidence_spans": {
+          "items": {
+            "$ref": "#/$defs/ProjectionSpan"
+          },
+          "type": "array"
+        },
+        "generator": {
+          "type": "string"
+        },
+        "generator_digest": {
+          "type": "string"
+        },
+        "generator_version": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "projection_key": {
+          "description": "Stable adapter-owned identity within one immutable artifact revision.",
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision_id",
+        "projection_key",
+        "kind",
+        "text",
+        "evidence_spans",
+        "generator",
+        "generator_version",
+        "generator_digest"
+      ],
+      "title": "ProjectionPutInput",
       "type": "object"
     },
     "relation.list": {
@@ -954,6 +1195,246 @@
       "title": "SearchInput",
       "type": "object"
     },
+    "source.checkpoint": {
+      "$defs": {
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/SourceHealth"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "health"
+      ],
+      "title": "SourceCheckpointInput",
+      "type": "object"
+    },
+    "source.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "SourceGetInput",
+      "type": "object"
+    },
+    "source.ingest": {
+      "$defs": {
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/ArtifactContent"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "external_id": {
+          "type": "string"
+        },
+        "external_revision": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "default": "text/plain; charset=utf-8",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "external_id",
+        "external_revision",
+        "kind",
+        "title",
+        "content"
+      ],
+      "title": "SourceIngestInput",
+      "type": "object"
+    },
+    "source.register": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "locator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "title": "SourceRegisterInput",
+      "type": "object"
+    },
+    "source.withdraw": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "external_id": {
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "external_id",
+        "reason"
+      ],
+      "title": "SourceWithdrawInput",
+      "type": "object"
+    },
     "verify": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1027,6 +1508,18 @@
           "claim.retract",
           "relation.put",
           "relation.list",
+          "source.register",
+          "source.get",
+          "source.ingest",
+          "source.checkpoint",
+          "source.withdraw",
+          "projection.put",
+          "projection.list",
+          "projection.drop",
+          "feedback.record",
+          "feedback.get",
+          "feedback.list",
+          "feedback.export",
           "conflict.list",
           "search",
           "memory.recall",
@@ -2207,6 +2700,29 @@
     },
     "capabilities": {
       "$defs": {
+        "CitedProjectionCapabilities": {
+          "properties": {
+            "can_qualify_presence": {
+              "type": "boolean"
+            },
+            "exact_raw_evidence_required": {
+              "type": "boolean"
+            },
+            "included_in_context_build": {
+              "type": "boolean"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "exact_raw_evidence_required",
+            "can_qualify_presence",
+            "included_in_context_build"
+          ],
+          "type": "object"
+        },
         "Operation": {
           "enum": [
             "context.resolve",
@@ -2225,6 +2741,18 @@
             "claim.retract",
             "relation.put",
             "relation.list",
+            "source.register",
+            "source.get",
+            "source.ingest",
+            "source.checkpoint",
+            "source.withdraw",
+            "projection.put",
+            "projection.list",
+            "projection.drop",
+            "feedback.record",
+            "feedback.get",
+            "feedback.list",
+            "feedback.export",
             "conflict.list",
             "search",
             "memory.recall",
@@ -2269,6 +2797,52 @@
             "supports_explicit_horizon"
           ],
           "type": "object"
+        },
+        "RetrievalFeedbackCapabilities": {
+          "properties": {
+            "automatic_online_learning": {
+              "type": "boolean"
+            },
+            "capture": {
+              "type": "string"
+            },
+            "query_storage_default": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "capture",
+            "query_storage_default",
+            "automatic_online_learning"
+          ],
+          "type": "object"
+        },
+        "SourceSyncCapabilities": {
+          "properties": {
+            "connector_runtime": {
+              "type": "string"
+            },
+            "cursor_checkpointing": {
+              "type": "boolean"
+            },
+            "erasure": {
+              "type": "string"
+            },
+            "stable_external_identity": {
+              "type": "boolean"
+            },
+            "withdrawal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "connector_runtime",
+            "stable_external_identity",
+            "cursor_checkpointing",
+            "withdrawal",
+            "erasure"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2291,6 +2865,9 @@
         },
         "broader_horizons_require_reason": {
           "type": "boolean"
+        },
+        "cited_projections": {
+          "$ref": "#/$defs/CitedProjectionCapabilities"
         },
         "default_horizon": {
           "type": "string"
@@ -2339,6 +2916,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_feedback_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_frame_bytes": {
           "format": "uint",
           "minimum": 0,
@@ -2350,6 +2932,11 @@
           "type": "integer"
         },
         "max_metadata_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_projection_items": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -2399,6 +2986,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_source_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_title_bytes": {
           "format": "uint",
           "minimum": 0,
@@ -2426,6 +3018,12 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "retrieval_feedback": {
+          "$ref": "#/$defs/RetrievalFeedbackCapabilities"
+        },
+        "source_sync": {
+          "$ref": "#/$defs/SourceSyncCapabilities"
         },
         "supported_horizons": {
           "items": {
@@ -2464,8 +3062,14 @@
         "max_history_items",
         "max_relation_list_items",
         "max_conflict_list_items",
+        "max_source_items",
+        "max_projection_items",
+        "max_feedback_items",
         "authoritative_store",
         "blob_store",
+        "source_sync",
+        "cited_projections",
+        "retrieval_feedback",
         "retrieval",
         "guarantees",
         "operations"
@@ -4295,6 +4899,444 @@
       "title": "DoctorResult",
       "type": "object"
     },
+    "feedback.export": {
+      "$defs": {
+        "FeedbackEvalCase": {
+          "properties": {
+            "citations": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "feedback_id": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/FeedbackOutcome"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "feedback_id",
+            "query",
+            "outcome",
+            "citations",
+            "created_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        "FeedbackOutcome": {
+          "enum": [
+            "miss",
+            "useful",
+            "incorrect",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/FeedbackEvalCase"
+          },
+          "type": "array"
+        },
+        "format": {
+          "type": "string"
+        },
+        "next_before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "format",
+        "cases",
+        "truncated"
+      ],
+      "title": "FeedbackExportResult",
+      "type": "object"
+    },
+    "feedback.get": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "FeedbackOutcome": {
+          "enum": [
+            "miss",
+            "useful",
+            "incorrect",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "feedback_id": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/FeedbackOutcome"
+        },
+        "query_fingerprint": {
+          "type": "string"
+        },
+        "retained_query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feedback_id",
+        "outcome",
+        "query_fingerprint",
+        "context",
+        "created_at",
+        "commit_seq"
+      ],
+      "title": "FeedbackRecord",
+      "type": "object"
+    },
+    "feedback.list": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "FeedbackOutcome": {
+          "enum": [
+            "miss",
+            "useful",
+            "incorrect",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "FeedbackRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "citations": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "feedback_id": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/FeedbackOutcome"
+            },
+            "query_fingerprint": {
+              "type": "string"
+            },
+            "retained_query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "feedback_id",
+            "outcome",
+            "query_fingerprint",
+            "context",
+            "created_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "feedback": {
+          "items": {
+            "$ref": "#/$defs/FeedbackRecord"
+          },
+          "type": "array"
+        },
+        "next_before_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "feedback",
+        "truncated"
+      ],
+      "title": "FeedbackListResult",
+      "type": "object"
+    },
+    "feedback.record": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "FeedbackOutcome": {
+          "enum": [
+            "miss",
+            "useful",
+            "incorrect",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "feedback_id": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/FeedbackOutcome"
+        },
+        "query_fingerprint": {
+          "type": "string"
+        },
+        "retained_query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feedback_id",
+        "outcome",
+        "query_fingerprint",
+        "context",
+        "created_at",
+        "commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
     "instructions": {
       "$defs": {
         "ConceptInstruction": {
@@ -5211,6 +6253,374 @@
       "title": "RecallResult",
       "type": "object"
     },
+    "projection.drop": {
+      "$defs": {
+        "ProjectionSpan": {
+          "additionalProperties": false,
+          "properties": {
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dropped_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence_spans": {
+          "items": {
+            "$ref": "#/$defs/ProjectionSpan"
+          },
+          "type": "array"
+        },
+        "generator": {
+          "type": "string"
+        },
+        "generator_digest": {
+          "type": "string"
+        },
+        "generator_version": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "projection_id": {
+          "type": "string"
+        },
+        "projection_key": {
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projection_id",
+        "artifact_id",
+        "revision_id",
+        "projection_key",
+        "kind",
+        "text",
+        "evidence_spans",
+        "generator",
+        "generator_version",
+        "generator_digest",
+        "status",
+        "created_at",
+        "updated_at",
+        "commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "projection.list": {
+      "$defs": {
+        "ProjectionRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifact_id": {
+              "type": "string"
+            },
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "dropped_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence_spans": {
+              "items": {
+                "$ref": "#/$defs/ProjectionSpan"
+              },
+              "type": "array"
+            },
+            "generator": {
+              "type": "string"
+            },
+            "generator_digest": {
+              "type": "string"
+            },
+            "generator_version": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "projection_id": {
+              "type": "string"
+            },
+            "projection_key": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "projection_id",
+            "artifact_id",
+            "revision_id",
+            "projection_key",
+            "kind",
+            "text",
+            "evidence_spans",
+            "generator",
+            "generator_version",
+            "generator_digest",
+            "status",
+            "created_at",
+            "updated_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        "ProjectionSpan": {
+          "additionalProperties": false,
+          "properties": {
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "projections": {
+          "items": {
+            "$ref": "#/$defs/ProjectionRecord"
+          },
+          "type": "array"
+        },
+        "revision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "projections",
+        "truncated"
+      ],
+      "title": "ProjectionListResult",
+      "type": "object"
+    },
+    "projection.put": {
+      "$defs": {
+        "ProjectionSpan": {
+          "additionalProperties": false,
+          "properties": {
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dropped_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence_spans": {
+          "items": {
+            "$ref": "#/$defs/ProjectionSpan"
+          },
+          "type": "array"
+        },
+        "generator": {
+          "type": "string"
+        },
+        "generator_digest": {
+          "type": "string"
+        },
+        "generator_version": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "projection_id": {
+          "type": "string"
+        },
+        "projection_key": {
+          "type": "string"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projection_id",
+        "artifact_id",
+        "revision_id",
+        "projection_key",
+        "kind",
+        "text",
+        "evidence_spans",
+        "generator",
+        "generator_version",
+        "generator_digest",
+        "status",
+        "created_at",
+        "updated_at",
+        "commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
     "relation.list": {
       "$defs": {
         "AmbientContext": {
@@ -5599,6 +7009,33 @@
             "personal"
           ],
           "type": "string"
+        },
+        "ProjectionRetrievalStatus": {
+          "properties": {
+            "candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "policy_version",
+            "candidate_count"
+          ],
+          "type": "object"
         },
         "QueryAnalysis": {
           "properties": {
@@ -6105,6 +7542,9 @@
         "horizon": {
           "$ref": "#/$defs/Horizon"
         },
+        "projection": {
+          "$ref": "#/$defs/ProjectionRetrievalStatus"
+        },
         "qualification_applied": {
           "type": "boolean"
         },
@@ -6143,6 +7583,7 @@
         "query_analysis",
         "horizon",
         "retrieval_mode",
+        "projection",
         "semantic",
         "reranker",
         "qualification_applied",
@@ -6151,6 +7592,1054 @@
         "truncated"
       ],
       "title": "SearchResult",
+      "type": "object"
+    },
+    "source.checkpoint": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/SourceHealth"
+        },
+        "health_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "name",
+        "kind",
+        "health",
+        "context",
+        "created_at",
+        "updated_at",
+        "commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "source.get": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/SourceHealth"
+        },
+        "health_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "name",
+        "kind",
+        "health",
+        "context",
+        "created_at",
+        "updated_at",
+        "commit_seq"
+      ],
+      "title": "SourceRecord",
+      "type": "object"
+    },
+    "source.ingest": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ArtifactRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifact_id": {
+              "type": "string"
+            },
+            "blob_hash": {
+              "type": "string"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactContent"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "forgotten_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "revision_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "revision_created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_number": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "size_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "revision_number",
+            "kind",
+            "title",
+            "media_type",
+            "blob_hash",
+            "size_bytes",
+            "status",
+            "context",
+            "created_at",
+            "revision_created_at",
+            "revision_commit_seq"
+          ],
+          "type": "object"
+        },
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        },
+        "SourceItemRecord": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "artifact_revision_id": {
+              "type": "string"
+            },
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "external_id": {
+              "type": "string"
+            },
+            "external_revision": {
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "withdrawal_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "source_id",
+            "external_id",
+            "external_revision",
+            "artifact_id",
+            "artifact_revision_id",
+            "state",
+            "observed_at",
+            "updated_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        "SourceRecord": {
+          "properties": {
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "health": {
+              "$ref": "#/$defs/SourceHealth"
+            },
+            "health_message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "last_observed_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "locator": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "name",
+            "kind",
+            "health",
+            "context",
+            "created_at",
+            "updated_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRecord"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "item": {
+          "$ref": "#/$defs/SourceItemRecord"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRecord"
+        }
+      },
+      "required": [
+        "source",
+        "item",
+        "artifact",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "source.register": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/AmbientContext"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/SourceHealth"
+        },
+        "health_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_observed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "name",
+        "kind",
+        "health",
+        "context",
+        "created_at",
+        "updated_at",
+        "commit_seq",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
+      "type": "object"
+    },
+    "source.withdraw": {
+      "$defs": {
+        "AmbientContext": {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        "ArtifactContent": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "base64",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ArtifactRecord": {
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifact_id": {
+              "type": "string"
+            },
+            "blob_hash": {
+              "type": "string"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactContent"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "forgotten_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "revision_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "revision_created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_number": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "size_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "revision_number",
+            "kind",
+            "title",
+            "media_type",
+            "blob_hash",
+            "size_bytes",
+            "status",
+            "context",
+            "created_at",
+            "revision_created_at",
+            "revision_commit_seq"
+          ],
+          "type": "object"
+        },
+        "SourceHealth": {
+          "enum": [
+            "unknown",
+            "healthy",
+            "degraded",
+            "error"
+          ],
+          "type": "string"
+        },
+        "SourceItemRecord": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "artifact_revision_id": {
+              "type": "string"
+            },
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "external_id": {
+              "type": "string"
+            },
+            "external_revision": {
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "withdrawal_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "source_id",
+            "external_id",
+            "external_revision",
+            "artifact_id",
+            "artifact_revision_id",
+            "state",
+            "observed_at",
+            "updated_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        "SourceRecord": {
+          "properties": {
+            "commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "context": {
+              "$ref": "#/$defs/AmbientContext"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "health": {
+              "$ref": "#/$defs/SourceHealth"
+            },
+            "health_message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "last_observed_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "locator": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "name",
+            "kind",
+            "health",
+            "context",
+            "created_at",
+            "updated_at",
+            "commit_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRecord"
+        },
+        "commit_seq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "erasure_performed": {
+          "type": "boolean"
+        },
+        "item": {
+          "$ref": "#/$defs/SourceItemRecord"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRecord"
+        }
+      },
+      "required": [
+        "source",
+        "item",
+        "artifact",
+        "erasure_performed",
+        "commit_seq",
+        "created"
+      ],
+      "title": "MutationResult",
       "type": "object"
     },
     "verify": {

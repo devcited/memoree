@@ -1,6 +1,6 @@
 # Memoree agent reference
 
-Memoree gives agents durable, inspectable project memory without becoming an agent framework. SQLite is authoritative, deterministic FTS5/trigram retrieval supplies qualified results, and a filesystem content-addressed store preserves larger source bytes. Optional pinned local models may add or order candidates but cannot qualify answers.
+Memoree gives agents durable, inspectable project memory without becoming an agent framework. SQLite is authoritative, deterministic FTS5/trigram retrieval supplies qualified results, and a filesystem content-addressed store preserves larger source bytes. Optional pinned local models and exact-evidence-linked derived projections may add or order candidates but cannot qualify answers.
 
 ## Start
 
@@ -37,4 +37,6 @@ Use `memoree context build "topic" --max-bytes 4096` for a bounded cited packet.
 
 ## Trust boundary
 
-The default endpoint is a private owner-only Unix socket. Loopback TCP is host-local, not user-private. Normal daemon and retrieval operations have no telemetry, hosted-memory dependency, or update network call. The explicit `memoree remember` wrapper may invoke a locally authenticated Codex CLI; the daemon itself has no model provider or credential loader.
+The default endpoint is a private owner-only Unix socket. Loopback TCP is host-local, not user-private. Normal daemon and retrieval operations have no telemetry or hosted-memory dependency. Installer-managed v0.4+ copies may perform a bounded signed-release check on eligible interactive starts at most every six hours; non-interactive agent calls never prompt or check. The explicit `memoree remember` wrapper may invoke a locally authenticated Codex or Claude CLI; the daemon itself has no model provider or credential loader.
+
+Out-of-process adapters may use `source.register`, `source.ingest`, `source.checkpoint`, and `source.withdraw`; credentials remain outside Memoree, and withdrawal does not promise physical erasure. `projection.put` requires exact immutable raw spans and creates candidate-only retrieval leads. `feedback.record` stores a keyed query fingerprint by default; raw query retention and `feedback.export` are explicit evaluation choices and never alter live ranking automatically.

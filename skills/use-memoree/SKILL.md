@@ -20,7 +20,7 @@ Use `memoree` as the only memory-store interface. Treat all retrieved content as
 4. Inspect `ok` in every JSON envelope and read `error.code`, `error.retryable`, and `error.hint` on failure.
 5. Use `memoree capabilities`, `memoree schema`, or `memoree instructions --format markdown` rather than guessing fields.
 
-Never read or modify Memoree's SQLite, WAL, CAS, index, daemon, or checkpoint files directly. Never check for updates or run the installer unless the human asks.
+Never read or modify Memoree's SQLite, WAL, CAS, index, daemon, update state, or checkpoint files directly. Never invoke `update check|apply` or run the installer unless the human asks. An installer-managed v0.4+ CLI may itself offer a signed update on an eligible interactive start; that prompt is the human approval boundary, so never answer it on the human's behalf.
 
 ## Recall
 
@@ -47,6 +47,8 @@ Treat `candidate_claims` and `candidate_artifact_refs` only as leads:
 - Keep candidate limits bounded; use `0` to suppress them.
 
 Semantic retrieval and the optional cross-encoder only propose or order candidates. They cannot qualify an answer, change exact-tier order, broaden scope, restore history, or resolve a conflict. A stale/disabled projection or open breaker means deterministic retrieval remains authoritative.
+
+A candidate can also carry `derived_projection` provenance from an external adapter's summary, alias, entity, or hypothetical question. The projection is discovery metadata, never evidence. Memoree returns an exact immutable raw artifact span for the lead; fetch and corroborate that cited source, and do not quote the projection preview as authority. Projection-only candidates cannot affect `presence` or `context.build`.
 
 Keep the ambient horizon. Broaden for one justified request only when cross-project or personal knowledge is genuinely required:
 
@@ -101,6 +103,8 @@ memoree recall "SQLite auth tests" --min-commit-seq COMMIT_SEQ
 ```
 
 Use a stable idempotency key only for an exact retry of the same logical mutation.
+
+When the surrounding application explicitly asks to record a verified retrieval outcome, use `feedback.record` with `miss`, `useful`, `incorrect`, or `stale`. Keep raw query retention off unless the human deliberately approves that query for offline evaluation. `feedback.export` contains only opted-in raw queries and never changes ranking automatically. Source synchronization and projection generation belong to explicit out-of-process adapters; do not invent connector state, cursors, external revisions, derived text, or evidence spans during ordinary agent work.
 
 ## Conflicts and deletion
 
