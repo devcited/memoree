@@ -9,20 +9,24 @@ use crate::{
     protocol::{
         AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput,
         ArtifactHistoryInput, ArtifactPutInput, ArtifactReviseInput, BackupCreateInput,
-        BundleManifestItem, CandidateRankingSignals, ClaimAssertInput, ClaimGetInput,
-        ClaimHistoryInput, ClaimRetractInput, ClaimReviseInput, ConflictListInput, ConflictSummary,
-        ContextBuildInput, ContextBundle, ContextResolveResult, DoctorResult, EntityType,
-        EvidenceLocator, FeedbackExportInput, FeedbackGetInput, FeedbackListInput,
-        FeedbackRecordInput, Horizon, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS,
-        MAX_IDEMPOTENCY_KEY_BYTES, MAX_PIN_BYTES, MAX_RECALL_ARTIFACT_REFS,
-        MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RECALL_CLAIMS,
-        MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM, MAX_RECALL_EXCERPT_BYTES, MAX_REQUEST_ID_BYTES,
-        Operation, PROTOCOL_VERSION, ProjectionDropInput, ProjectionListInput, ProjectionPutInput,
-        RecallArtifactReference, RecallCandidateArtifactReference, RecallCandidateClaim,
-        RecallClaim, RecallClaimStatus, RecallEvidenceReference, RecallInput, RecallPresence,
-        RecallResult, RelationListInput, RelationPutInput, Request, ResolvedContext, Response,
-        SearchHit, SearchInput, SearchResult, SourceCheckpointInput, SourceGetInput,
-        SourceIngestInput, SourceRegisterInput, SourceWithdrawInput, Warning,
+        BundleManifestItem, CandidateRankingSignals, CitationGetInput, CitationGetResult,
+        ClaimAssertInput, ClaimGetInput, ClaimHistoryInput, ClaimRetractInput, ClaimReviseInput,
+        ConflictListInput, ConflictSummary, ContextBuildInput, ContextBundle, ContextResolveResult,
+        DoctorResult, EntityType, EvidenceLocator, FeedbackExportInput, FeedbackGetInput,
+        FeedbackListInput, FeedbackRecordInput, Horizon, MAX_CITATION_BYTES,
+        MAX_CITATION_FETCH_BYTES, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS,
+        MAX_IDEMPOTENCY_KEY_BYTES, MAX_PIN_BYTES, MAX_PROBE_EVIDENCE_BYTES_PER_LEAD,
+        MAX_PROBE_ITEMS, MAX_PROBE_SOURCES_PER_LEAD, MAX_PROBE_TITLE_BYTES, MAX_QUERY_BYTES,
+        MAX_RECALL_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS,
+        MAX_RECALL_CLAIMS, MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM, MAX_RECALL_EXCERPT_BYTES,
+        MAX_REQUEST_ID_BYTES, Operation, PROTOCOL_VERSION, ProbeInput, ProbeLead,
+        ProbeLocatorOrigin, ProbeResult, ProbeSourceLocator, ProjectionDropInput,
+        ProjectionListInput, ProjectionPutInput, RecallArtifactReference,
+        RecallCandidateArtifactReference, RecallCandidateClaim, RecallClaim, RecallClaimStatus,
+        RecallEvidenceReference, RecallInput, RecallPresence, RecallResult, RelationListInput,
+        RelationPutInput, Request, ResolvedContext, Response, SearchHit, SearchInput, SearchResult,
+        SourceCheckpointInput, SourceGetInput, SourceIngestInput, SourceRegisterInput,
+        SourceWithdrawInput, Warning,
     },
     store::Store,
 };
@@ -192,6 +196,10 @@ impl MemoryService {
             Operation::ArtifactGet => {
                 let input: ArtifactGetInput = input(request)?;
                 Handled::read(self.store.artifact_get(&input)?, context)
+            }
+            Operation::CitationGet => {
+                let input: CitationGetInput = input(request)?;
+                Handled::read(build_citation_get(&self.store, &input)?, context)
             }
             Operation::ArtifactRevise => {
                 let input: ArtifactReviseInput = input(request)?;
@@ -372,6 +380,12 @@ impl MemoryService {
                 let result = build_recall(&self.store, ambient, &input)?;
                 Handled::read(result, context)
             }
+            Operation::MemoryProbe => {
+                let input: ProbeInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let result = build_probe(&self.store, ambient, &input)?;
+                Handled::read(result, context)
+            }
             Operation::ContextBuild => {
                 let input: ContextBuildInput = input(request)?;
                 let ambient = ambient(&context)?;
@@ -503,6 +517,7 @@ fn request_horizon(request: &Request) -> Result<Horizon> {
     match request.op {
         Operation::Search => Ok(input::<SearchInput>(request)?.horizon),
         Operation::MemoryRecall => Ok(input::<RecallInput>(request)?.horizon),
+        Operation::MemoryProbe => Ok(input::<ProbeInput>(request)?.horizon),
         Operation::ContextBuild => Ok(input::<ContextBuildInput>(request)?.search.horizon),
         Operation::RelationList => Ok(input::<RelationListInput>(request)?.horizon),
         Operation::ConflictList => Ok(input::<ConflictListInput>(request)?.horizon),
@@ -514,6 +529,7 @@ fn broaden_reason(request: &Request) -> Result<String> {
     match request.op {
         Operation::Search => Ok(input::<SearchInput>(request)?.reason.unwrap_or_default()),
         Operation::MemoryRecall => Ok(input::<RecallInput>(request)?.reason.unwrap_or_default()),
+        Operation::MemoryProbe => Ok(input::<ProbeInput>(request)?.reason.unwrap_or_default()),
         Operation::ContextBuild => Ok(input::<ContextBuildInput>(request)?
             .search
             .reason
@@ -546,6 +562,241 @@ fn ambient(context: &Option<ResolvedContext>) -> Result<&AmbientContext> {
         .as_ref()
         .map(|context| &context.ambient)
         .ok_or(MemoryError::NoAmbientContext)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedArtifactCitation {
+    artifact_id: String,
+    revision_id: String,
+    start_byte: Option<usize>,
+    end_byte: Option<usize>,
+}
+
+fn citation_error(kind: &'static str, message: impl Into<String>, details: Value) -> MemoryError {
+    MemoryError::Citation {
+        kind,
+        message: message.into(),
+        details,
+    }
+}
+
+fn parse_artifact_citation(citation: &str) -> Result<ParsedArtifactCitation> {
+    if citation.is_empty() || citation.len() > MAX_CITATION_BYTES {
+        return Err(citation_error(
+            "malformed_citation",
+            format!("citation must contain 1..={MAX_CITATION_BYTES} bytes"),
+            json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+        ));
+    }
+    let Some(tail) = citation.strip_prefix("memoree://artifact/") else {
+        return Err(citation_error(
+            "malformed_citation",
+            "only immutable memoree://artifact citations are supported",
+            json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+        ));
+    };
+    let Some((artifact_id, revision_and_span)) = tail.split_once('@') else {
+        return Err(citation_error(
+            "malformed_citation",
+            "artifact citation must include an immutable revision after @",
+            json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+        ));
+    };
+    let (revision_id, span) = match revision_and_span.split_once('#') {
+        Some((revision_id, span)) => (revision_id, Some(span)),
+        None => (revision_and_span, None),
+    };
+    if artifact_id.is_empty()
+        || revision_id.is_empty()
+        || artifact_id.len() > MAX_CONTEXT_ID_BYTES
+        || revision_id.len() > MAX_CONTEXT_ID_BYTES
+        || artifact_id.contains(['@', '#'])
+        || revision_id.contains(['@', '#'])
+    {
+        return Err(citation_error(
+            "malformed_citation",
+            "artifact and revision ids must be non-empty bounded literal ids",
+            json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+        ));
+    }
+    let (start_byte, end_byte) = match span {
+        None => (None, None),
+        Some(span) => {
+            let Some((start, end)) = span.split_once('-') else {
+                return Err(citation_error(
+                    "malformed_citation",
+                    "citation fragment must be an exact start-end byte range",
+                    json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+                ));
+            };
+            if start.is_empty() || end.is_empty() || start.contains('-') || end.contains('-') {
+                return Err(citation_error(
+                    "malformed_citation",
+                    "citation fragment must contain exactly two unsigned byte offsets",
+                    json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+                ));
+            }
+            let start = start.parse::<usize>().map_err(|_| {
+                citation_error(
+                    "malformed_citation",
+                    "citation start byte is not an unsigned integer",
+                    json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+                )
+            })?;
+            let end = end.parse::<usize>().map_err(|_| {
+                citation_error(
+                    "malformed_citation",
+                    "citation end byte is not an unsigned integer",
+                    json!({"next_action": "select ranged citations from memory.probe lead sources"}),
+                )
+            })?;
+            if start >= end {
+                return Err(citation_error(
+                    "span_out_of_range",
+                    "citation byte range must be non-empty and increasing",
+                    json!({"start_byte": start, "end_byte": end, "next_action": "discard this lead and rerun memory.probe"}),
+                ));
+            }
+            (Some(start), Some(end))
+        }
+    };
+    Ok(ParsedArtifactCitation {
+        artifact_id: artifact_id.into(),
+        revision_id: revision_id.into(),
+        start_byte,
+        end_byte,
+    })
+}
+
+fn load_cited_artifact(
+    store: &Store,
+    citation: &ParsedArtifactCitation,
+    include_content: bool,
+) -> Result<crate::store::ArtifactRecord> {
+    let exact = ArtifactGetInput {
+        artifact_id: citation.artifact_id.clone(),
+        revision_id: Some(citation.revision_id.clone()),
+        include_content,
+    };
+    match store.artifact_get(&exact) {
+        Ok(artifact) => Ok(artifact),
+        Err(MemoryError::NotFound(_)) => {
+            let artifact_exists = store
+                .artifact_get(&ArtifactGetInput {
+                    artifact_id: citation.artifact_id.clone(),
+                    revision_id: None,
+                    include_content: false,
+                })
+                .is_ok();
+            let (kind, message, next_action) = if artifact_exists {
+                (
+                    "unknown_revision",
+                    format!("unknown immutable revision {}", citation.revision_id),
+                    "discard this stale lead and rerun memory.probe",
+                )
+            } else {
+                (
+                    "unknown_artifact",
+                    format!("unknown artifact {}", citation.artifact_id),
+                    "discard this invalid lead and rerun memory.probe",
+                )
+            };
+            Err(citation_error(
+                kind,
+                message,
+                json!({
+                    "artifact_id": citation.artifact_id,
+                    "revision_id": citation.revision_id,
+                    "next_action": next_action,
+                }),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn build_citation_get(store: &Store, input: &CitationGetInput) -> Result<CitationGetResult> {
+    if !(4..=MAX_CITATION_FETCH_BYTES).contains(&input.max_bytes) {
+        return Err(citation_error(
+            "invalid_output_limit",
+            format!("max_bytes must be between 4 and {MAX_CITATION_FETCH_BYTES}"),
+            json!({"next_action": format!("choose max_bytes between 4 and {MAX_CITATION_FETCH_BYTES}")}),
+        ));
+    }
+    let citation = parse_artifact_citation(&input.citation)?;
+    let normalized_revision = format!(
+        "memoree://artifact/{}@{}",
+        citation.artifact_id, citation.revision_id
+    );
+    if citation.start_byte.is_none() {
+        let artifact = load_cited_artifact(store, &citation, false)?;
+        return Err(citation_error(
+            "range_required",
+            "revision-only citations are metadata references, not bounded evidence",
+            json!({
+                "citation": normalized_revision,
+                "media_type": artifact.media_type,
+                "total_byte_count": artifact.size_bytes,
+                "next_action": "refine the query for a ranged probe lead, or use artifact.get deliberately",
+            }),
+        ));
+    }
+    let artifact = load_cited_artifact(store, &citation, true)?;
+    let Some(ArtifactContent::Text(content)) = artifact.content else {
+        return Err(citation_error(
+            "non_text_content",
+            "citation.get returns exact UTF-8 text only",
+            json!({
+                "citation": normalized_revision,
+                "media_type": artifact.media_type,
+                "total_byte_count": artifact.size_bytes,
+                "next_action": "use artifact.get with an output path for deliberate binary inspection",
+            }),
+        ));
+    };
+    let start = citation.start_byte.expect("paired citation start");
+    let end = citation.end_byte.expect("paired citation end");
+    if end > content.len() {
+        return Err(citation_error(
+            "span_out_of_range",
+            "citation byte range is outside the immutable revision",
+            json!({
+                "start_byte": start,
+                "end_byte": end,
+                "total_byte_count": content.len(),
+                "next_action": "discard this invalid lead and rerun memory.probe",
+            }),
+        ));
+    }
+    if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
+        return Err(citation_error(
+            "utf8_boundary",
+            "citation byte range splits a UTF-8 code point",
+            json!({
+                "start_byte": start,
+                "end_byte": end,
+                "next_action": "discard this invalid lead and rerun memory.probe",
+            }),
+        ));
+    }
+    let requested_bytes = end - start;
+    let mut returned_end = end.min(start.saturating_add(input.max_bytes));
+    while returned_end > start && !content.is_char_boundary(returned_end) {
+        returned_end -= 1;
+    }
+    let returned = content[start..returned_end].to_owned();
+    let byte_count = returned.len();
+    let remaining_bytes = requested_bytes - byte_count;
+    let normalized = format!("{normalized_revision}#{start}-{returned_end}");
+    Ok(CitationGetResult {
+        content_is_untrusted: true,
+        citation: normalized,
+        content: returned,
+        byte_count,
+        media_type: artifact.media_type,
+        truncated: remaining_bytes > 0,
+        remaining_bytes: (remaining_bytes > 0).then_some(remaining_bytes),
+    })
 }
 
 fn build_recall(
@@ -772,6 +1023,8 @@ fn build_recall(
     } else {
         RecallPresence::None
     };
+    let unqualified_leads_available = claim_search.unqualified_candidate_count > 0
+        || artifact_search.unqualified_candidate_count > 0;
     Ok(RecallResult {
         content_is_untrusted: true,
         query: input.query.clone(),
@@ -785,8 +1038,10 @@ fn build_recall(
         claims,
         conflicts,
         artifact_refs,
-        candidates_hint: (!candidate_claims.is_empty() || !candidate_artifact_refs.is_empty())
-            .then(|| "Candidate items are retrieval suggestions that did not meet deterministic qualification. They do not establish that memory contains an answer and must not be quoted as remembered facts. To use one: fetch it exactly by its citation (claim.get / artifact.get), then corroborate with a refined search using its terms.".into()),
+        candidates_hint: unqualified_leads_available.then(|| {
+            "Unqualified leads exist; run `memoree probe` explicitly to inspect a compact list."
+                .into()
+        }),
         candidate_claims,
         candidate_artifact_refs,
         candidate_claims_truncated,
@@ -800,6 +1055,279 @@ fn build_recall(
         claims_refine_hint: claim_search.refine_hint,
         artifact_refs_refine_hint: artifact_search.refine_hint,
     })
+}
+
+fn build_probe(store: &Store, ambient: &AmbientContext, input: &ProbeInput) -> Result<ProbeResult> {
+    if input.max_leads == 0 || input.max_leads > MAX_PROBE_ITEMS {
+        return Err(MemoryError::InvalidRequest(format!(
+            "max_leads must be between 1 and {MAX_PROBE_ITEMS}"
+        )));
+    }
+    if input
+        .original_query
+        .as_deref()
+        .is_some_and(|query| query.trim().is_empty() || query.len() > MAX_QUERY_BYTES)
+    {
+        return Err(MemoryError::InvalidRequest(format!(
+            "original_query must be non-empty and at most {MAX_QUERY_BYTES} bytes"
+        )));
+    }
+    let original_query = input
+        .original_query
+        .clone()
+        .unwrap_or_else(|| input.query.clone());
+    let search_input = SearchInput {
+        query: input.query.clone(),
+        horizon: input.horizon,
+        reason: input.reason.clone(),
+        limit: MAX_PROBE_ITEMS,
+        include_historical: false,
+        min_commit_seq: input.min_commit_seq,
+        recency: input.recency.clone(),
+    };
+    let claim_search = store.search_entity_qualified(ambient, &search_input, EntityType::Claim)?;
+    let artifact_search =
+        store.search_entity_qualified(ambient, &search_input, EntityType::Artifact)?;
+    let source_truncated =
+        claim_search.candidate_hits_truncated || artifact_search.candidate_hits_truncated;
+    let mut interleaved = Vec::with_capacity(
+        claim_search.candidate_hits.len() + artifact_search.candidate_hits.len(),
+    );
+    let mut claims = claim_search.candidate_hits.into_iter();
+    let mut artifacts = artifact_search.candidate_hits.into_iter();
+    loop {
+        let claim = claims.next();
+        let artifact = artifacts.next();
+        if claim.is_none() && artifact.is_none() {
+            break;
+        }
+        if let Some(claim) = claim {
+            interleaved.push(claim);
+        }
+        if let Some(artifact) = artifact {
+            interleaved.push(artifact);
+        }
+    }
+    let groups = order_candidate_leads(group_candidate_leads(interleaved), input.max_leads);
+    let available_count = groups.len();
+    let truncated = source_truncated || available_count > input.max_leads;
+    let mut leads = Vec::with_capacity(input.max_leads.min(available_count));
+    for group in groups.into_iter().take(input.max_leads) {
+        let (sources, evidence_locator_set_complete) =
+            build_probe_sources(store, ambient, input, &group);
+        let hit = group.hit;
+        let title = probe_title(store, &hit, &group.display_title)?;
+        leads.push(ProbeLead {
+            title,
+            sources,
+            evidence_locator_set_complete,
+        });
+    }
+    Ok(ProbeResult {
+        content_is_untrusted: true,
+        retrieval_tier: "unqualified_candidate".into(),
+        reformulation_applied: original_query != input.query,
+        original_query,
+        probe_query: input.query.clone(),
+        leads,
+        available_count,
+        truncated,
+    })
+}
+
+fn build_probe_sources(
+    store: &Store,
+    ambient: &AmbientContext,
+    input: &ProbeInput,
+    group: &CandidateLeadGroup,
+) -> (Vec<ProbeSourceLocator>, bool) {
+    if matches!(group.hit.entity_type, EntityType::Claim) {
+        let mut evidence = evidence_locators(&group.hit);
+        evidence.sort_by(|left, right| {
+            left.artifact_id
+                .cmp(&right.artifact_id)
+                .then_with(|| left.revision_id.cmp(&right.revision_id))
+                .then_with(|| left.start_byte.cmp(&right.start_byte))
+                .then_with(|| left.end_byte.cmp(&right.end_byte))
+        });
+        evidence.dedup_by(|left, right| {
+            left.artifact_id == right.artifact_id
+                && left.revision_id == right.revision_id
+                && left.start_byte == right.start_byte
+                && left.end_byte == right.end_byte
+        });
+        let mut sources = Vec::new();
+        let mut exact_bytes = 0usize;
+        let mut complete = true;
+        for locator in evidence {
+            if sources.len() >= MAX_PROBE_SOURCES_PER_LEAD {
+                complete = false;
+                break;
+            }
+            let source = match (locator.start_byte, locator.end_byte) {
+                (Some(start), Some(end)) if start < end => {
+                    let Ok(span_bytes) = usize::try_from(end - start) else {
+                        complete = false;
+                        break;
+                    };
+                    if exact_bytes.saturating_add(span_bytes) > MAX_PROBE_EVIDENCE_BYTES_PER_LEAD {
+                        complete = false;
+                        break;
+                    }
+                    exact_bytes += span_bytes;
+                    ProbeSourceLocator {
+                        citation: evidence_locator_citation(&locator),
+                        locator_origin: ProbeLocatorOrigin::ClaimExact,
+                        locator_policy_version: None,
+                        source_revision_hash: None,
+                        parent_citation: None,
+                    }
+                }
+                _ => {
+                    let parent_citation = evidence_locator_citation(&locator);
+                    match store.resolve_probe_evidence_spans(
+                        ambient,
+                        input.horizon,
+                        &group.hit.excerpt,
+                        &input.query,
+                        &locator.artifact_id,
+                        &locator.revision_id,
+                    ) {
+                        Ok(resolution_set) if !resolution_set.windows.is_empty() => {
+                            complete &= resolution_set.complete;
+                            for resolved in resolution_set.windows {
+                                if sources.len() >= MAX_PROBE_SOURCES_PER_LEAD {
+                                    complete = false;
+                                    break;
+                                }
+                                let span_bytes = usize::try_from(
+                                    resolved.end_byte.saturating_sub(resolved.start_byte),
+                                )
+                                .unwrap_or(usize::MAX);
+                                if exact_bytes.saturating_add(span_bytes)
+                                    > MAX_PROBE_EVIDENCE_BYTES_PER_LEAD
+                                {
+                                    complete = false;
+                                    break;
+                                }
+                                exact_bytes += span_bytes;
+                                sources.push(ProbeSourceLocator {
+                                    citation: format!(
+                                        "memoree://artifact/{}@{}#{}-{}",
+                                        locator.artifact_id,
+                                        locator.revision_id,
+                                        resolved.start_byte,
+                                        resolved.end_byte
+                                    ),
+                                    locator_origin: ProbeLocatorOrigin::SemanticResolved,
+                                    locator_policy_version: Some(resolved.locator_policy_version),
+                                    source_revision_hash: Some(resolved.source_revision_hash),
+                                    parent_citation: Some(parent_citation.clone()),
+                                });
+                            }
+                            continue;
+                        }
+                        Err(_) | Ok(_) => ProbeSourceLocator {
+                            citation: parent_citation,
+                            locator_origin: ProbeLocatorOrigin::RevisionOnly,
+                            locator_policy_version: None,
+                            source_revision_hash: None,
+                            parent_citation: None,
+                        },
+                    }
+                }
+            };
+            sources.push(source);
+        }
+        return (sources, complete);
+    }
+
+    let source = &group.source;
+    let mut locator = ProbeSourceLocator {
+        citation: source.citation.clone(),
+        locator_origin: source.locator_origin,
+        locator_policy_version: None,
+        source_revision_hash: None,
+        parent_citation: None,
+    };
+    if let Ok(parsed) = parse_artifact_citation(&source.citation)
+        && let (Some(start), Some(end)) = (parsed.start_byte, parsed.end_byte)
+        && end.saturating_sub(start) > 384
+        && let (Ok(start), Ok(end)) = (u64::try_from(start), u64::try_from(end))
+        && let Ok(Some(resolved)) = store.resolve_probe_artifact_window(
+            ambient,
+            input.horizon,
+            &input.query,
+            &parsed.artifact_id,
+            &parsed.revision_id,
+            (start, end),
+        )
+    {
+        locator = ProbeSourceLocator {
+            citation: format!(
+                "memoree://artifact/{}@{}#{}-{}",
+                parsed.artifact_id, parsed.revision_id, resolved.start_byte, resolved.end_byte
+            ),
+            locator_origin: ProbeLocatorOrigin::SemanticWindowed,
+            locator_policy_version: Some(resolved.locator_policy_version),
+            source_revision_hash: Some(resolved.source_revision_hash),
+            parent_citation: Some(source.citation.clone()),
+        };
+    }
+    (vec![locator], true)
+}
+
+fn evidence_locators(hit: &SearchHit) -> Vec<EvidenceLocator> {
+    if !matches!(hit.entity_type, EntityType::Claim) {
+        return Vec::new();
+    }
+    hit.provenance
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
+}
+
+fn first_evidence_locator(hit: &SearchHit) -> Option<EvidenceLocator> {
+    evidence_locators(hit).into_iter().next()
+}
+
+fn evidence_locator_citation(locator: &EvidenceLocator) -> String {
+    match (locator.start_byte, locator.end_byte) {
+        (Some(start), Some(end)) => format!(
+            "memoree://artifact/{}@{}#{start}-{end}",
+            locator.artifact_id, locator.revision_id
+        ),
+        _ => format!(
+            "memoree://artifact/{}@{}",
+            locator.artifact_id, locator.revision_id
+        ),
+    }
+}
+
+fn probe_title(store: &Store, hit: &SearchHit, grouped_title: &str) -> Result<String> {
+    let title = if !grouped_title.is_empty() {
+        grouped_title.to_owned()
+    } else if let Some(locator) = first_evidence_locator(hit) {
+        store
+            .artifact_get(&ArtifactGetInput {
+                artifact_id: locator.artifact_id,
+                revision_id: Some(locator.revision_id),
+                include_content: false,
+            })?
+            .title
+    } else {
+        hit.title.clone()
+    };
+    if title.len() <= MAX_PROBE_TITLE_BYTES {
+        return Ok(title);
+    }
+    const ELLIPSIS: &str = "…";
+    let mut bounded = truncate_utf8(&title, MAX_PROBE_TITLE_BYTES - ELLIPSIS.len()).to_owned();
+    bounded.push_str(ELLIPSIS);
+    Ok(bounded)
 }
 
 fn claim_type_from_hit(hit: &SearchHit) -> Result<crate::protocol::ClaimType> {
@@ -827,11 +1355,6 @@ fn candidate_ranking_signals(hit: &SearchHit) -> CandidateRankingSignals {
         lexical_coverage: hit.ranking.lexical_coverage,
         trigram_similarity: hit.ranking.trigram_similarity,
         semantic_similarity: hit.ranking.semantic_similarity,
-        reranker_raw_logit: hit
-            .provenance
-            .get("reranker")
-            .and_then(|value| value.get("raw_logit"))
-            .and_then(Value::as_f64),
     }
 }
 
@@ -891,6 +1414,191 @@ fn evidence_reference(
         excerpt,
         excerpt_truncated,
     })
+}
+
+#[derive(Clone)]
+struct CandidateLeadGroup {
+    first_rank: usize,
+    display_title: String,
+    hit: SearchHit,
+    source: ProbeSourceCandidate,
+}
+
+#[derive(Clone)]
+struct ProbeSourceCandidate {
+    citation: String,
+    locator_origin: ProbeLocatorOrigin,
+}
+
+fn probe_source_candidate(hit: &SearchHit) -> ProbeSourceCandidate {
+    if matches!(hit.entity_type, EntityType::Claim) {
+        if let Some(locator) = first_evidence_locator(hit) {
+            let exact = matches!((locator.start_byte, locator.end_byte), (Some(_), Some(_)));
+            return ProbeSourceCandidate {
+                citation: evidence_locator_citation(&locator),
+                locator_origin: if exact {
+                    ProbeLocatorOrigin::ClaimExact
+                } else {
+                    ProbeLocatorOrigin::RevisionOnly
+                },
+            };
+        }
+        return ProbeSourceCandidate {
+            citation: hit.citation.clone(),
+            locator_origin: ProbeLocatorOrigin::RevisionOnly,
+        };
+    }
+    let exact = hit.citation.contains('#');
+    ProbeSourceCandidate {
+        citation: hit.citation.clone(),
+        locator_origin: if exact {
+            ProbeLocatorOrigin::ArtifactExact
+        } else {
+            ProbeLocatorOrigin::RevisionOnly
+        },
+    }
+}
+
+fn candidate_group_key(hit: &SearchHit) -> String {
+    if matches!(hit.entity_type, EntityType::Claim)
+        && let Some(locator) = hit
+            .provenance
+            .get("evidence")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+        && let (Some(artifact_id), Some(revision_id)) = (
+            locator.get("artifact_id").and_then(Value::as_str),
+            locator.get("revision_id").and_then(Value::as_str),
+        )
+    {
+        return format!("claim-source:{artifact_id}@{revision_id}");
+    }
+    format!(
+        "{}:{}@{}",
+        match hit.entity_type {
+            EntityType::Artifact => "raw-artifact",
+            EntityType::Claim => "claim",
+        },
+        hit.entity_id,
+        hit.revision_id
+    )
+}
+
+fn group_candidate_leads(hits: Vec<SearchHit>) -> Vec<CandidateLeadGroup> {
+    let mut groups = Vec::<CandidateLeadGroup>::new();
+    let mut positions = std::collections::BTreeMap::<String, usize>::new();
+    for (rank, hit) in hits.into_iter().enumerate() {
+        let key = candidate_group_key(&hit);
+        let source = probe_source_candidate(&hit);
+        if let Some(index) = positions.get(&key).copied() {
+            if matches!(hit.entity_type, EntityType::Artifact)
+                && matches!(groups[index].hit.entity_type, EntityType::Artifact)
+            {
+                // The first artifact occurrence already embodies the structural
+                // candidate order. Never reconstruct hidden model scores here.
+            }
+            continue;
+        }
+        positions.insert(key, groups.len());
+        groups.push(CandidateLeadGroup {
+            first_rank: rank,
+            display_title: if matches!(hit.entity_type, EntityType::Artifact) {
+                hit.title.clone()
+            } else {
+                String::new()
+            },
+            source,
+            hit,
+        });
+    }
+    groups.sort_by(|left, right| {
+        left.first_rank
+            .cmp(&right.first_rank)
+            .then_with(|| {
+                matches!(right.hit.entity_type, EntityType::Claim)
+                    .cmp(&matches!(left.hit.entity_type, EntityType::Claim))
+            })
+            .then_with(|| left.hit.entity_id.cmp(&right.hit.entity_id))
+    });
+    for (position, group) in groups.iter_mut().enumerate() {
+        group.first_rank = position;
+    }
+    groups
+}
+
+fn order_candidate_leads(
+    groups: Vec<CandidateLeadGroup>,
+    max_leads: usize,
+) -> Vec<CandidateLeadGroup> {
+    let mut claim_backed = groups
+        .iter()
+        .filter(|group| matches!(group.hit.entity_type, EntityType::Claim))
+        .cloned()
+        .collect::<Vec<_>>();
+    claim_backed.sort_by(|left, right| {
+        left.first_rank
+            .cmp(&right.first_rank)
+            .then_with(|| left.hit.citation.cmp(&right.hit.citation))
+    });
+    let mut raw = groups
+        .iter()
+        .filter(|group| matches!(group.hit.entity_type, EntityType::Artifact))
+        .filter(|raw_group| {
+            !claim_backed.iter().any(|claim_group| {
+                source_candidates_overlap(&claim_group.source, &raw_group.source)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    raw.sort_by(|left, right| {
+        left.first_rank
+            .cmp(&right.first_rank)
+            .then_with(|| left.hit.citation.cmp(&right.hit.citation))
+    });
+
+    let raw_floor = 2.min(max_leads);
+    let preferred_claims = max_leads.saturating_sub(raw_floor);
+    let mut claim_count = preferred_claims.min(claim_backed.len());
+    let mut raw_count = raw_floor.min(raw.len());
+    raw_count = raw_count
+        .saturating_add(preferred_claims.saturating_sub(claim_count))
+        .min(raw.len());
+    claim_count = claim_count
+        .saturating_add(raw_floor.saturating_sub(raw_count))
+        .min(claim_backed.len());
+
+    let mut ordered = Vec::with_capacity(groups.len());
+    ordered.extend(claim_backed.iter().take(claim_count).cloned());
+    ordered.extend(raw.iter().take(raw_count).cloned());
+    ordered.extend(claim_backed.into_iter().skip(claim_count));
+    ordered.extend(raw.into_iter().skip(raw_count));
+    ordered
+}
+
+/// A raw route is redundant only when it names exact bytes already covered by
+/// the winning claim route in the same immutable revision. Revision-only or
+/// disjoint raw passages remain separate leads; they may contain a correction
+/// or qualifier that the claim evidence does not support.
+fn source_candidates_overlap(left: &ProbeSourceCandidate, right: &ProbeSourceCandidate) -> bool {
+    let (Ok(left), Ok(right)) = (
+        parse_artifact_citation(&left.citation),
+        parse_artifact_citation(&right.citation),
+    ) else {
+        return false;
+    };
+    if left.artifact_id != right.artifact_id || left.revision_id != right.revision_id {
+        return false;
+    }
+    matches!(
+        (
+            left.start_byte,
+            left.end_byte,
+            right.start_byte,
+            right.end_byte,
+        ),
+        (Some(left_start), Some(left_end), Some(right_start), Some(right_end))
+            if left_start < right_end && right_start < left_end
+    )
 }
 
 fn build_bundle(
@@ -1236,7 +1944,7 @@ mod tests {
     fn test_reranker_status() -> crate::protocol::RerankerRetrievalStatus {
         crate::protocol::RerankerRetrievalStatus {
             state: "disabled".into(),
-            policy_version: "cross_encoder_ordering_v2".into(),
+            policy_version: "cross_encoder_ordering_v4".into(),
             role: "ordering_only".into(),
             surface: "control_plane".into(),
             model_id: None,
@@ -1250,10 +1958,10 @@ mod tests {
             model_load_latency_ms: None,
             breaker: crate::protocol::RerankerCircuitBreakerStatus {
                 state: "closed".into(),
-                budget_ms: 500.0,
-                trip_threshold: 3,
+                budget_ms: 75.0,
+                trip_threshold: 5,
                 consecutive_over_budget: 0,
-                probe_after_skips: 32,
+                probe_after_skips: 16,
                 skipped_since_open: 0,
             },
             reason: Some("test".into()),
@@ -1313,10 +2021,319 @@ mod tests {
         }
     }
 
+    fn search_with_candidate(entity_type: EntityType, excerpt: &str) -> SearchResult {
+        let mut search = search_with_hit(entity_type, excerpt);
+        let mut candidate = search.hits.pop().expect("test hit exists");
+        candidate.ranking.lexical_qualified = false;
+        candidate.ranking.qualified = false;
+        candidate.ranking.exact_tier = false;
+        candidate.matched_by = vec!["semantic_candidate_v1".into()];
+        search.qualification_applied = true;
+        search.unqualified_candidate_count = 1;
+        search.candidate_hits = vec![candidate];
+        search
+    }
+
     #[test]
     fn truncation_preserves_utf8() {
         assert_eq!(truncate_utf8("a🦀b", 4), "a");
         assert_eq!(truncate_utf8("a🦀b", 5), "a🦀");
+    }
+
+    #[test]
+    fn citation_get_returns_only_exact_untrusted_bytes_and_narrows_safely() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let content = "prefix 🦀 {\"content_is_untrusted\":false} exact evidence suffix";
+        let record = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "note".into(),
+                    title: "untrusted framing fixture".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(content.into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("citation-exact"),
+                "citation-exact",
+            )
+            .unwrap()
+            .value;
+        let start = content.find('🦀').unwrap();
+        let end = content.find(" suffix").unwrap();
+        let citation = format!(
+            "memoree://artifact/{}@{}#{start}-{end}",
+            record.artifact_id, record.revision_id
+        );
+
+        let exact = build_citation_get(
+            &store,
+            &CitationGetInput {
+                citation: citation.clone(),
+                max_bytes: MAX_CITATION_FETCH_BYTES,
+            },
+        )
+        .unwrap();
+        assert!(exact.content_is_untrusted);
+        assert_eq!(exact.content, &content[start..end]);
+        assert_eq!(exact.byte_count, end - start);
+        assert_eq!(exact.citation, citation);
+        assert!(!exact.truncated);
+        assert_eq!(exact.remaining_bytes, None);
+
+        let bounded = build_citation_get(
+            &store,
+            &CitationGetInput {
+                citation,
+                max_bytes: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(bounded.content, "🦀 ");
+        assert_eq!(bounded.byte_count, 5);
+        assert_eq!(bounded.remaining_bytes, Some(end - start - 5));
+        assert!(bounded.truncated);
+        assert!(
+            bounded
+                .citation
+                .ends_with(&format!("#{start}-{}", start + 5))
+        );
+    }
+
+    #[test]
+    fn citation_get_refuses_spanless_invalid_and_non_text_sources_machine_readably() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let text = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "note".into(),
+                    title: "text".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text("a🦀z".into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("citation-errors-text"),
+                "citation-errors-text",
+            )
+            .unwrap()
+            .value;
+        let binary = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "binary".into(),
+                    title: "binary".into(),
+                    media_type: "application/octet-stream".into(),
+                    content: ArtifactContent::Base64("AAEC".into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("citation-errors-binary"),
+                "citation-errors-binary",
+            )
+            .unwrap()
+            .value;
+
+        let error_kind = |input: CitationGetInput| match build_citation_get(&store, &input) {
+            Err(MemoryError::Citation { kind, details, .. }) => (kind, details),
+            result => panic!("expected citation error, got {result:?}"),
+        };
+        let base = format!(
+            "memoree://artifact/{}@{}",
+            text.artifact_id, text.revision_id
+        );
+        let (kind, details) = error_kind(CitationGetInput {
+            citation: base.clone(),
+            max_bytes: MAX_CITATION_FETCH_BYTES,
+        });
+        assert_eq!(kind, "range_required");
+        assert_eq!(details["total_byte_count"], 6);
+        assert!(details["next_action"].is_string());
+
+        let (kind, _) = error_kind(CitationGetInput {
+            citation: format!("{base}#2-6"),
+            max_bytes: MAX_CITATION_FETCH_BYTES,
+        });
+        assert_eq!(kind, "utf8_boundary");
+        let (kind, _) = error_kind(CitationGetInput {
+            citation: format!("{base}#0-999"),
+            max_bytes: MAX_CITATION_FETCH_BYTES,
+        });
+        assert_eq!(kind, "span_out_of_range");
+        let (kind, _) = error_kind(CitationGetInput {
+            citation: format!(
+                "memoree://artifact/{}@{}#0-3",
+                binary.artifact_id, binary.revision_id
+            ),
+            max_bytes: MAX_CITATION_FETCH_BYTES,
+        });
+        assert_eq!(kind, "non_text_content");
+        let (kind, _) = error_kind(CitationGetInput {
+            citation: "https://example.test/not-memoree".into(),
+            max_bytes: MAX_CITATION_FETCH_BYTES,
+        });
+        assert_eq!(kind, "malformed_citation");
+    }
+
+    #[test]
+    fn citation_get_handles_ten_thousand_adversarial_utf8_ranges_without_panics() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let content = "a🦀βz\n".repeat(32);
+        let record = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "fuzz_fixture".into(),
+                    title: "citation UTF-8 range fixture".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(content.clone()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("citation-range-fuzz"),
+                "citation-range-fuzz",
+            )
+            .unwrap()
+            .value;
+        let base = format!(
+            "memoree://artifact/{}@{}",
+            record.artifact_id, record.revision_id
+        );
+        let mut state = 0x9e3779b97f4a7c15_u64;
+        for _ in 0..10_000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let first = (state as usize) % (content.len() + 9);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let second = (state as usize) % (content.len() + 9);
+            let input = CitationGetInput {
+                citation: format!("{base}#{first}-{second}"),
+                max_bytes: 37,
+            };
+            match build_citation_get(&store, &input) {
+                Ok(result) => {
+                    assert!(result.content_is_untrusted);
+                    assert!(result.byte_count <= 37);
+                    assert!(citation_get_matches_fixture(&result, &content));
+                }
+                Err(MemoryError::Citation { kind, .. }) => {
+                    assert!(matches!(kind, "span_out_of_range" | "utf8_boundary"))
+                }
+                Err(error) => panic!("unexpected citation range error: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn citation_get_is_under_ten_percent_of_whole_fetch_for_large_artifacts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let marker = "The exact recovery marker is ledger-v2 and legacy-clearing is retired.";
+        let content = format!(
+            "{}\n{marker}\n",
+            "ordinary generated context. ".repeat(5000)
+        );
+        let record = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "large_fixture".into(),
+                    title: "large exact-fetch fixture".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(content.clone()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("citation-large-ratio"),
+                "citation-large-ratio",
+            )
+            .unwrap()
+            .value;
+        let start = content.find(marker).unwrap();
+        let end = start + marker.len();
+        let fetched = build_citation_get(
+            &store,
+            &CitationGetInput {
+                citation: format!(
+                    "memoree://artifact/{}@{}#{start}-{end}",
+                    record.artifact_id, record.revision_id
+                ),
+                max_bytes: MAX_CITATION_FETCH_BYTES,
+            },
+        )
+        .unwrap();
+        let exact_bytes = serde_json::to_vec(&fetched).unwrap().len();
+        let whole_bytes = serde_json::to_vec(
+            &store
+                .artifact_get(&ArtifactGetInput {
+                    artifact_id: record.artifact_id,
+                    revision_id: Some(record.revision_id),
+                    include_content: true,
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .len();
+        assert!(exact_bytes * 10 <= whole_bytes);
+        assert_eq!(fetched.content, marker);
+    }
+
+    fn citation_get_matches_fixture(result: &CitationGetResult, content: &str) -> bool {
+        let Some(fragment) = result
+            .citation
+            .rsplit_once('#')
+            .map(|(_, fragment)| fragment)
+        else {
+            return false;
+        };
+        let Some((start, end)) = fragment.split_once('-') else {
+            return false;
+        };
+        let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+            return false;
+        };
+        start < end
+            && end <= content.len()
+            && content.is_char_boundary(start)
+            && content.is_char_boundary(end)
+            && content[start..end] == result.content
     }
 
     #[test]
@@ -1343,6 +2360,195 @@ mod tests {
             ]
         );
         assert!(prompt_injection_signals("ordinary", "reference text").is_empty());
+    }
+
+    #[test]
+    fn probe_preserves_claim_and_raw_artifact_as_separate_provenance_leads() {
+        let artifact = search_with_candidate(EntityType::Artifact, "source excerpt")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut claim = search_with_candidate(EntityType::Claim, "candidate statement")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        claim.provenance.insert(
+            "evidence".into(),
+            serde_json::json!([{
+                "artifact_id": artifact.entity_id,
+                "revision_id": artifact.revision_id,
+                "start_byte": 0,
+                "end_byte": 6
+            }]),
+        );
+
+        let groups = group_candidate_leads(vec![claim, artifact]);
+        assert_eq!(groups.len(), 2);
+        assert!(matches!(groups[0].hit.entity_type, EntityType::Claim));
+        assert_eq!(
+            groups[0].source.locator_origin,
+            ProbeLocatorOrigin::ClaimExact
+        );
+        assert!(matches!(groups[1].hit.entity_type, EntityType::Artifact));
+    }
+
+    #[test]
+    fn probe_never_borrows_artifact_bytes_for_a_claim_backed_lead() {
+        let mut artifact = search_with_candidate(EntityType::Artifact, "source excerpt")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        artifact.citation = format!("{}#7-19", artifact.citation);
+        let mut claim = search_with_candidate(EntityType::Claim, "candidate statement")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        claim.provenance.insert(
+            "evidence".into(),
+            serde_json::json!([{
+                "artifact_id": artifact.entity_id,
+                "revision_id": artifact.revision_id
+            }]),
+        );
+
+        let groups = group_candidate_leads(vec![claim, artifact.clone()]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0].source.locator_origin,
+            ProbeLocatorOrigin::RevisionOnly
+        );
+        assert_eq!(
+            groups[0].source.citation,
+            format!(
+                "memoree://artifact/{}@{}",
+                artifact.entity_id, artifact.revision_id
+            )
+        );
+    }
+
+    #[test]
+    fn grouped_source_keeps_the_first_ranked_claim_and_its_own_evidence() {
+        let artifact = search_with_candidate(EntityType::Artifact, "source excerpt")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut weaker = search_with_candidate(EntityType::Claim, "weaker statement")
+            .candidate_hits
+            .into_iter()
+            .next()
+            .unwrap();
+        weaker.entity_id = "claim-weaker".into();
+        weaker.ranking.semantic_similarity = Some(0.51);
+        weaker.provenance.insert(
+            "evidence".into(),
+            serde_json::json!([{
+                "artifact_id": artifact.entity_id,
+                "revision_id": artifact.revision_id,
+                "start_byte": 0,
+                "end_byte": 5
+            }]),
+        );
+        let mut stronger = weaker.clone();
+        stronger.entity_id = "claim-stronger".into();
+        stronger.excerpt = "stronger statement".into();
+        stronger.ranking.semantic_similarity = Some(0.82);
+        stronger.provenance.insert(
+            "evidence".into(),
+            serde_json::json!([{
+                "artifact_id": artifact.entity_id,
+                "revision_id": artifact.revision_id,
+                "start_byte": 20,
+                "end_byte": 40
+            }]),
+        );
+
+        // Candidate order is the only structural signal that survives the
+        // reranker boundary. A later claim can never donate its evidence.
+        let groups = group_candidate_leads(vec![stronger, artifact, weaker]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].hit.entity_id, "claim-stronger");
+        assert_eq!(groups[0].hit.excerpt, "stronger statement");
+        assert!(groups[0].source.citation.ends_with("#20-40"));
+    }
+
+    #[test]
+    fn probe_order_reserves_raw_slots_after_claim_backed_leads() {
+        let mut groups = Vec::new();
+        for original_position in 0..10 {
+            let entity_type = if original_position < 6 {
+                EntityType::Claim
+            } else {
+                EntityType::Artifact
+            };
+            let mut hit = search_with_candidate(entity_type, "candidate")
+                .candidate_hits
+                .into_iter()
+                .next()
+                .unwrap();
+            hit.entity_id = format!("entity_{original_position}");
+            hit.revision_id = format!("revision_{original_position}");
+            hit.citation = format!("memoree://test/{original_position}");
+            hit.ranking.semantic_similarity = Some(original_position as f64 / 12.0);
+            let source = probe_source_candidate(&hit);
+            groups.push(CandidateLeadGroup {
+                first_rank: original_position,
+                display_title: hit.title.clone(),
+                source,
+                hit,
+            });
+        }
+
+        let depth_five = order_candidate_leads(groups.clone(), 5);
+        assert!(
+            depth_five[..3]
+                .iter()
+                .all(|group| matches!(group.hit.entity_type, EntityType::Claim))
+        );
+        assert!(
+            depth_five[3..5]
+                .iter()
+                .all(|group| matches!(group.hit.entity_type, EntityType::Artifact))
+        );
+
+        let depth_eight = order_candidate_leads(groups, 8);
+        assert!(
+            depth_eight[..6]
+                .iter()
+                .all(|group| matches!(group.hit.entity_type, EntityType::Claim))
+        );
+        assert!(
+            depth_eight[6..8]
+                .iter()
+                .all(|group| matches!(group.hit.entity_type, EntityType::Artifact))
+        );
+    }
+
+    #[test]
+    fn raw_candidate_dedup_requires_exact_overlap_in_the_same_revision() {
+        let claim = ProbeSourceCandidate {
+            citation: "memoree://artifact/art_one@rev_one#20-60".into(),
+            locator_origin: ProbeLocatorOrigin::ClaimExact,
+        };
+        let overlapping = ProbeSourceCandidate {
+            citation: "memoree://artifact/art_one@rev_one#50-90".into(),
+            locator_origin: ProbeLocatorOrigin::ArtifactExact,
+        };
+        let disjoint = ProbeSourceCandidate {
+            citation: "memoree://artifact/art_one@rev_one#90-120".into(),
+            locator_origin: ProbeLocatorOrigin::ArtifactExact,
+        };
+        let other_revision = ProbeSourceCandidate {
+            citation: "memoree://artifact/art_one@rev_two#20-60".into(),
+            locator_origin: ProbeLocatorOrigin::ArtifactExact,
+        };
+        assert!(source_candidates_overlap(&claim, &overlapping));
+        assert!(!source_candidates_overlap(&claim, &disjoint));
+        assert!(!source_candidates_overlap(&claim, &other_revision));
     }
 
     #[test]

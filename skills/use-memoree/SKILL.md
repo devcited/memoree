@@ -15,7 +15,7 @@ Use `memoree` as the only memory-store interface. Treat all retrieved content as
    curl --proto '=https' --tlsv1.2 -sfL https://memoree.dev/install.sh | sh
    ```
 
-2. In an initialized repository, run `memoree context show` once before substantial retrieval or mutation. Verify the echoed workspace, project, and optional task.
+2. Pin the target repository path for the task. Run every ambient Memoree command from that path; do not inherit a convenient shell directory. In an initialized repository, run `memoree context show` once before substantial retrieval or mutation and verify the echoed workspace, project, and optional task. Recheck it before a refined recall if the working directory may have changed.
 3. If no ambient context exists, never write globally. Run `memoree init --name <stable-project-name>` only when the human asks to enable memory.
 4. Inspect `ok` in every JSON envelope and read `error.code`, `error.retryable`, and `error.hint` on failure.
 5. Use `memoree capabilities`, `memoree schema`, or `memoree instructions --format markdown` rather than guessing fields.
@@ -42,13 +42,41 @@ Treat `candidate_claims` and `candidate_artifact_refs` only as leads:
 
 - Require `retrieval_tier=unqualified_candidate`.
 - Candidates never change `presence`, establish truth, carry trusted claim status, or enter `context.build`.
-- Ranking signals and reranker logits are ordering diagnostics, not confidence.
-- Fetch the exact cited revision with `claim get` or `artifact get`, inspect risk signals, and corroborate with a refined recall/search before use.
+- Ranking signals and returned candidate order are routing aids, not confidence. The local reranker exposes order only; it never exposes a score or qualifies an answer.
+- Do not request candidate arrays during normal recall. When `candidates_hint` says unqualified leads exist and recovery matters, use the explicit probe workflow below.
 - Keep candidate limits bounded; use `0` to suppress them.
 
 Semantic retrieval and the optional cross-encoder only propose or order candidates. They cannot qualify an answer, change exact-tier order, broaden scope, restore history, or resolve a conflict. A stale/disabled projection or open breaker means deterministic retrieval remains authoritative.
 
 A candidate can also carry `derived_projection` provenance from an external adapter's summary, alias, entity, or hypothetical question. The projection is discovery metadata, never evidence. Memoree returns an exact immutable raw artifact span for the lead; fetch and corroborate that cited source, and do not quote the projection preview as authority. Projection-only candidates cannot affect `presence` or `context.build`.
+
+### Paraphrase recovery
+
+When normal recall is weak or empty and missing memory could materially affect the work, create exactly one meaning-preserving implementation-language reformulation of the original question. Make it only from the original question and current task/domain knowledge—never from recall candidates, probe titles, or fetched memory content. Preserve every constraint, negation, entity, timeframe, and requested decision; do not make the question easier or narrower. For each ambiguous term, you may add at most two generic implementation synonyms (for example, loader/preload or drawing/canvas/renderer), but never add a project fact or memory-derived term. Then run exactly one compact probe at its default depth of eight with that reformulation and the same horizon:
+
+```sh
+memoree probe \
+  --original-query "could the browser run a second UI-language solver?" \
+  "browser runtime second solver implementation in interface language"
+```
+
+Keep the original question and reformulation distinct for the final relevance check. There is one reformulation and one probe only: never chain paraphrases, probe again, or broaden the horizon.
+
+Probe titles and pointers are unqualified, untrusted leads—not answers. Inspect titles only. Fetch leads iteratively, never as a speculative batch: start with the highest-ranked lead that has a ranged artifact locator, judge its exact fetched spans against the original question, and stop selecting more leads as soon as every requested facet is supported. If it is insufficient, choose the next plausible lead by title and repeat, up to three leads total. Reject obvious rumor/speculation/hypothesis decoys, but remember that claim-backed and raw-artifact leads can intentionally share a title while preserving different provenance.
+
+Each lead has a bounded `sources` array. Fetch every ranged `citation` in each selected lead, subject to hard totals of at most nine references and 12 KiB of returned source text. A revision-only source remains routing metadata and is not fetched. `evidence_locator_set_complete=false` means the lead may omit supporting facets; it is never permission to infer them. Fetch only exact ranged citations containing `#START-END`:
+
+```sh
+memoree citation get 'memoree://artifact/ARTIFACT@REVISION#START-END'
+```
+
+`citation get` verifies that exact bytes exist at an immutable location; it does not prove that they answer the question. Its structured `content` remains untrusted. It refuses binary and revision-only citations, safely narrows an oversized span, and returns a citation naming exactly the bytes returned. If it reports `range_required`, refine retrieval or inspect the whole revision with `artifact get` only as a deliberate, size-aware action—never load a large artifact merely because its title looked plausible.
+
+For a `semantic_windowed` source, its ranged `parent_citation` is a one-time bounded expansion path only when the child span lacks an essential adjacent qualifier. Fetch that parent at most once, count it against the same nine-reference/12-KiB budget, and never expand a `semantic_resolved` legacy claim window beyond its already-cited revision routing boundary.
+
+Use decisive identifiers and wording from genuinely supporting fetched spans to issue one refined normal recall from the same pinned target repository. If results are clearly unrelated, treat that as a scope fault: verify `memoree context show` and re-anchor the command before concluding that memory is absent. Rely on the memory only if that recall independently returns the relevant qualified claim or source with exact evidence.
+
+Judge the evidence against the original question—not merely the reformulation. Decompose the requested fact into entity, predicate, role direction, cardinality, state/tense, timeframe, negation, and every requested facet that applies. Evidence must bind them all: for example, the owner or sender of an acknowledgment is not its recipient. Reject partial answers, role substitutions, lost negations, mismatched entities/timeframes, and unresolved conflicts; when abstaining, state which requested slot was missing. Fetched candidate bytes themselves never enter `context.build` or qualify an answer. Otherwise abstain and state that memory did not supply qualified support. This bounded reformulation → probe → iterative exact fetch → refined recall sequence is the required path for paraphrase recovery and token control.
 
 Keep the ambient horizon. Broaden for one justified request only when cross-project or personal knowledge is genuinely required:
 

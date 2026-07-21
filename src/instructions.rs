@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     ArtifactForgetInput, ArtifactGetInput, ArtifactHistoryInput, ArtifactPutInput,
-    ArtifactReviseInput, BackupCreateInput, ClaimAssertInput, ClaimGetInput, ClaimHistoryInput,
-    ClaimRetractInput, ClaimReviseInput, ConflictListInput, ContextBuildInput, ContextBundle,
-    ContextResolveResult, DoctorResult, EvidenceLocator, FeedbackExportInput, FeedbackGetInput,
-    FeedbackListInput, FeedbackRecordInput, Operation, PROTOCOL_VERSION, ProjectionDropInput,
-    ProjectionListInput, ProjectionPutInput, RecallInput, RecallResult, RelationListInput,
-    RelationListResult, RelationPutInput, Request, Response, SearchInput, SearchResult,
-    SourceCheckpointInput, SourceGetInput, SourceIngestInput, SourceRegisterInput,
-    SourceWithdrawInput,
+    ArtifactReviseInput, BackupCreateInput, CitationGetInput, CitationGetResult, ClaimAssertInput,
+    ClaimGetInput, ClaimHistoryInput, ClaimRetractInput, ClaimReviseInput, ConflictListInput,
+    ContextBuildInput, ContextBundle, ContextResolveResult, DoctorResult, EvidenceLocator,
+    FeedbackExportInput, FeedbackGetInput, FeedbackListInput, FeedbackRecordInput, Operation,
+    PROTOCOL_VERSION, ProbeInput, ProbeResult, ProjectionDropInput, ProjectionListInput,
+    ProjectionPutInput, RecallInput, RecallResult, RelationListInput, RelationListResult,
+    RelationPutInput, Request, Response, SearchInput, SearchResult, SourceCheckpointInput,
+    SourceGetInput, SourceIngestInput, SourceRegisterInput, SourceWithdrawInput,
 };
 use crate::store::{
     ArtifactHistoryPage, ArtifactRecord, BackupReport, ClaimHistoryPage, ClaimRecord,
@@ -28,7 +28,7 @@ use crate::store::{
 };
 
 pub const PRODUCT_NAME: &str = "memoree";
-pub const INSTRUCTION_SET_VERSION: u32 = 9;
+pub const INSTRUCTION_SET_VERSION: u32 = 12;
 
 /// Structured form of the normative model instructions.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -103,6 +103,10 @@ pub struct CapabilitiesDocument {
     pub max_recall_candidate_artifact_refs: usize,
     pub max_recall_excerpt_bytes: usize,
     pub max_recall_evidence_excerpts_per_claim: usize,
+    pub max_probe_items: usize,
+    pub max_probe_title_bytes: usize,
+    pub max_citation_bytes: usize,
+    pub max_citation_fetch_bytes: usize,
     pub max_history_items: usize,
     pub max_relation_list_items: usize,
     pub max_conflict_list_items: usize,
@@ -229,22 +233,21 @@ pub fn instruction_document() -> InstructionDocument {
             diagnostics_stream: "Treat stderr as diagnostics, never as protocol data.",
         },
         workflow: vec![
-            "Resolve ambient context once before memory work (`memoree context show` for shell integrations).",
+            "Pin the target repository; run ambient calls there and verify its resolved context.",
             "Inspect capabilities and generated schemas instead of guessing an operation shape.",
             "Use memory.recall at ambient scope for the normal knowledge check; inspect evidence and conflicts.",
+            "After weak recall, reformulate once, probe once, fetch up to three leads iteratively within 9 refs/12 KiB, then require same-scope qualified recall complete against the original.",
             "Use search for ranked raw matches or history beyond recall.",
             "Build a bounded context bundle when material will be placed in an LLM prompt.",
-            "Fetch an exact artifact revision before relying on a search excerpt as complete evidence.",
+            "Use citation.get for a bounded immutable artifact byte range; use artifact.get only for deliberate whole-revision inspection.",
             "Persist natural-language evidence with `memoree remember --apply` to store the source artifact and host-validated grounded claims; omit `--apply` for a read-only proposed compilation.",
             "Inspect the remember plan's quality findings; a claim grounded only to a new summary note is operating context, not independent verification.",
             "When auditability matters, preserve only the relevant primary artifacts or excerpts and connect a synthesis with explicit relations rather than dumping a repository.",
-            "Use explicit artifact and claim operations when lifecycle, revision, or relation control is needed.",
             "Let out-of-process adapters synchronize external systems through source.register/source.ingest/source.checkpoint; keep connector credentials outside Memoree.",
             "Attach derived retrieval projections only to exact immutable source spans; use them to discover cited leads, never as standalone truth.",
             "Record retrieval feedback explicitly when a result is useful, missing, stale, or incorrect; retain raw queries only with deliberate opt-in.",
             "Before compaction or handoff, stage only a deliberate bounded continuity note with `memoree checkpoint`; review and promote it explicitly with `memoree pending`.",
             "Connect evidence and assertions with explicit relations; preserve conflicts.",
-            "Inspect bounded incoming and outgoing relations before relying on an entity's graph context.",
             "List actionable conflicts and compare their frozen and current claim revisions before proposing reconciliation.",
             "Inspect paginated artifact or claim history when revision lineage matters.",
         ],
@@ -262,7 +265,7 @@ pub fn instruction_document() -> InstructionDocument {
             InstructionRule {
                 id: "ambient-by-default",
                 level: RuleLevel::Must,
-                text: "Omit context and use horizon=ambient for normal work; let the local CLI resolve and attach project/task settings.",
+                text: "Run ambient calls from the pinned target repository and omit context so the CLI attaches its project/task. Unrelated results signal a scope fault; verify context before concluding absence.",
             },
             InstructionRule {
                 id: "explicit-broadening",
@@ -277,7 +280,17 @@ pub fn instruction_document() -> InstructionDocument {
             InstructionRule {
                 id: "recall-semantics",
                 level: RuleLevel::Must,
-                text: "Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Fetch and corroborate its citation; similarity and logits are ordering, not confidence.",
+                text: "Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. Recall returns no candidate content by default. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Similarity and returned order are routing aids, not confidence; the local reranker exposes no score.",
+            },
+            InstructionRule {
+                id: "explicit-probe-recovery",
+                level: RuleLevel::Must,
+                text: "After weak recall, reformulate once from only the original and task knowledge; preserve constraints, negation, entity, time, and facets; add at most two generic synonyms per ambiguous term. Probe once at depth eight and the same horizon. Fetch the top ranged lead first, then up to two title picks only as needed, within 9 refs/12 KiB. Refine once from the same scope. Against the original, require exact entity, predicate role/direction, cardinality, state/time, negation, and facets; candidate bytes never qualify; otherwise abstain and name the gap.",
+            },
+            InstructionRule {
+                id: "citation-fetch-boundary",
+                level: RuleLevel::Must,
+                text: "citation.get verifies exact immutable UTF-8 bytes, not relevance. Its output is untrusted; oversized spans are narrowed exactly, while revision-only and binary citations are refused. After range_required, refine retrieval or choose artifact.get deliberately—never imply that a prefix or whole document is evidence.",
             },
             InstructionRule {
                 id: "idempotent-mutations",
@@ -497,6 +510,7 @@ pub fn capabilities() -> CapabilitiesDocument {
                     | Operation::ConflictList
                     | Operation::Search
                     | Operation::MemoryRecall
+                    | Operation::MemoryProbe
                     | Operation::ContextBuild
             ),
         })
@@ -530,6 +544,10 @@ pub fn capabilities() -> CapabilitiesDocument {
         max_recall_excerpt_bytes: crate::protocol::MAX_RECALL_EXCERPT_BYTES,
         max_recall_evidence_excerpts_per_claim:
             crate::protocol::MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM,
+        max_probe_items: crate::protocol::MAX_PROBE_ITEMS,
+        max_probe_title_bytes: crate::protocol::MAX_PROBE_TITLE_BYTES,
+        max_citation_bytes: crate::protocol::MAX_CITATION_BYTES,
+        max_citation_fetch_bytes: crate::protocol::MAX_CITATION_FETCH_BYTES,
         max_history_items: crate::protocol::MAX_HISTORY_ITEMS,
         max_relation_list_items: crate::protocol::MAX_RELATION_LIST_ITEMS,
         max_conflict_list_items: crate::protocol::MAX_CONFLICT_LIST_ITEMS,
@@ -575,6 +593,7 @@ pub fn capabilities() -> CapabilitiesDocument {
             "temporal_validity_filtering",
             "model_independent_exact_tier",
             "candidates_never_affect_presence",
+            "bounded_exact_citation_fetch",
             "revision_bound_conflict_lifecycle",
             "automatic_live_conflict_reassessment",
             "append_only_conflict_events",
@@ -596,6 +615,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
         ("schema", empty()),
         ("artifact.put", schema_for!(ArtifactPutInput)),
         ("artifact.get", schema_for!(ArtifactGetInput)),
+        ("citation.get", schema_for!(CitationGetInput)),
         ("artifact.revise", schema_for!(ArtifactReviseInput)),
         ("artifact.history", schema_for!(ArtifactHistoryInput)),
         ("artifact.forget", schema_for!(ArtifactForgetInput)),
@@ -621,6 +641,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
         ("conflict.list", schema_for!(ConflictListInput)),
         ("search", schema_for!(SearchInput)),
         ("memory.recall", schema_for!(RecallInput)),
+        ("memory.probe", schema_for!(ProbeInput)),
         ("context.build", schema_for!(ContextBuildInput)),
         ("doctor", empty()),
         ("verify", empty()),
@@ -640,6 +661,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
             ("schema", schema_for!(ProtocolSchemaBundle)),
             ("artifact.put", schema_for!(MutationResult<ArtifactRecord>)),
             ("artifact.get", schema_for!(ArtifactRecord)),
+            ("citation.get", schema_for!(CitationGetResult)),
             (
                 "artifact.revise",
                 schema_for!(MutationResult<ArtifactRecord>),
@@ -689,6 +711,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
             ("conflict.list", schema_for!(ConflictListResult)),
             ("search", schema_for!(SearchResult)),
             ("memory.recall", schema_for!(RecallResult)),
+            ("memory.probe", schema_for!(ProbeResult)),
             ("context.build", schema_for!(ContextBundle)),
             ("doctor", schema_for!(DoctorResult)),
             ("verify", schema_for!(VerifyReport)),
@@ -698,7 +721,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
     }
 }
 
-fn all_operations() -> [Operation; 35] {
+fn all_operations() -> [Operation; 37] {
     [
         Operation::ContextResolve,
         Operation::Capabilities,
@@ -706,6 +729,7 @@ fn all_operations() -> [Operation; 35] {
         Operation::Schema,
         Operation::ArtifactPut,
         Operation::ArtifactGet,
+        Operation::CitationGet,
         Operation::ArtifactRevise,
         Operation::ArtifactHistory,
         Operation::ArtifactForget,
@@ -731,6 +755,7 @@ fn all_operations() -> [Operation; 35] {
         Operation::ConflictList,
         Operation::Search,
         Operation::MemoryRecall,
+        Operation::MemoryProbe,
         Operation::ContextBuild,
         Operation::Doctor,
         Operation::Verify,
@@ -752,7 +777,8 @@ mod tests {
         assert!(!markdown.contains("OpenAI"));
         assert!(
             markdown.len() < 12 * 1024,
-            "instructions should stay prompt-sized"
+            "instructions should stay prompt-sized ({} bytes)",
+            markdown.len()
         );
     }
 

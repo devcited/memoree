@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 use crate::protocol::ErrorCode;
 
 #[derive(Debug, thiserror::Error)]
@@ -8,6 +10,12 @@ pub enum MemoryError {
     InvalidRequest(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("citation error ({kind}): {message}")]
+    Citation {
+        kind: &'static str,
+        message: String,
+        details: Value,
+    },
     #[error(
         "revision conflict: {entity_type} {entity_id} is at revision {current_revision}, not {requested_revision}"
     )]
@@ -51,6 +59,7 @@ impl MemoryError {
             Self::NoAmbientContext => ErrorCode::NoAmbientContext,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::NotFound(_) => ErrorCode::NotFound,
+            Self::Citation { .. } => ErrorCode::CitationError,
             Self::RevisionConflict { .. } => ErrorCode::RevisionConflict,
             Self::IdempotencyConflict(_) => ErrorCode::IdempotencyConflict,
             Self::IndexNotReady { .. } => ErrorCode::IndexNotReady,
@@ -81,7 +90,8 @@ impl MemoryError {
             Self::InvalidRequest(_)
             | Self::UnsupportedVersion(_)
             | Self::Config(_)
-            | Self::ContentTooLarge => 2,
+            | Self::ContentTooLarge
+            | Self::Citation { .. } => 2,
             Self::NotFound(_) => 3,
             Self::RevisionConflict { .. } | Self::IdempotencyConflict(_) => 4,
             Self::IndexNotReady { .. } => 6,

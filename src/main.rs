@@ -27,11 +27,12 @@ use memoree::{
     protocol::{
         AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput,
         ArtifactHistoryInput, ArtifactPutInput, ArtifactReviseInput, BackupCreateInput,
-        ClaimAssertInput, ClaimGetInput, ClaimHistoryInput, ClaimRetractInput, ClaimReviseInput,
-        ClaimType, ConflictListInput, ContextBuildInput, ContextSource, DoctorResult, EntityType,
-        EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES, MAX_ENCODED_CONTENT_BYTES, Operation,
-        RecallInput, RecencyBiasInput, RelationDirection, RelationListInput, RelationPutInput,
-        RelationType, Request, Response, SearchInput, Warning,
+        CitationGetInput, ClaimAssertInput, ClaimGetInput, ClaimHistoryInput, ClaimRetractInput,
+        ClaimReviseInput, ClaimType, ConflictListInput, ContextBuildInput, ContextSource,
+        DoctorResult, EntityType, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES,
+        MAX_ENCODED_CONTENT_BYTES, Operation, ProbeInput, RecallInput, RecencyBiasInput,
+        RelationDirection, RelationListInput, RelationPutInput, RelationType, Request, Response,
+        SearchInput, Warning,
     },
     remember::{
         REMEMBER_SCHEMA_VERSION, ValidatedClaim, ValidatedCompilation, deterministic_title,
@@ -143,6 +144,11 @@ enum Commands {
         #[command(subcommand)]
         command: ArtifactCommands,
     },
+    /// Fetch an exact bounded UTF-8 span from an immutable citation.
+    Citation {
+        #[command(subcommand)]
+        command: CitationCommands,
+    },
     /// Create and manage atomic claims.
     Claim {
         #[command(subcommand)]
@@ -164,6 +170,8 @@ enum Commands {
     Search(SearchArgs),
     /// Ask whether current memory contains relevant claims or source artifacts.
     Recall(RecallArgs),
+    /// Explicitly inspect compact unqualified retrieval leads after weak recall.
+    Probe(ProbeArgs),
     /// Print vendor-neutral, versioned instructions for language models.
     Instructions(InstructionsArgs),
     /// Print the protocol JSON Schema bundle.
@@ -329,6 +337,10 @@ enum UpgradeCommands {
         /// Permit the one-time 0.2 legacy default daemon restart.
         #[arg(long)]
         legacy_default_was_running: bool,
+        /// Keep deterministic retrieval and do not install the default local
+        /// ordering model during this confirmed reconciliation.
+        #[arg(long)]
+        without_reranker: bool,
     },
     /// Show the durable reconciliation state without starting a daemon.
     Status,
@@ -483,6 +495,19 @@ enum ArtifactCommands {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CitationCommands {
+    Get(CitationGetArgs),
+}
+
+#[derive(Debug, Args)]
+struct CitationGetArgs {
+    citation: String,
+    /// Maximum exact UTF-8 bytes to return; oversized ranges are narrowed.
+    #[arg(long, default_value_t = memoree::protocol::MAX_CITATION_FETCH_BYTES)]
+    max_bytes: usize,
 }
 
 #[derive(Debug, Args)]
@@ -680,12 +705,32 @@ struct RecallArgs {
     max_artifact_refs: usize,
     #[arg(long, default_value_t = 320)]
     max_excerpt_bytes: usize,
-    /// Maximum unqualified claim suggestions (0 disables, hard maximum 5).
-    #[arg(long, default_value_t = 3)]
+    /// Maximum unqualified claim suggestions (0 disables, hard maximum 16).
+    #[arg(long, default_value_t = 0)]
     max_candidate_claims: usize,
-    /// Maximum unqualified artifact suggestions (0 disables, hard maximum 5).
-    #[arg(long, default_value_t = 3)]
+    /// Maximum unqualified artifact suggestions (0 disables, hard maximum 16).
+    #[arg(long, default_value_t = 0)]
     max_candidate_artifact_refs: usize,
+    #[arg(long)]
+    min_commit_seq: Option<i64>,
+    /// Disable the small deterministic recency rerank for this retrieval.
+    #[arg(long)]
+    no_recency: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProbeArgs {
+    #[arg(required = true)]
+    query: Vec<String>,
+    /// Original question when QUERY is one meaning-preserving reformulation.
+    #[arg(long)]
+    original_query: Option<String>,
+    #[arg(long, value_enum, default_value_t = HorizonArg::Ambient)]
+    horizon: HorizonArg,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long, default_value_t = 8)]
+    max_leads: usize,
     #[arg(long)]
     min_commit_seq: Option<i64>,
     /// Disable the small deterministic recency rerank for this retrieval.
@@ -1162,6 +1207,15 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
                 request
             }
         },
+        Commands::Citation {
+            command: CitationCommands::Get(args),
+        } => Request::new(
+            Operation::CitationGet,
+            CitationGetInput {
+                citation: args.citation,
+                max_bytes: args.max_bytes,
+            },
+        )?,
         Commands::Claim { command } => match command {
             ClaimCommands::Assert(args) => {
                 let mut request = Request::new(
@@ -1298,6 +1352,20 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
                 max_excerpt_bytes: args.max_excerpt_bytes,
                 max_candidate_claims: args.max_candidate_claims,
                 max_candidate_artifact_refs: args.max_candidate_artifact_refs,
+                min_commit_seq: args.min_commit_seq,
+                recency: RecencyBiasInput {
+                    enabled: !args.no_recency,
+                },
+            },
+        )?,
+        Commands::Probe(args) => Request::new(
+            Operation::MemoryProbe,
+            ProbeInput {
+                query: args.query.join(" "),
+                original_query: args.original_query,
+                horizon: args.horizon.into(),
+                reason: args.reason,
+                max_leads: args.max_leads,
                 min_commit_seq: args.min_commit_seq,
                 recency: RecencyBiasInput {
                     enabled: !args.no_recency,
@@ -1490,12 +1558,14 @@ async fn upgrade_command(
         UpgradeCommands::Apply {
             previous_version,
             legacy_default_was_running,
+            without_reranker,
         } => {
             apply_upgrade(
                 paths,
                 endpoint_override,
                 previous_version,
                 legacy_default_was_running,
+                without_reranker,
                 pretty,
             )
             .await
@@ -1537,6 +1607,7 @@ async fn apply_upgrade(
     endpoint_override: Option<&str>,
     previous_version: Option<String>,
     legacy_default_was_running: bool,
+    without_reranker: bool,
     pretty: bool,
 ) -> Result<i32> {
     let _upgrade_lock = UpgradeLock::acquire(paths)?;
@@ -1580,6 +1651,15 @@ async fn apply_upgrade(
     write_upgrade_state(paths, &state)?;
 
     let mut warnings = Vec::new();
+    let reranker_install_opted_out = without_reranker
+        || env::var("MEMOREE_SKIP_RERANKER_INSTALL")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
     let compiler = match CompilerRegistry::default()
         .reconcile_upgrade(paths, previous_daemon_version.as_deref())
         .await
@@ -1774,17 +1854,43 @@ async fn apply_upgrade(
                 }
             };
         }
-        if store.reranker_model_installed() {
-            reranker = match store.reranker_status() {
-                Ok(status) => serde_json::to_value(status)?,
-                Err(error) => {
-                    warnings.push(format!(
-                        "installed reranker could not be warmed; deterministic ordering remains available: {error}"
-                    ));
-                    json!({"state": "error", "downloaded": false, "reason": error.to_string()})
+        reranker = if reranker_install_opted_out {
+            json!({
+                "state": "opted_out",
+                "downloaded": false,
+                "reason": "--without-reranker or MEMOREE_SKIP_RERANKER_INSTALL"
+            })
+        } else {
+            match store.reranker_status() {
+                Ok(status) if status.state == "ready" => json!({
+                    "state": "ready",
+                    "downloaded": false,
+                    "status": status,
+                }),
+                previous_status => {
+                    state.set_phase("installing_reranker");
+                    write_upgrade_state(paths, &state)?;
+                    match store.reranker_enable() {
+                        Ok(installed) => json!({
+                            "state": "installed",
+                            "downloaded": true,
+                            "previous_status": previous_status.ok(),
+                            "install": installed,
+                        }),
+                        Err(error) => {
+                            warnings.push(format!(
+                                "the pinned local ordering model could not be installed; deterministic ordering remains available and a later `memoree upgrade apply` will retry: {error}"
+                            ));
+                            json!({
+                                "state": "unavailable",
+                                "downloaded": false,
+                                "reason": error.to_string(),
+                            })
+                        }
+                    }
                 }
-            };
-        }
+            }
+        };
     }
 
     let skills = match sync_skills(paths) {
@@ -3151,6 +3257,35 @@ mod tests {
         assert_eq!(input.max_claims, 4);
         assert_eq!(input.max_artifact_refs, 2);
         assert_eq!(input.max_excerpt_bytes, 240);
+    }
+
+    #[test]
+    fn citation_get_cli_builds_a_context_free_bounded_read_request() {
+        let cli = Cli::try_parse_from([
+            "memoree",
+            "citation",
+            "get",
+            "memoree://artifact/art_1@arev_2#12-34",
+            "--max-bytes",
+            "1024",
+        ])
+        .unwrap();
+        let prepared = prepare_command(cli.command).unwrap();
+        assert!(matches!(prepared.request.op, Operation::CitationGet));
+        assert!(prepared.request.context.is_none());
+        let input: CitationGetInput = serde_json::from_value(prepared.request.input).unwrap();
+        assert_eq!(input.citation, "memoree://artifact/art_1@arev_2#12-34");
+        assert_eq!(input.max_bytes, 1024);
+    }
+
+    #[test]
+    fn probe_cli_uses_the_single_depth_eight_default() {
+        let cli = Cli::try_parse_from(["memoree", "probe", "saved", "workspace"]).unwrap();
+        let prepared = prepare_command(cli.command).unwrap();
+        assert!(matches!(prepared.request.op, Operation::MemoryProbe));
+        let input: ProbeInput = serde_json::from_value(prepared.request.input).unwrap();
+        assert_eq!(input.query, "saved workspace");
+        assert_eq!(input.max_leads, 8);
     }
 
     #[test]

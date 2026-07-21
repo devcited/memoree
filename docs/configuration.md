@@ -86,6 +86,7 @@ Individual paths can be overridden when embedding or packaging the daemon:
 - `MEMOREE_NO_AUTOSTART=true` disables automatic daemon startup.
 - `MEMOREE_ACTOR` records the caller identity on supported mutations.
 - `MEMOREE_SKIP_SKILL_SYNC=true` keeps `upgrade apply` from changing Codex/Claude skills when those integrations are managed independently.
+- `MEMOREE_SKIP_RERANKER_INSTALL=true` keeps a confirmed upgrade on deterministic ordering without downloading the release-pinned local TinyBERT model. The equivalent one-run flag is `memoree upgrade apply --without-reranker`.
 
 On Unix, leave `MEMOREE_ENDPOINT` unset for the recommended default: an owner-private runtime directory and mode-`0600` Unix socket. This provides a per-user boundary that TCP does not.
 
@@ -97,7 +98,7 @@ The auto-started private daemon reports `lifecycle_owner=memoree`; a process sta
 
 `memoree upgrade apply` serializes reconciliation under a private lock and writes an atomic `upgrade-state.json` beside the store. The state records the target binary, prior daemon state, phase, schema, recovery snapshot, and embedded skill digest so a retry after interruption preserves “running before means running after.” `memoree upgrade status` reads this state without starting a daemon.
 
-Before schema 1–4 becomes schema 5, Memoree checks free space and publishes a private, verified pre-migration SQLite/CAS snapshot below `migration-backups/`. Optional models are never downloaded by upgrade reconciliation. An already-installed stale semantic projection is rebuilt locally; an unavailable projection or reranker degrades to deterministic retrieval.
+Before schema 1–4 becomes schema 5, Memoree checks free space and publishes a private, verified pre-migration SQLite/CAS snapshot below `migration-backups/`. An already-installed stale semantic projection is rebuilt locally. A user-confirmed upgrade installs the small, release-pinned ordering-only reranker unless explicitly opted out; offline or verification failure is reported and degrades to deterministic retrieval. No query-time path downloads models.
 
 Installer-managed copies record their exact binary path during reconciliation. On eligible interactive starts they check for a release at most every six hours and ask once before applying a newly detected version. The signed release manifest pins the installer and platform archive digests; success re-executes the original command exactly once. Non-interactive, CI, protocol-stdin, daemon, upgrade, update, eval, and session surfaces never prompt. `MEMOREE_AUTO_UPDATE=off` disables automatic checks; `memoree update status|check|apply` provides explicit control. Versions before 0.4 have no startup checker and need one manual installer run.
 

@@ -4,6 +4,22 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-21
+
+### Added
+
+- Explicit `memory.probe` paraphrase recovery with one audited reformulation, compact title routing, provenance-labeled exact source arrays, and original-question relevance checks.
+- Deterministic clause-aware resolution of legacy whole-revision evidence into up to three non-overlapping, authority-hash-verified UTF-8 windows.
+- Contextual semantic projection v3, exact bounded `citation.get`, and an expanded retrieval evaluation that measures source discovery, exact fetches, refined recovery, abstention, and token bounds separately.
+- Automatic confirmed-upgrade installation of a signed-release-digest-pinned TinyBERT-L2 ordering model, with an explicit opt-out and deterministic offline fallback.
+
+### Changed
+
+- Claim-backed and raw-artifact candidates from the same immutable source remain separate leads, preventing relevance or evidence from being borrowed while preserving fresh raw corrections.
+- The local reranker exposes only a stable permutation, cannot cross exact or qualification tiers, serializes no logits, orders a diversified top-eight fused plus top-eight dense slate in batches of eight, and calibrates a 75–150 ms host-specific breaker budget from ten fixed startup samples; five consecutive overruns open it, with faster two-probe recovery.
+- The canonical `use-memoree` skill now pins the target repository, fetches the highest-ranked ranged lead followed by up to two title-selected leads only as needed within nine references/12 KiB, requires exact predicate-role/facet matching, and finishes with one same-scope qualified recall judged against the original question.
+- Confirmed upgrades atomically refresh that canonical skill in every detected Codex and Claude home while preserving differing prior copies.
+
 ## [0.4.1] - 2026-07-20
 
 ### Added
@@ -53,7 +69,8 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/devcited/memoree/releases/tag/v0.5.0
 [0.4.1]: https://github.com/devcited/memoree/releases/tag/v0.4.1
 [0.3.0]: https://github.com/devcited/memoree/releases/tag/v0.3.0
 [0.2.0]: https://github.com/devcited/memoree/releases/tag/v0.2.0

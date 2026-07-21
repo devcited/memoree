@@ -34,8 +34,7 @@ use crate::protocol::{
     MAX_CONFLICT_LIST_ITEMS, MAX_CONTEXT_ID_BYTES, MAX_CONTEXT_PINS, MAX_ENCODED_CONTENT_BYTES,
     MAX_EVIDENCE_ITEMS, MAX_EXTERNAL_ID_BYTES, MAX_FEEDBACK_ITEMS, MAX_FEEDBACK_NOTE_BYTES,
     MAX_HISTORY_ITEMS, MAX_METADATA_BYTES, MAX_PIN_BYTES, MAX_PROJECTION_ITEMS,
-    MAX_PROJECTION_SPANS, MAX_PROJECTION_TEXT_BYTES, MAX_QUERY_BYTES,
-    MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS, MAX_RECALL_EXCERPT_BYTES,
+    MAX_PROJECTION_SPANS, MAX_PROJECTION_TEXT_BYTES, MAX_QUERY_BYTES, MAX_RECALL_EXCERPT_BYTES,
     MAX_RELATION_LIST_ITEMS, MAX_SEARCH_ITEMS, MAX_SOURCE_CURSOR_BYTES, MAX_TITLE_BYTES,
     ProjectionDropInput, ProjectionListInput, ProjectionPutInput, ProjectionRetrievalStatus,
     ProjectionSpan, QueryAnalysis, RecencyDecayClass, RecencyTimestampBasis, RelationListInput,
@@ -477,6 +476,20 @@ pub struct Store {
     semantic: SemanticManager,
     reranker: RerankerManager,
     schema_migration: Option<SchemaMigrationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeEvidenceResolution {
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub source_revision_hash: String,
+    pub locator_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeEvidenceResolutionSet {
+    pub windows: Vec<ProbeEvidenceResolution>,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -3711,8 +3724,12 @@ impl Store {
                 status
             }
         };
-        let candidate_partition_limit =
-            MAX_RECALL_CANDIDATE_CLAIMS.max(MAX_RECALL_CANDIDATE_ARTIFACT_REFS);
+        // Keep the full reranker-sized recovery pool in the frozen search
+        // snapshot. Recall still exposes only its caller-selected small
+        // candidate limits, while context recovery can build a compact,
+        // evidence-labelled subset without issuing a second search against a
+        // potentially newer authority state.
+        let candidate_partition_limit = RERANKER_ORDERING_CANDIDATE_LIMIT;
         let mut candidate_entity_ids = BTreeSet::new();
         let candidate_hit_count = hits
             .iter()
@@ -3977,6 +3994,226 @@ impl Store {
         self.semantic.status(current_commit_seq, &eligible)
     }
 
+    /// Resolve a bounded exact byte window inside one already-cited artifact
+    /// revision. This is candidate routing only: it never qualifies an answer,
+    /// never searches another source, and fails closed when the local semantic
+    /// projection is unavailable or stale.
+    pub(crate) fn resolve_probe_evidence_spans(
+        &self,
+        context: &AmbientContext,
+        horizon: Horizon,
+        claim_statement: &str,
+        user_query: &str,
+        artifact_id: &str,
+        revision_id: &str,
+    ) -> Result<ProbeEvidenceResolutionSet> {
+        let connection = self.connection.lock();
+        ensure_entity_in_read_scope(
+            &connection,
+            context,
+            EntityType::Artifact,
+            artifact_id,
+            horizon,
+        )?;
+        let raw = load_artifact_raw(&connection, artifact_id, Some(revision_id))?;
+        let Some(raw) = raw else {
+            return Ok(ProbeEvidenceResolutionSet {
+                windows: Vec::new(),
+                complete: false,
+            });
+        };
+        let revision_hash = raw.blob.hash.clone();
+        let blob = raw.blob;
+        let current_commit_seq: i64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'commit_seq'",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(connection);
+
+        // Verify every emitted locator against authoritative immutable bytes,
+        // not merely against the derived projection row.
+        let authoritative_bytes = self.cas.get(&blob)?;
+        if blake3::hash(&authoritative_bytes).to_hex().as_str() != revision_hash {
+            return Err(MemoryError::Integrity(format!(
+                "artifact revision {revision_id} changed while resolving evidence"
+            )));
+        }
+        let Ok(authoritative_text) = std::str::from_utf8(&authoritative_bytes) else {
+            return Ok(ProbeEvidenceResolutionSet {
+                windows: Vec::new(),
+                complete: false,
+            });
+        };
+
+        let mut eligible = BTreeMap::new();
+        eligible.insert(
+            revision_id.to_owned(),
+            EligibleSemanticRevision {
+                entity_type: EntityType::Artifact,
+                entity_id: artifact_id.to_owned(),
+                revision_hash: revision_hash.clone(),
+            },
+        );
+        let clauses = ranked_claim_evidence_clauses(claim_statement, user_query);
+        let intended_count = clauses.len();
+        let mut windows = Vec::<ProbeEvidenceResolution>::new();
+        let mut all_selected_clauses_resolved = true;
+        for clause in clauses.into_iter().take(3) {
+            // Fixed decomposition is primary. The original user wording only
+            // disambiguates the exact source window; neither input is executed
+            // or sent to a remote model.
+            let locator_query = format!(
+                "Exact source evidence for this claim clause:\n{}\nOriginal user wording:\n{}",
+                bounded_utf8_preview(&clause, 2 * 1024),
+                bounded_utf8_preview(user_query, 2 * 1024),
+            );
+            let (hits, status) = self.semantic.search_ranged_windows(
+                &locator_query,
+                &eligible,
+                6,
+                current_commit_seq,
+            )?;
+            if status.state != "ready" {
+                return Ok(ProbeEvidenceResolutionSet {
+                    windows: Vec::new(),
+                    complete: false,
+                });
+            }
+            let resolved = hits.into_iter().find_map(|hit| {
+                let (Some(start_byte), Some(end_byte)) = (hit.start_byte, hit.end_byte) else {
+                    return None;
+                };
+                let (Ok(start), Ok(end)) = (usize::try_from(start_byte), usize::try_from(end_byte))
+                else {
+                    return None;
+                };
+                if start >= end
+                    || end > authoritative_text.len()
+                    || !authoritative_text.is_char_boundary(start)
+                    || !authoritative_text.is_char_boundary(end)
+                    || end - start > SEMANTIC_WINDOW_MAX_BYTES
+                    || windows
+                        .iter()
+                        .any(|window| start_byte < window.end_byte && end_byte > window.start_byte)
+                {
+                    return None;
+                }
+                Some(ProbeEvidenceResolution {
+                    start_byte,
+                    end_byte,
+                    source_revision_hash: revision_hash.clone(),
+                    locator_policy_version: format!(
+                        "claim_clause_windows_v1/{SEMANTIC_POLICY_VERSION}"
+                    ),
+                })
+            });
+            if let Some(resolved) = resolved {
+                windows.push(resolved);
+            } else {
+                all_selected_clauses_resolved = false;
+            }
+        }
+        windows.sort_by(|left, right| {
+            left.start_byte
+                .cmp(&right.start_byte)
+                .then_with(|| left.end_byte.cmp(&right.end_byte))
+        });
+        Ok(ProbeEvidenceResolutionSet {
+            complete: intended_count <= 3
+                && all_selected_clauses_resolved
+                && windows.len() == intended_count,
+            windows,
+        })
+    }
+
+    /// Select a strict, query-relevant subrange of one already exact artifact
+    /// candidate. The caller preserves the parent citation for a bounded
+    /// expansion; failure always leaves that exact parent unchanged.
+    pub(crate) fn resolve_probe_artifact_window(
+        &self,
+        context: &AmbientContext,
+        horizon: Horizon,
+        user_query: &str,
+        artifact_id: &str,
+        revision_id: &str,
+        parent_range: (u64, u64),
+    ) -> Result<Option<ProbeEvidenceResolution>> {
+        let (parent_start, parent_end) = parent_range;
+        if parent_start >= parent_end {
+            return Ok(None);
+        }
+        let connection = self.connection.lock();
+        ensure_entity_in_read_scope(
+            &connection,
+            context,
+            EntityType::Artifact,
+            artifact_id,
+            horizon,
+        )?;
+        let revision_hash = connection
+            .query_row(
+                "SELECT blob_hash
+                   FROM artifact_revisions
+                  WHERE artifact_id = ?1 AND id = ?2",
+                params![artifact_id, revision_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(revision_hash) = revision_hash else {
+            return Ok(None);
+        };
+        let current_commit_seq: i64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'commit_seq'",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(connection);
+
+        let mut eligible = BTreeMap::new();
+        eligible.insert(
+            revision_id.to_owned(),
+            EligibleSemanticRevision {
+                entity_type: EntityType::Artifact,
+                entity_id: artifact_id.to_owned(),
+                revision_hash: revision_hash.clone(),
+            },
+        );
+        let (hits, status) = self.semantic.search_ranged_within(
+            bounded_utf8_preview(user_query, 6 * 1024),
+            &eligible,
+            1,
+            current_commit_seq,
+            parent_start,
+            parent_end,
+        )?;
+        if status.state != "ready" {
+            return Ok(None);
+        }
+        let Some(hit) = hits.into_iter().next() else {
+            return Ok(None);
+        };
+        let (Some(start_byte), Some(end_byte)) = (hit.start_byte, hit.end_byte) else {
+            return Ok(None);
+        };
+        let span_bytes = end_byte.saturating_sub(start_byte);
+        let strict_subrange = start_byte > parent_start || end_byte < parent_end;
+        if !strict_subrange
+            || start_byte < parent_start
+            || end_byte > parent_end
+            || start_byte >= end_byte
+            || span_bytes > u64::try_from(SEMANTIC_WINDOW_MAX_BYTES).unwrap_or(u64::MAX)
+        {
+            return Ok(None);
+        }
+        Ok(Some(ProbeEvidenceResolution {
+            start_byte,
+            end_byte,
+            source_revision_hash: revision_hash,
+            locator_policy_version: format!("artifact_subrange_v1/{SEMANTIC_POLICY_VERSION}"),
+        }))
+    }
+
     pub fn semantic_model_installed(&self) -> bool {
         self.semantic.is_installed()
     }
@@ -4010,8 +4247,11 @@ impl Store {
         let mut documents = Vec::new();
         let artifact_revisions = {
             let mut statement = connection.prepare(
-                "SELECT id, artifact_id, title, blob_hash, commit_seq
-                   FROM artifact_revisions ORDER BY commit_seq",
+                "SELECT ar.id, ar.artifact_id, ar.title, ar.blob_hash, ar.commit_seq,
+                        a.kind, a.component
+                   FROM artifact_revisions ar
+                   JOIN artifacts a ON a.id = ar.artifact_id
+                  ORDER BY ar.commit_seq",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((
@@ -4020,11 +4260,15 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (revision_id, artifact_id, title, revision_hash, commit_seq) in artifact_revisions {
+        for (revision_id, artifact_id, title, revision_hash, commit_seq, kind, component) in
+            artifact_revisions
+        {
             let mut semantic_ordinal = 0usize;
             for span in semantic_window_spans(&title) {
                 documents.push(SemanticDocument {
@@ -4077,7 +4321,12 @@ impl Store {
                         start_byte: Some(authority_start + span.start_byte),
                         end_byte: Some(authority_start + span.end_byte),
                         revision_hash: revision_hash.clone(),
-                        text: body[span.start_byte..span.end_byte].to_owned(),
+                        text: contextualized_semantic_passage(
+                            &title,
+                            &kind,
+                            component.as_deref(),
+                            &body[span.start_byte..span.end_byte],
+                        ),
                         commit_seq,
                     });
                     semantic_ordinal += 1;
@@ -4086,8 +4335,11 @@ impl Store {
         }
         let claim_revisions = {
             let mut statement = connection.prepare(
-                "SELECT id, claim_id, statement, commit_seq
-                   FROM claim_revisions ORDER BY commit_seq",
+                "SELECT cr.id, cr.claim_id, cr.statement, cr.commit_seq,
+                        c.claim_type, c.component
+                   FROM claim_revisions cr
+                   JOIN claims c ON c.id = cr.claim_id
+                  ORDER BY cr.commit_seq",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((
@@ -4095,11 +4347,14 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (revision_id, claim_id, statement, commit_seq) in claim_revisions {
+        for (revision_id, claim_id, statement, commit_seq, claim_type, component) in claim_revisions
+        {
             let revision_hash = semantic_claim_revision_hash(&statement);
             for (ordinal, span) in semantic_window_spans(&statement).into_iter().enumerate() {
                 documents.push(SemanticDocument {
@@ -4110,7 +4365,11 @@ impl Store {
                     start_byte: None,
                     end_byte: None,
                     revision_hash: revision_hash.clone(),
-                    text: statement[span.start_byte..span.end_byte].to_owned(),
+                    text: contextualized_semantic_claim(
+                        &claim_type,
+                        component.as_deref(),
+                        &statement[span.start_byte..span.end_byte],
+                    ),
                     commit_seq,
                 });
             }
@@ -6567,83 +6826,101 @@ fn order_hits_with_reranker(
         };
         return reranker.surface_disabled(surface, candidate_count);
     }
-    let positions = hits
-        .iter()
-        .enumerate()
-        .filter(|(_, hit)| !hit.ranking.exact_tier && hit.ranking.qualified)
-        .map(|(index, _)| index)
-        .chain(
-            hits.iter()
-                .enumerate()
-                .filter(|(_, hit)| !hit.ranking.exact_tier && !hit.ranking.qualified)
-                .map(|(index, _)| index),
-        )
-        .take(RERANKER_ORDERING_CANDIDATE_LIMIT)
-        .collect::<Vec<_>>();
+    let positions = reranker_slate_positions(hits, RERANKER_ORDERING_CANDIDATE_LIMIT);
     let passages = positions
         .iter()
         .map(|index| hits[*index].excerpt.as_str())
         .collect::<Vec<_>>();
-    let (scores, mut status) = reranker.score(query, &passages, candidate_count)?;
-    if scores.is_empty() {
+    let (order, mut status) = reranker.order(query, &passages, candidate_count)?;
+    if order.is_empty() {
         return Ok(status);
     }
-    if scores.len() != positions.len() || scores.iter().any(|score| !score.is_finite()) {
+    if order.len() != positions.len() || order.iter().any(|index| *index >= positions.len()) || {
+        let mut unique = order.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        unique.len() != positions.len()
+    } {
         return Err(MemoryError::Integrity(
-            "reranker returned invalid ordering scores".into(),
+            "reranker returned an invalid candidate permutation".into(),
         ));
     }
-    apply_reranker_scores(hits, &positions, &scores);
+    apply_reranker_order(hits, &positions, &order);
     status.ordering_applied = status.scored_candidate_count > 1;
     Ok(status)
 }
 
-fn apply_reranker_scores(hits: &mut [SearchHit], positions: &[usize], scores: &[f32]) {
-    let scored = positions
-        .iter()
-        .copied()
-        .zip(scores.iter().copied())
-        .map(|(position, score)| {
-            let mut hit = hits[position].clone();
-            hit.provenance.insert(
-                "reranker".into(),
-                json!({
-                    "policy_version": RERANKER_POLICY_VERSION,
-                    "role": "ordering_only",
-                    "raw_logit": score,
-                    "qualification_enabled": false,
-                    "scored_excerpt_equals_returned_excerpt": true,
-                }),
-            );
-            if !hit
-                .matched_by
-                .iter()
-                .any(|channel| channel == RERANKER_POLICY_VERSION)
-            {
-                hit.matched_by.push(RERANKER_POLICY_VERSION.into());
+fn reranker_slate_positions(hits: &[SearchHit], limit: usize) -> Vec<usize> {
+    let mut positions = Vec::with_capacity(limit);
+    for qualified in [true, false] {
+        let tier = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| !hit.ranking.exact_tier && hit.ranking.qualified == qualified)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let remaining = limit.saturating_sub(positions.len());
+        if remaining == 0 {
+            break;
+        }
+        if tier.len() <= remaining {
+            positions.extend(tier);
+            continue;
+        }
+
+        let fused_quota = remaining.div_ceil(2);
+        let semantic_quota = remaining / 2;
+        let mut selected = BTreeSet::new();
+        for index in tier.iter().take(fused_quota) {
+            if selected.insert(*index) {
+                positions.push(*index);
             }
-            (position, score, hit)
-        })
+        }
+
+        let mut semantic = tier.clone();
+        semantic.sort_by(|left, right| {
+            hits[*right]
+                .ranking
+                .semantic_similarity
+                .partial_cmp(&hits[*left].ranking.semantic_similarity)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.cmp(right))
+        });
+        for index in semantic.into_iter().take(semantic_quota) {
+            if selected.insert(index) {
+                positions.push(index);
+            }
+        }
+        for index in tier {
+            if positions.len() >= limit {
+                break;
+            }
+            if selected.insert(index) {
+                positions.push(index);
+            }
+        }
+    }
+    positions
+}
+
+fn apply_reranker_order(hits: &mut [SearchHit], positions: &[usize], order: &[usize]) {
+    let candidates = positions
+        .iter()
+        .map(|position| hits[*position].clone())
         .collect::<Vec<_>>();
     for qualified in [true, false] {
-        let mut targets = scored
+        let mut targets = positions
             .iter()
-            .filter(|(_, _, hit)| hit.ranking.qualified == qualified)
-            .map(|(position, _, _)| *position)
+            .copied()
+            .filter(|position| hits[*position].ranking.qualified == qualified)
             .collect::<Vec<_>>();
         targets.sort_unstable();
-        let mut ordered = scored
+        let ordered = order
             .iter()
-            .filter(|(_, _, hit)| hit.ranking.qualified == qualified)
-            .cloned()
+            .map(|index| candidates[*index].clone())
+            .filter(|hit| hit.ranking.qualified == qualified)
             .collect::<Vec<_>>();
-        ordered.sort_by(|left, right| {
-            right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        for (target, (_, _, hit)) in targets.into_iter().zip(ordered) {
+        for (target, hit) in targets.into_iter().zip(ordered) {
             hits[target] = hit;
         }
     }
@@ -8425,6 +8702,38 @@ fn artifact_chunk_spans(text: &str) -> Vec<ArtifactChunkSpan> {
 
 /// Produces deterministic, overlapping exact-byte slices small enough to avoid
 /// silently truncating evidence at the embedding model's token limit.
+fn contextualized_semantic_passage(
+    title: &str,
+    kind: &str,
+    component: Option<&str>,
+    passage: &str,
+) -> String {
+    let title = bounded_utf8_preview(title, 256);
+    let kind = bounded_utf8_preview(kind, 96);
+    let component = component.map(|value| bounded_utf8_preview(value, 128));
+    match component {
+        Some(component) => format!(
+            "Artifact title: {title}\nArtifact kind: {kind}\nComponent: {component}\nPassage: {passage}"
+        ),
+        None => format!("Artifact title: {title}\nArtifact kind: {kind}\nPassage: {passage}"),
+    }
+}
+
+fn contextualized_semantic_claim(
+    claim_type: &str,
+    component: Option<&str>,
+    statement: &str,
+) -> String {
+    let claim_type = bounded_utf8_preview(claim_type, 96);
+    let component = component.map(|value| bounded_utf8_preview(value, 128));
+    match component {
+        Some(component) => format!(
+            "Grounded claim type: {claim_type}\nComponent: {component}\nStatement: {statement}"
+        ),
+        None => format!("Grounded claim type: {claim_type}\nStatement: {statement}"),
+    }
+}
+
 fn semantic_window_spans(text: &str) -> Vec<ArtifactChunkSpan> {
     if text.is_empty() {
         return Vec::new();
@@ -8767,6 +9076,77 @@ fn lexical_tokens(source: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+/// Fixed, replayable clause decomposition for legacy claim evidence. It is
+/// deliberately lexical: no generative model can invent, merge, or rewrite a
+/// clause before authority bytes are selected.
+fn ranked_claim_evidence_clauses(statement: &str, user_query: &str) -> Vec<String> {
+    let mut pieces = statement
+        .split(['.', ';', '\n', '\r'])
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for marker in [", and ", ", but ", " while ", " because ", " so ", " and "] {
+        let mut next = Vec::new();
+        for piece in pieces {
+            let split = piece.split(marker).map(str::trim).collect::<Vec<_>>();
+            let balanced =
+                split.len() > 1 && split.iter().all(|part| lexical_tokens(part).len() >= 2);
+            if balanced {
+                next.extend(split.into_iter().map(str::to_owned));
+            } else {
+                next.push(piece);
+            }
+        }
+        pieces = next;
+    }
+
+    let query_terms = lexical_tokens(user_query)
+        .into_iter()
+        .map(|token| token.to_lowercase())
+        .filter(|token| !is_query_stopword(token))
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut ranked = pieces
+        .into_iter()
+        .take(32)
+        .enumerate()
+        .filter_map(|(ordinal, clause)| {
+            let normalized = clause.to_lowercase();
+            if !seen.insert(normalized) {
+                return None;
+            }
+            let terms = lexical_tokens(&clause)
+                .into_iter()
+                .map(|token| token.to_lowercase())
+                .filter(|token| !is_query_stopword(token))
+                .collect::<BTreeSet<_>>();
+            let shared = terms.intersection(&query_terms).count();
+            let shared_negation = ["no", "not", "never", "without", "only"]
+                .into_iter()
+                .filter(|term| terms.contains(*term) && query_terms.contains(*term))
+                .count();
+            Some((shared, shared_negation, ordinal, clause))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let mut clauses = ranked
+        .into_iter()
+        .take(8)
+        .map(|(_, _, _, clause)| clause)
+        .collect::<Vec<_>>();
+    if clauses.is_empty() && !statement.trim().is_empty() {
+        clauses.push(bounded_utf8_preview(statement.trim(), 2 * 1024).to_owned());
+    }
+    clauses
 }
 
 fn required_lexical_matches(unit_count: usize) -> usize {
@@ -9681,6 +10061,33 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn legacy_claim_clause_decomposition_is_deterministic_and_query_ranked() {
+        let statement = "The raw ceiling passed, but acceptance still requires gzip. The preload imports renderer glue; it never initializes WASM, and adapters only observe acknowledgements.";
+        let first = ranked_claim_evidence_clauses(
+            statement,
+            "Can the preload initialize the WASM compute module?",
+        );
+        let second = ranked_claim_evidence_clauses(
+            statement,
+            "Can the preload initialize the WASM compute module?",
+        );
+        assert_eq!(first, second);
+        assert!(first.len() >= 4);
+        assert!(first[0].contains("preload") || first[0].contains("WASM"));
+        assert!(first.iter().any(|clause| clause.contains("requires gzip")));
+        assert!(
+            first
+                .iter()
+                .any(|clause| clause.contains("never initializes WASM"))
+        );
+        assert!(
+            first
+                .iter()
+                .any(|clause| clause.contains("only observe acknowledgements"))
+        );
+    }
+
     fn context(project: &str) -> AmbientContext {
         context_with_task(project, Some("task"))
     }
@@ -9769,7 +10176,7 @@ mod tests {
     }
 
     #[test]
-    fn reranker_scores_only_reorder_non_exact_hits_deterministically() {
+    fn reranker_permutation_only_reorders_non_exact_hits_deterministically() {
         let evaluated_at = Utc::now();
         let profile = RecencyProfile {
             class: RecencyDecayClass::General,
@@ -9794,7 +10201,7 @@ mod tests {
             .collect::<Vec<_>>();
         let original = hits.clone();
 
-        apply_reranker_scores(&mut hits, &[2, 3], &[-4.0, 6.0]);
+        apply_reranker_order(&mut hits, &[2, 3], &[1, 0]);
         assert_eq!(
             hits[..2]
                 .iter()
@@ -9809,13 +10216,10 @@ mod tests {
         assert_eq!(hits[2].entity_id, "candidate-b");
         assert_eq!(hits[2].excerpt, "candidate-b");
         assert!(hits[2].citation.contains("candidate-b"));
-        assert_eq!(
-            hits[2].provenance["reranker"]["qualification_enabled"],
-            Value::Bool(false)
-        );
+        assert!(!hits[2].provenance.contains_key("reranker"));
 
         let mut restarted = original;
-        apply_reranker_scores(&mut restarted, &[2, 3], &[-4.0, 6.0]);
+        apply_reranker_order(&mut restarted, &[2, 3], &[1, 0]);
         assert_eq!(
             hits.iter()
                 .map(|hit| hit.entity_id.as_str())
@@ -9825,6 +10229,59 @@ mod tests {
                 .map(|hit| hit.entity_id.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn reranker_slate_is_the_deterministic_union_of_fused_and_dense_top_eight() {
+        let evaluated_at = Utc::now();
+        let profile = RecencyProfile {
+            class: RecencyDecayClass::General,
+            half_life_days: 180.0,
+            max_bonus_ratio: 0.05,
+        };
+        let mut hits = (0..32)
+            .map(|index| {
+                let mut hit =
+                    ranking_candidate(&format!("candidate-{index}"), 1.0, evaluated_at, profile)
+                        .hit;
+                hit.ranking.semantic_similarity = Some(index as f64 / 32.0);
+                hit
+            })
+            .collect::<Vec<_>>();
+        hits[0].ranking.exact_tier = true;
+        let slate = reranker_slate_positions(&hits, RERANKER_ORDERING_CANDIDATE_LIMIT);
+        let repeated = reranker_slate_positions(&hits, RERANKER_ORDERING_CANDIDATE_LIMIT);
+        assert_eq!(slate, repeated);
+        assert_eq!(slate.len(), RERANKER_ORDERING_CANDIDATE_LIMIT);
+        assert!(!slate.contains(&0));
+        for fused in 1..=8 {
+            assert!(slate.contains(&fused), "missing fused position {fused}");
+        }
+        for dense in 24..32 {
+            assert!(slate.contains(&dense), "missing dense position {dense}");
+        }
+    }
+
+    #[test]
+    fn reranker_slate_never_spends_a_qualified_slot_on_an_unqualified_hit() {
+        let evaluated_at = Utc::now();
+        let profile = RecencyProfile {
+            class: RecencyDecayClass::General,
+            half_life_days: 180.0,
+            max_bonus_ratio: 0.05,
+        };
+        let hits = (0..24)
+            .map(|index| {
+                let mut hit =
+                    ranking_candidate(&format!("tiered-{index}"), 1.0, evaluated_at, profile).hit;
+                hit.ranking.qualified = index >= 4;
+                hit.ranking.semantic_similarity = Some(index as f64 / 24.0);
+                hit
+            })
+            .collect::<Vec<_>>();
+        let slate = reranker_slate_positions(&hits, 8);
+        assert_eq!(slate, vec![4, 5, 6, 7, 23, 22, 21, 20]);
+        assert!(slate.iter().all(|index| hits[*index].ranking.qualified));
     }
 
     #[test]
@@ -10055,6 +10512,29 @@ mod tests {
                 end_byte: "short 🧭 evidence".len(),
             }]
         );
+    }
+
+    #[test]
+    fn semantic_documents_add_bounded_context_without_changing_authority_spans() {
+        let passage = "The preload never initializes WASM or a Worker.";
+        let artifact = contextualized_semantic_passage(
+            "PRELOAD-JS-53 startup preload",
+            "procedure",
+            Some("renderer"),
+            passage,
+        );
+        assert!(artifact.contains("Artifact title: PRELOAD-JS-53 startup preload"));
+        assert!(artifact.contains("Artifact kind: procedure"));
+        assert!(artifact.contains("Component: renderer"));
+        assert!(artifact.ends_with(passage));
+
+        let claim = contextualized_semantic_claim(
+            "constraint",
+            None,
+            "Canvas removal must preserve CLI operation.",
+        );
+        assert!(claim.starts_with("Grounded claim type: constraint"));
+        assert!(claim.ends_with("Canvas removal must preserve CLI operation."));
     }
 
     proptest! {

@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "evaluator": "claude-fable-5",
+  "evaluated_at": "2026-07-21",
+  "lead_depth": 8,
+  "max_fetches": 3,
+  "cases": [
+    {
+      "case_id": "paraphrase_01_solver",
+      "probe_query": "Is it possible for the client environment to execute an additional variant implemented in the front-end language?",
+      "selected_sources": ["solver_boundary_source"],
+      "verdict": "supported",
+      "refined_query": "Rust/WASM engine authoritative browser solver second solver implementation UI language prohibited"
+    },
+    {
+      "case_id": "paraphrase_02_size",
+      "probe_query": "Does staying below the non-compressed size limit imply that the rendering component has been accepted?",
+      "selected_sources": ["size_budget_source", "optimization_rejected_source"],
+      "verdict": "supported",
+      "refined_query": "SIZE-GUARD-220 raw guard does not accept renderer independent 6,000,000-byte gzip target cold-cache profile"
+    },
+    {
+      "case_id": "paraphrase_03_snapshot",
+      "probe_query": "Is it possible to load a previously persisted working environment when its runtime snapshot is stored in a different representation?",
+      "selected_sources": ["snapshot_boundary_source"],
+      "verdict": "supported",
+      "refined_query": "project snapshots engine-session snapshots separate versioned artifacts durable loadable without compatible runtime snapshot"
+    },
+    {
+      "case_id": "paraphrase_04_limits",
+      "probe_query": "Is the specification permitted to hard-code premises that only fit minimal demonstration cases?",
+      "selected_sources": ["resource_limits_source"],
+      "verdict": "supported",
+      "refined_query": "LIMITS-RUNTIME-44 protocol solver interfaces must not encode teaching-scale ceilings dense-only matrices fixed timesteps"
+    },
+    {
+      "case_id": "paraphrase_05_canvas",
+      "probe_query": "Which app features or modules remain functional if the drawing or canvas component is disabled or its code is removed; which capabilities have no dependency on drawing?",
+      "selected_sources": ["canvas_disabled_source"],
+      "verdict": "supported",
+      "refined_query": "geometry canvas disabled project loading graph transactions compilation analysis persistence snapshots CLI usable"
+    },
+    {
+      "case_id": "paraphrase_06_optimization",
+      "probe_query": "Did the more compact prototype build end up as the released version?",
+      "selected_sources": ["optimization_rejected_source"],
+      "verdict": "supported",
+      "refined_query": "OPT-HYP-09 artifact not adopted gzip 12 percent over target raw guard did not ratchet"
+    },
+    {
+      "case_id": "paraphrase_07_verification",
+      "probe_query": "Have the in-client endurance run and the appearance-verification tasks already been resolved?",
+      "selected_sources": ["verification_open_source"],
+      "verdict": "supported",
+      "refined_query": "VERIFY-PHASE-6 authenticated browser E2E visual fidelity lifecycle soak remain open"
+    },
+    {
+      "case_id": "paraphrase_08_ack",
+      "probe_query": "Which party is permitted to send the concluding confirmation?",
+      "selected_sources": ["ack_owner_source"],
+      "verdict": "supported",
+      "refined_query": "ACK-OWNER-72 engine session sole ownership exact terminal acknowledgement adapters cannot originate"
+    },
+    {
+      "case_id": "paraphrase_09_preload",
+      "probe_query": "Could preloading the initializer unintentionally launch the processing component?",
+      "selected_sources": ["preload_boundary_source"],
+      "verdict": "supported",
+      "refined_query": "PRELOAD-JS-53 single-flight preload renderer JavaScript glue never initializes WASM simulation engine Worker"
+    },
+    {
+      "case_id": "paraphrase_10_ownership",
+      "probe_query": "Which tier renders the business entities, and which tier is responsible for the enclosing user-facing shell?",
+      "selected_sources": ["ui_ownership_source"],
+      "verdict": "supported",
+      "refined_query": "RENDER-OWNER-88 retained canvas domain geometry UI framework owns product chrome panels routing accessibility"
+    },
+    {
+      "case_id": "paraphrase_11_raw_correction",
+      "probe_query": "After the migration, to which destination, queue, topic, table, or handler are successful billing or payment events routed or written?",
+      "selected_sources": ["fresh_route_correction"],
+      "verdict": "supported",
+      "refined_query": "completed charges delivered to ledger-v2 legacy-clearing retired migration operator notice"
+    }
+  ]
+}

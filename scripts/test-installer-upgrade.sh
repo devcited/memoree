@@ -36,12 +36,12 @@ trap cleanup EXIT HUP INT TERM
 
 cargo build --locked --bins
 package_dir="$test_root/memoree-$target"
-mkdir -p "$package_dir" "$server_root/releases/download/v0.4.1" \
+mkdir -p "$package_dir" "$server_root/releases/download/v0.5.0" \
   "$install_dir" "$memoree_home" "$project_dir" \
   "$user_root/.codex" "$user_root/.claude"
 install -m 755 target/debug/memoree "$package_dir/memoree"
 install -m 755 target/debug/memoree-eval "$package_dir/memoree-eval"
-archive="$server_root/releases/download/v0.4.1/memoree-$target.tar.gz"
+archive="$server_root/releases/download/v0.5.0/memoree-$target.tar.gz"
 tar -czf "$archive" -C "$test_root" "memoree-$target"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$archive" > "$archive.sha256"
@@ -98,11 +98,11 @@ CURL_CA_BUNDLE="$test_root/cert.pem" \
   CLAUDE_CONFIG_DIR="$user_root/.claude" \
   sh site/public/install.sh >/dev/null
 
-"$install_dir/memoree" --version | grep -F '0.4.1' >/dev/null
+"$install_dir/memoree" --version | grep -F '0.5.0' >/dev/null
 HOME="$user_root" MEMOREE_HOME="$memoree_home" \
   "$install_dir/memoree" update status | grep -F '"managed_install":true' >/dev/null
 HOME="$user_root" MEMOREE_HOME="$memoree_home" \
-  "$install_dir/memoree" doctor | grep -F '"binary_version":"0.4.1"' >/dev/null
+  "$install_dir/memoree" doctor | grep -F '"binary_version":"0.5.0"' >/dev/null
 (
   cd "$project_dir"
   HOME="$user_root" MEMOREE_HOME="$memoree_home" \

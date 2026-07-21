@@ -44,11 +44,13 @@ hero:
 cd /path/to/project
 memoree init --name my-project
 memoree recall "what do we know about the deployment decision?"
+memoree probe "what did we decide about deployment ownership?"
+memoree citation get 'memoree://artifact/ARTIFACT@REVISION#START-END'
 memoree context build "deployment constraints" --max-bytes 4096
 memoree remember --apply "Production deploys require a clean migration check."
 ```
 
-Normal retrieval stays within ambient project/task context. A `none` result means no qualified match at that horizon, not permission to widen the search. Any `unqualified_candidate` items remain cited leads rather than remembered facts. Broaden to workspace or personal scope only for a separate request with a reason.
+Normal retrieval stays within ambient project/task context. Pin the target repository and run every ambient command there; a `none` result means no qualified match at that horizon, not permission to widen the search. After weak recall, make one meaning-preserving implementation-language reformulation and run one depth-eight probe with `--original-query`. Fetch the highest-ranked ranged lead first and up to two title-selected leads only as needed, bounded to nine refs/12 KiB, then require a same-scope qualified recall whose entity, role, state, and facet coverage is judged against the original question. Broaden to workspace or personal scope only for a separate request with a reason.
 
 ## Understand the boundaries
 

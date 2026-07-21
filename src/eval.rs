@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     error::{MemoryError, Result},
     protocol::{
-        AmbientContext, ArtifactContent, ArtifactPutInput, ClaimAssertInput, ClaimType,
-        ConflictSummary, ContextBuildInput, ContextSource, EntityType, EvidenceLocator, Horizon,
-        Operation, RecallInput, RecallPresence, RecallResult, RecencyBiasInput, RelationPutInput,
-        RelationType, Request, SearchInput, SearchResult,
+        AmbientContext, ArtifactContent, ArtifactGetInput, ArtifactPutInput, CitationGetInput,
+        CitationGetResult, ClaimAssertInput, ClaimType, ConflictSummary, ContextBuildInput,
+        ContextSource, EntityType, EvidenceLocator, Horizon, MAX_CITATION_FETCH_BYTES, Operation,
+        ProbeInput, ProbeLead, ProbeResult, RecallInput, RecallPresence, RecallResult,
+        RecencyBiasInput, RelationPutInput, RelationType, Request, SearchInput, SearchResult,
     },
     service::MemoryService,
     store::{ArtifactRecord, ClaimRecord, MutationResult, RelationRecord, Store},
@@ -28,6 +29,10 @@ const EVAL_SCHEMA_VERSION: u32 = 2;
 const MIN_EVAL_SCHEMA_VERSION: u32 = 1;
 const CANDIDATE_POOL_PRIMARY_K: usize = 16;
 const CANDIDATE_POOL_DIAGNOSTIC_K: usize = 32;
+/// Evaluation wire budgets are conservatively rounded per response. This
+/// absorbs volatile timestamp-serialization precision without ever
+/// understating the bytes a caller would receive.
+const EVAL_WIRE_BUDGET_BLOCK_BYTES: usize = 64;
 
 const EVAL_SLICES: &[&str] = &[
     "correctness",
@@ -197,6 +202,34 @@ struct EvalCase {
     provenance: Option<EvalCaseProvenance>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeRecoverySuite {
+    schema_version: u32,
+    evaluator: String,
+    evaluated_at: String,
+    lead_depth: usize,
+    max_fetches: usize,
+    cases: Vec<ProbeRecoveryCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProbeRecoveryVerdict {
+    Supported,
+    Abstain,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeRecoveryCase {
+    case_id: String,
+    probe_query: String,
+    selected_sources: Vec<String>,
+    verdict: ProbeRecoveryVerdict,
+    refined_query: Option<String>,
+}
+
 impl EvalCase {
     fn is_answerable(&self) -> bool {
         self.answerable
@@ -293,6 +326,8 @@ pub struct RetrievalEvalReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalCaseReport {
     pub case_id: String,
+    pub original_query: String,
+    pub probe_query: String,
     pub slice: String,
     pub tags: Vec<String>,
     pub gate: String,
@@ -316,6 +351,43 @@ pub struct RetrievalCaseReport {
     /// Dense similarities for all ranked search candidates, keyed by stable
     /// corpus label. Empty when semantic retrieval is disabled.
     pub semantic_scores: BTreeMap<String, f64>,
+    pub probe_sources_at_5: Vec<String>,
+    pub probe_sources_at_8: Vec<String>,
+    pub probe_leads_at_5: Vec<ProbeLeadDiagnostic>,
+    pub probe_leads_at_8: Vec<ProbeLeadDiagnostic>,
+    pub probe_bait_sources_at_5: Vec<String>,
+    pub probe_bait_sources_at_8: Vec<String>,
+    pub probe_source_recall_at_5: Option<f64>,
+    pub probe_source_recall_at_8: Option<f64>,
+    pub probe_result_bytes_at_5: usize,
+    pub probe_result_bytes_at_8: usize,
+    pub recall_candidate_hint_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_recovery_verdict: Option<String>,
+    pub probe_selected_sources: Vec<String>,
+    pub probe_fetched_reference_count: usize,
+    pub probe_fetched_content_bytes: usize,
+    pub probe_fetched_lead_bytes: Vec<usize>,
+    pub probe_fetch_response_bytes: usize,
+    pub probe_full_artifact_response_bytes: usize,
+    pub probe_refined_result_bytes: usize,
+    pub probe_pipeline_bytes: usize,
+    pub probe_artifact_get_baseline_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_large_artifact_pipeline_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_citation_get_exact: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_recovery_path_complete: Option<bool>,
+    pub probe_recovery_path_failures: Vec<String>,
+    pub probe_refined_returned_claims: Vec<String>,
+    pub probe_refined_returned_artifacts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_recovery_succeeded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_recovery_false_answer: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_recovery_false_abstain: Option<bool>,
     pub claim_recall: Option<f64>,
     pub claim_precision: f64,
     pub claim_ndcg: Option<f64>,
@@ -328,6 +400,16 @@ pub struct RetrievalCaseReport {
     pub context_used_bytes: usize,
     pub context_max_bytes: usize,
     pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeLeadDiagnostic {
+    pub source_label: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_byte: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,6 +427,26 @@ pub struct RetrievalAggregate {
     pub candidate_pool_artifact_recall_at_32: f64,
     pub candidate_suggestion_claim_recall: f64,
     pub candidate_suggestion_artifact_recall: f64,
+    pub probe_source_recall_at_5: f64,
+    pub probe_source_recall_at_8: f64,
+    pub probe_bait_lead_rate_at_5: f64,
+    pub probe_bait_lead_rate_at_8: f64,
+    pub mean_probe_result_bytes_at_5: f64,
+    pub max_probe_result_bytes_at_5: usize,
+    pub mean_probe_result_bytes_at_8: f64,
+    pub max_probe_result_bytes_at_8: usize,
+    pub mean_recall_candidate_hint_bytes: f64,
+    pub max_recall_candidate_hint_bytes: usize,
+    pub probe_fetch_content_bytes_per_lead_p95: usize,
+    pub mean_probe_pipeline_bytes: f64,
+    pub max_probe_pipeline_bytes: usize,
+    pub max_large_artifact_pipeline_ratio: f64,
+    pub citation_get_exactness_violations: usize,
+    pub probe_bait_fetches: usize,
+    pub probe_recovery_case_count: usize,
+    pub probe_recovery_success_rate: f64,
+    pub probe_recovery_false_answer_rate: f64,
+    pub probe_recovery_false_abstain_rate: f64,
     pub false_answer_rate: f64,
     pub false_abstain_rate: f64,
     pub forbidden_returns: usize,
@@ -371,6 +473,25 @@ pub struct RetrievalSliceAggregate {
     pub candidate_pool_artifact_recall_at_32: f64,
     pub candidate_suggestion_claim_recall: f64,
     pub candidate_suggestion_artifact_recall: f64,
+    pub probe_source_recall_at_5: f64,
+    pub probe_source_recall_at_8: f64,
+    pub probe_bait_lead_rate_at_5: f64,
+    pub probe_bait_lead_rate_at_8: f64,
+    pub mean_probe_result_bytes_at_5: f64,
+    pub max_probe_result_bytes_at_5: usize,
+    pub mean_probe_result_bytes_at_8: f64,
+    pub max_probe_result_bytes_at_8: usize,
+    pub mean_recall_candidate_hint_bytes: f64,
+    pub max_recall_candidate_hint_bytes: usize,
+    pub probe_fetch_content_bytes_per_lead_p95: usize,
+    pub mean_probe_pipeline_bytes: f64,
+    pub max_probe_pipeline_bytes: usize,
+    pub max_large_artifact_pipeline_ratio: f64,
+    pub probe_bait_fetches: usize,
+    pub probe_recovery_case_count: usize,
+    pub probe_recovery_success_rate: f64,
+    pub probe_recovery_false_answer_rate: f64,
+    pub probe_recovery_false_abstain_rate: f64,
     pub false_answer_rate: f64,
     pub false_abstain_rate: f64,
     pub forbidden_returns: usize,
@@ -414,6 +535,38 @@ pub async fn run_retrieval_eval_with_models(
     let cases: Vec<EvalCase> = read_jsonl(&corpus_dir.join("cases.jsonl"))?;
     let baseline: EvalBaseline = read_json(&corpus_dir.join("baseline.json"))?;
     validate_corpus(&corpus_version, &seeds, &cases, &baseline)?;
+    let recovery_path = corpus_dir.join("probe-recovery.json");
+    let recovery_suite = recovery_path
+        .exists()
+        .then(|| read_json::<ProbeRecoverySuite>(&recovery_path))
+        .transpose()?;
+    let mut recovery_by_case = BTreeMap::new();
+    if let Some(suite) = &recovery_suite {
+        if suite.schema_version != 2
+            || suite.lead_depth != 8
+            || suite.max_fetches == 0
+            || suite.max_fetches > 3
+            || suite.evaluator.trim().is_empty()
+            || suite.evaluated_at.trim().is_empty()
+        {
+            return Err(MemoryError::InvalidRequest(
+                "probe-recovery.json has an unsupported or incomplete contract".into(),
+            ));
+        }
+        for recovery in &suite.cases {
+            if recovery.selected_sources.len() > suite.max_fetches
+                || recovery.probe_query.trim().is_empty()
+                || recovery_by_case
+                    .insert(recovery.case_id.clone(), recovery.clone())
+                    .is_some()
+            {
+                return Err(MemoryError::InvalidRequest(format!(
+                    "invalid or duplicate probe recovery case {}",
+                    recovery.case_id
+                )));
+            }
+        }
+    }
 
     let temporary = tempfile::tempdir()?;
     let service = MemoryService::new(Store::open(temporary.path())?);
@@ -437,10 +590,15 @@ pub async fn run_retrieval_eval_with_models(
     let mut hard_failures = Vec::new();
     let mut budget_violations = 0usize;
     let mut citation_parity_violations = 0usize;
+    let mut citation_get_exactness_violations = 0usize;
     let mut scope_violations = 0usize;
 
     for case in &cases {
         let ambient = case.context.ambient();
+        let recovery = recovery_by_case.get(&case.case_id);
+        let probe_query = recovery
+            .map(|recovery| recovery.probe_query.as_str())
+            .unwrap_or(case.query.as_str());
         let recall: RecallResult = read_operation(
             &service,
             Operation::MemoryRecall,
@@ -453,6 +611,36 @@ pub async fn run_retrieval_eval_with_models(
                 max_excerpt_bytes: case.max_excerpt_bytes,
                 max_candidate_claims: 3,
                 max_candidate_artifact_refs: 3,
+                min_commit_seq: None,
+                recency: RecencyBiasInput::default(),
+            },
+            &ambient,
+        )
+        .await?;
+        let probe_at_8: ProbeResult = read_operation(
+            &service,
+            Operation::MemoryProbe,
+            ProbeInput {
+                query: probe_query.to_owned(),
+                original_query: (probe_query != case.query).then(|| case.query.clone()),
+                horizon: case.horizon,
+                reason: case.reason.clone(),
+                max_leads: 8,
+                min_commit_seq: None,
+                recency: RecencyBiasInput::default(),
+            },
+            &ambient,
+        )
+        .await?;
+        let probe_at_5: ProbeResult = read_operation(
+            &service,
+            Operation::MemoryProbe,
+            ProbeInput {
+                query: probe_query.to_owned(),
+                original_query: (probe_query != case.query).then(|| case.query.clone()),
+                horizon: case.horizon,
+                reason: case.reason.clone(),
+                max_leads: 5,
                 min_commit_seq: None,
                 recency: RecencyBiasInput::default(),
             },
@@ -588,6 +776,192 @@ pub async fn run_retrieval_eval_with_models(
             &labels_by_id,
             &mut failures,
         );
+        let probe_sources_at_5 =
+            ranked_probe_source_labels(&probe_at_5, &labels_by_id, &mut failures);
+        let probe_sources_at_8 =
+            ranked_probe_source_labels(&probe_at_8, &labels_by_id, &mut failures);
+        let probe_leads_at_5 = probe_lead_diagnostics(&probe_at_5, &labels_by_id, &mut failures);
+        let probe_leads_at_8 = probe_lead_diagnostics(&probe_at_8, &labels_by_id, &mut failures);
+        let probe_bait_sources_at_5 = probe_sources_at_5
+            .iter()
+            .filter(|label| label.starts_with("embedding_bait_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let probe_bait_sources_at_8 = probe_sources_at_8
+            .iter()
+            .filter(|label| label.starts_with("embedding_bait_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut probe_refined_returned_claims = Vec::new();
+        let mut probe_refined_returned_artifacts = Vec::new();
+        let mut probe_fetched_content_bytes = 0usize;
+        let mut probe_fetched_reference_count = 0usize;
+        let mut probe_fetched_lead_bytes = Vec::new();
+        let mut probe_fetch_response_bytes = 0usize;
+        let mut probe_full_artifact_response_bytes = 0usize;
+        let mut probe_refined_result_bytes = 0usize;
+        let mut probe_citation_get_exact = recovery.map(|_| true);
+        let mut probe_recovery_path_complete = recovery.map(|recovery| {
+            !matches!(recovery.verdict, ProbeRecoveryVerdict::Supported)
+                || !recovery.selected_sources.is_empty()
+        });
+        let mut probe_recovery_path_failures = Vec::new();
+        let mut selected_has_large_artifact = false;
+        if let Some(recovery) = recovery {
+            if matches!(recovery.verdict, ProbeRecoveryVerdict::Supported)
+                && recovery.selected_sources.is_empty()
+            {
+                probe_recovery_path_failures.push("no_selected_source".into());
+            }
+            for source in &recovery.selected_sources {
+                let entity = entities.get(source).ok_or_else(|| {
+                    MemoryError::InvalidRequest(format!(
+                        "probe recovery {} selected unknown source {source}",
+                        case.case_id
+                    ))
+                })?;
+                if !matches!(entity.entity_type, EntityType::Artifact) {
+                    return Err(MemoryError::InvalidRequest(format!(
+                        "probe recovery {} selected non-artifact {source}",
+                        case.case_id
+                    )));
+                }
+                if !probe_sources_at_8.contains(source) {
+                    probe_recovery_path_complete = Some(false);
+                    probe_citation_get_exact = Some(false);
+                    probe_recovery_path_failures.push(format!("selected_source_absent:{source}"));
+                    failures.push(format!(
+                        "probe recovery selected source {source} was absent from depth-8 leads"
+                    ));
+                    continue;
+                }
+                let Some(lead) = probe_lead_for_source(&probe_at_8, source, &labels_by_id) else {
+                    probe_recovery_path_complete = Some(false);
+                    probe_citation_get_exact = Some(false);
+                    probe_recovery_path_failures
+                        .push(format!("selected_source_unresolved:{source}"));
+                    failures.push(format!(
+                        "probe recovery selected source {source} had no resolvable depth-8 lead"
+                    ));
+                    continue;
+                };
+                let full = service.store().artifact_get(&ArtifactGetInput {
+                    artifact_id: entity.entity_id.clone(),
+                    revision_id: Some(entity.revision_id.clone()),
+                    include_content: true,
+                })?;
+                probe_full_artifact_response_bytes += conservative_serialized_bytes(&full)?;
+                selected_has_large_artifact |= full.size_bytes > 32 * 1024;
+                let mut fetched_lead_bytes = 0usize;
+                let mut successful_exact_fetches = 0usize;
+                for locator in &lead.sources {
+                    probe_fetched_reference_count += 1;
+                    let Some((locator_artifact_id, Some(_))) =
+                        artifact_citation_parts(&locator.citation)
+                    else {
+                        citation_get_exactness_violations += 1;
+                        probe_citation_get_exact = Some(false);
+                        probe_recovery_path_complete = Some(false);
+                        probe_recovery_path_failures.push(format!("non_ranged_citation:{source}"));
+                        failures.push(format!(
+                            "probe recovery source {source} had malformed or non-ranged citation {}",
+                            locator.citation
+                        ));
+                        continue;
+                    };
+                    let locator_entity = labels_by_id
+                        .get(locator_artifact_id)
+                        .and_then(|label| entities.get(label))
+                        .unwrap_or(entity);
+                    match unscoped_read_operation::<_, CitationGetResult>(
+                        &service,
+                        Operation::CitationGet,
+                        CitationGetInput {
+                            citation: locator.citation.clone(),
+                            max_bytes: MAX_CITATION_FETCH_BYTES,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(fetched) => {
+                            probe_fetched_content_bytes += fetched.byte_count;
+                            fetched_lead_bytes += fetched.byte_count;
+                            probe_fetch_response_bytes += conservative_serialized_bytes(&fetched)?;
+                            if !citation_get_matches_entity(&fetched, locator_entity) {
+                                citation_get_exactness_violations += 1;
+                                probe_citation_get_exact = Some(false);
+                                probe_recovery_path_complete = Some(false);
+                                probe_recovery_path_failures
+                                    .push(format!("citation_mismatch:{source}"));
+                                failures.push(format!(
+                                    "citation.get bytes for selected source {source} did not match its immutable artifact slice"
+                                ));
+                            } else {
+                                successful_exact_fetches += 1;
+                            }
+                        }
+                        Err(error) => {
+                            citation_get_exactness_violations += 1;
+                            probe_citation_get_exact = Some(false);
+                            probe_recovery_path_complete = Some(false);
+                            probe_recovery_path_failures
+                                .push(format!("citation_fetch_failed:{source}"));
+                            failures.push(format!(
+                                "citation.get failed for selected source {source}: {error}"
+                            ));
+                        }
+                    }
+                }
+                if successful_exact_fetches == 0 {
+                    probe_recovery_path_complete = Some(false);
+                    probe_recovery_path_failures.push(format!("no_exact_fetch:{source}"));
+                }
+                probe_fetched_lead_bytes.push(fetched_lead_bytes);
+            }
+            match (recovery.verdict, recovery.refined_query.as_deref()) {
+                (ProbeRecoveryVerdict::Supported, Some(refined_query)) => {
+                    let refined: RecallResult = read_operation(
+                        &service,
+                        Operation::MemoryRecall,
+                        RecallInput {
+                            query: refined_query.to_owned(),
+                            horizon: case.horizon,
+                            reason: case.reason.clone(),
+                            max_claims: case.max_claims,
+                            max_artifact_refs: case.max_artifact_refs,
+                            max_excerpt_bytes: case.max_excerpt_bytes,
+                            max_candidate_claims: 0,
+                            max_candidate_artifact_refs: 0,
+                            min_commit_seq: None,
+                            recency: RecencyBiasInput::default(),
+                        },
+                        &ambient,
+                    )
+                    .await?;
+                    probe_refined_result_bytes = conservative_serialized_bytes(&refined)?;
+                    probe_refined_returned_claims = ranked_labels_for_ids(
+                        refined.claims.iter().map(|claim| claim.claim_id.as_str()),
+                        &labels_by_id,
+                        &mut failures,
+                    );
+                    probe_refined_returned_artifacts = ranked_labels_for_ids(
+                        refined
+                            .artifact_refs
+                            .iter()
+                            .map(|artifact| artifact.artifact_id.as_str()),
+                        &labels_by_id,
+                        &mut failures,
+                    );
+                }
+                (ProbeRecoveryVerdict::Abstain, None) => {}
+                _ => {
+                    return Err(MemoryError::InvalidRequest(format!(
+                        "probe recovery {} must pair supported with a refined query and abstain with null",
+                        case.case_id
+                    )));
+                }
+            }
+        }
         check_expected_labels(
             "claim",
             &case.relevant_claims,
@@ -600,7 +974,7 @@ pub async fn run_retrieval_eval_with_models(
             &returned_artifacts,
             &mut failures,
         );
-        let forbidden_returned = case
+        let mut forbidden_returned = case
             .forbidden
             .iter()
             .filter(|forbidden| {
@@ -608,6 +982,14 @@ pub async fn run_retrieval_eval_with_models(
             })
             .cloned()
             .collect::<Vec<_>>();
+        forbidden_returned.extend(
+            returned_artifacts
+                .iter()
+                .filter(|label| label.starts_with("embedding_bait_"))
+                .cloned(),
+        );
+        forbidden_returned.sort();
+        forbidden_returned.dedup();
         for forbidden in &forbidden_returned {
             failures.push(format!("forbidden label {forbidden} was returned"));
         }
@@ -669,6 +1051,7 @@ pub async fn run_retrieval_eval_with_models(
             .chain(returned_artifacts.iter())
             .chain(suggested_candidate_claims.iter())
             .chain(suggested_candidate_artifacts.iter())
+            .chain(probe_sources_at_8.iter())
         {
             let entity = entities.get(label).ok_or_else(|| {
                 MemoryError::Integrity(format!("returned label {label} was not seeded"))
@@ -697,8 +1080,70 @@ pub async fn run_retrieval_eval_with_models(
                 })
             })
             .collect::<BTreeMap<_, _>>();
+        let probe_recovery_grounded = recovery.map(|recovery| {
+            matches!(recovery.verdict, ProbeRecoveryVerdict::Supported)
+                && recovery
+                    .selected_sources
+                    .iter()
+                    .any(|source| case.relevant_artifacts.contains(source))
+        });
+        let probe_recovery_succeeded = recovery.map(|recovery| {
+            if answerable {
+                probe_recovery_grounded.unwrap_or(false)
+                    && probe_recovery_path_complete.unwrap_or(false)
+                    && probe_citation_get_exact == Some(true)
+                    && case
+                        .relevant_claims
+                        .iter()
+                        .all(|label| probe_refined_returned_claims.contains(label))
+                    && case
+                        .relevant_artifacts
+                        .iter()
+                        .all(|label| probe_refined_returned_artifacts.contains(label))
+            } else {
+                matches!(recovery.verdict, ProbeRecoveryVerdict::Abstain)
+            }
+        });
+        let probe_result_bytes_at_5 = conservative_serialized_bytes(&probe_at_5)?;
+        let shipped_probe_result_bytes = conservative_serialized_bytes(&probe_at_8)?;
+        let probe_pipeline_bytes = recovery
+            .map(|_| {
+                shipped_probe_result_bytes + probe_fetch_response_bytes + probe_refined_result_bytes
+            })
+            .unwrap_or(0);
+        if probe_fetched_reference_count > 9 {
+            hard_failures.push(format!(
+                "probe recovery {} fetched {} references; maximum is 9",
+                case.case_id, probe_fetched_reference_count
+            ));
+        }
+        if probe_fetched_content_bytes > 12 * 1024 {
+            hard_failures.push(format!(
+                "probe recovery {} fetched {} source bytes; maximum is 12288",
+                case.case_id, probe_fetched_content_bytes
+            ));
+        }
+        if probe_pipeline_bytes > 12 * 1024 {
+            hard_failures.push(format!(
+                "probe recovery {} used {} serialized pipeline bytes; maximum is 12288",
+                case.case_id, probe_pipeline_bytes
+            ));
+        }
+        let probe_artifact_get_baseline_bytes = recovery
+            .map(|_| {
+                shipped_probe_result_bytes
+                    + probe_full_artifact_response_bytes
+                    + probe_refined_result_bytes
+            })
+            .unwrap_or(0);
+        let probe_large_artifact_pipeline_ratio = (recovery.is_some()
+            && selected_has_large_artifact
+            && probe_artifact_get_baseline_bytes > 0)
+            .then_some(probe_pipeline_bytes as f64 / probe_artifact_get_baseline_bytes as f64);
         let report = RetrievalCaseReport {
             case_id: case.case_id.clone(),
+            original_query: case.query.clone(),
+            probe_query: probe_query.to_owned(),
             slice: case.slice.clone(),
             tags: case.tags.clone(),
             gate: match case.gate {
@@ -740,6 +1185,49 @@ pub async fn run_retrieval_eval_with_models(
             candidate_pool_claims,
             candidate_pool_artifacts,
             semantic_scores,
+            probe_leads_at_5,
+            probe_leads_at_8,
+            probe_source_recall_at_5: recall_ratio(&case.relevant_artifacts, &probe_sources_at_5),
+            probe_source_recall_at_8: recall_ratio(&case.relevant_artifacts, &probe_sources_at_8),
+            probe_result_bytes_at_5,
+            probe_result_bytes_at_8: shipped_probe_result_bytes,
+            recall_candidate_hint_bytes: recall
+                .candidates_hint
+                .as_deref()
+                .map(str::len)
+                .unwrap_or(0),
+            probe_recovery_verdict: recovery.map(|recovery| match recovery.verdict {
+                ProbeRecoveryVerdict::Supported => "supported".into(),
+                ProbeRecoveryVerdict::Abstain => "abstain".into(),
+            }),
+            probe_selected_sources: recovery
+                .map(|recovery| recovery.selected_sources.clone())
+                .unwrap_or_default(),
+            probe_fetched_reference_count,
+            probe_fetched_content_bytes,
+            probe_fetched_lead_bytes,
+            probe_fetch_response_bytes,
+            probe_full_artifact_response_bytes,
+            probe_refined_result_bytes,
+            probe_pipeline_bytes,
+            probe_artifact_get_baseline_bytes,
+            probe_large_artifact_pipeline_ratio,
+            probe_citation_get_exact,
+            probe_recovery_path_complete,
+            probe_recovery_path_failures,
+            probe_recovery_succeeded,
+            probe_recovery_false_answer: recovery
+                .map(|recovery| matches!(recovery.verdict, ProbeRecoveryVerdict::Supported))
+                .zip(probe_recovery_grounded)
+                .map(|(supported, grounded)| supported && !grounded),
+            probe_recovery_false_abstain: probe_recovery_succeeded
+                .map(|succeeded| answerable && !succeeded),
+            probe_refined_returned_claims,
+            probe_refined_returned_artifacts,
+            probe_sources_at_5,
+            probe_sources_at_8,
+            probe_bait_sources_at_5,
+            probe_bait_sources_at_8,
             claim_recall,
             claim_precision: precision(
                 &case.relevant_claims,
@@ -783,8 +1271,69 @@ pub async fn run_retrieval_eval_with_models(
         &case_reports,
         budget_violations,
         citation_parity_violations,
+        citation_get_exactness_violations,
         scope_violations,
     );
+    if semantic_model_directory.is_some() {
+        if let Some(paraphrase) = aggregate.slices.get("paraphrase") {
+            if paraphrase.probe_source_recall_at_5 + f64::EPSILON < 0.80 {
+                hard_failures.push(format!(
+                    "paraphrase probe source recall@5 {:.3} is below 0.80",
+                    paraphrase.probe_source_recall_at_5
+                ));
+            }
+            if paraphrase.probe_source_recall_at_8 + f64::EPSILON < 0.90 {
+                hard_failures.push(format!(
+                    "paraphrase probe source recall@8 {:.3} is below 0.90",
+                    paraphrase.probe_source_recall_at_8
+                ));
+            }
+            if paraphrase.probe_recovery_case_count > 0
+                && (paraphrase.probe_recovery_success_rate + f64::EPSILON < 0.90
+                    || paraphrase.probe_recovery_false_answer_rate > f64::EPSILON
+                    || paraphrase.probe_recovery_false_abstain_rate > 0.10 + f64::EPSILON)
+            {
+                hard_failures.push(format!(
+                    "paraphrase probe recovery gates failed: success {:.3}, false-answer {:.3}, false-abstain {:.3}",
+                    paraphrase.probe_recovery_success_rate,
+                    paraphrase.probe_recovery_false_answer_rate,
+                    paraphrase.probe_recovery_false_abstain_rate
+                ));
+            }
+        }
+        if aggregate.max_probe_result_bytes_at_5 > 2048
+            || aggregate.max_probe_result_bytes_at_8 > 3072
+        {
+            hard_failures.push(format!(
+                "probe byte gates exceeded: max@5 {}, max@8 {}",
+                aggregate.max_probe_result_bytes_at_5, aggregate.max_probe_result_bytes_at_8
+            ));
+        }
+        if aggregate.probe_fetch_content_bytes_per_lead_p95 > MAX_CITATION_FETCH_BYTES {
+            hard_failures.push(format!(
+                "probe exact-fetch p95 {} exceeds the {} byte hard limit",
+                aggregate.probe_fetch_content_bytes_per_lead_p95, MAX_CITATION_FETCH_BYTES
+            ));
+        }
+        if aggregate.max_large_artifact_pipeline_ratio > 0.25 + f64::EPSILON {
+            hard_failures.push(format!(
+                "probe pipeline consumed {:.3} of the artifact.get baseline for a selected artifact over 32 KiB (maximum 0.250)",
+                aggregate.max_large_artifact_pipeline_ratio
+            ));
+        }
+        if aggregate.citation_get_exactness_violations > 0 {
+            hard_failures.push(format!(
+                "citation.get had {} exactness violations",
+                aggregate.citation_get_exactness_violations
+            ));
+        }
+        if aggregate.probe_bait_fetches > 0 {
+            hard_failures.push(format!(
+                "probe recovery fetched {} semantic bait sources",
+                aggregate.probe_bait_fetches
+            ));
+        }
+    }
     let report_schema_version = baseline.schema_version;
     let baseline = compare_baseline(&aggregate, &baseline);
     let passed = hard_failures.is_empty() && baseline.passed;
@@ -1154,6 +1703,15 @@ async fn read_operation<I: Serialize, T: DeserializeOwned>(
     response_result(service.handle(request).await)
 }
 
+async fn unscoped_read_operation<I: Serialize, T: DeserializeOwned>(
+    service: &MemoryService,
+    operation: Operation,
+    input: I,
+) -> Result<T> {
+    let request = Request::new(operation, input)?;
+    response_result(service.handle(request).await)
+}
+
 fn response_result<T: DeserializeOwned>(response: crate::protocol::Response) -> Result<T> {
     if !response.ok {
         let error = response
@@ -1190,6 +1748,137 @@ fn ranked_labels_for_ids<'a>(
         }
     }
     labels
+}
+
+fn ranked_probe_source_labels(
+    probe: &ProbeResult,
+    labels_by_id: &BTreeMap<String, String>,
+    failures: &mut Vec<String>,
+) -> Vec<String> {
+    let mut sources = Vec::new();
+    let mut seen = BTreeSet::new();
+    for lead in &probe.leads {
+        let Some(source) = lead.sources.first() else {
+            failures.push("probe lead had no source locator".into());
+            continue;
+        };
+        let Some(artifact_id) = source
+            .citation
+            .strip_prefix("memoree://artifact/")
+            .and_then(|tail| tail.split_once('@').map(|(artifact_id, _)| artifact_id))
+        else {
+            failures.push(format!(
+                "probe lead had a non-artifact source citation {}",
+                source.citation
+            ));
+            continue;
+        };
+        if let Some(label) = labels_by_id.get(artifact_id) {
+            if seen.insert(label.clone()) {
+                sources.push(label.clone());
+            }
+        } else {
+            failures.push(format!("probe returned unseeded artifact {artifact_id}"));
+        }
+    }
+    sources
+}
+
+fn artifact_citation_parts(citation: &str) -> Option<(&str, Option<(usize, usize)>)> {
+    let tail = citation.strip_prefix("memoree://artifact/")?;
+    let (artifact_id, revision_and_span) = tail.split_once('@')?;
+    let span = match revision_and_span.split_once('#') {
+        Some((_, span)) => {
+            let (start, end) = span.split_once('-')?;
+            Some((start.parse().ok()?, end.parse().ok()?))
+        }
+        None => None,
+    };
+    Some((artifact_id, span))
+}
+
+fn probe_lead_diagnostics(
+    probe: &ProbeResult,
+    labels_by_id: &BTreeMap<String, String>,
+    failures: &mut Vec<String>,
+) -> Vec<ProbeLeadDiagnostic> {
+    probe
+        .leads
+        .iter()
+        .filter_map(|lead| {
+            let Some(source) = lead.sources.first() else {
+                failures.push("probe lead had no source locator".into());
+                return None;
+            };
+            let Some((artifact_id, span)) = artifact_citation_parts(&source.citation) else {
+                failures.push(format!(
+                    "probe lead had an invalid artifact citation {}",
+                    source.citation
+                ));
+                return None;
+            };
+            let Some(source_label) = labels_by_id.get(artifact_id) else {
+                failures.push(format!("probe returned unseeded artifact {artifact_id}"));
+                return None;
+            };
+            let (start_byte, end_byte) = span
+                .map(|(start, end)| (Some(start), Some(end)))
+                .unwrap_or((None, None));
+            Some(ProbeLeadDiagnostic {
+                source_label: source_label.clone(),
+                title: lead.title.clone(),
+                start_byte,
+                end_byte,
+            })
+        })
+        .collect()
+}
+
+fn probe_lead_for_source<'a>(
+    probe: &'a ProbeResult,
+    source_label: &str,
+    labels_by_id: &BTreeMap<String, String>,
+) -> Option<&'a ProbeLead> {
+    let source_matches = |source: &crate::protocol::ProbeSourceLocator| {
+        artifact_citation_parts(&source.citation)
+            .and_then(|(artifact_id, _)| labels_by_id.get(artifact_id))
+            .is_some_and(|label| label == source_label)
+    };
+    probe
+        .leads
+        .iter()
+        .find(|lead| {
+            lead.sources.iter().any(|source| {
+                source_matches(source)
+                    && artifact_citation_parts(&source.citation)
+                        .is_some_and(|(_, span)| span.is_some())
+            })
+        })
+        .or_else(|| {
+            probe
+                .leads
+                .iter()
+                .find(|lead| lead.sources.iter().any(source_matches))
+        })
+}
+
+fn citation_get_matches_entity(result: &CitationGetResult, entity: &SeededEntity) -> bool {
+    if !result.content_is_untrusted || result.byte_count != result.content.len() {
+        return false;
+    }
+    let Some((artifact_id, Some((start, end)))) = artifact_citation_parts(&result.citation) else {
+        return false;
+    };
+    if artifact_id != entity.entity_id || end.saturating_sub(start) != result.byte_count {
+        return false;
+    }
+    entity.text.as_deref().is_some_and(|text| {
+        start < end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+            && text[start..end] == result.content
+    })
 }
 
 fn check_expected_labels(
@@ -1613,9 +2302,26 @@ fn rate(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
+fn percentile_nearest_rank(mut values: Vec<usize>, percentile: f64) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = (percentile.clamp(0.0, 1.0) * values.len() as f64).ceil() as usize;
+    values[rank.saturating_sub(1).min(values.len() - 1)]
+}
+
 fn slice_aggregate(reports: &[&RetrievalCaseReport]) -> RetrievalSliceAggregate {
     let answerable_count = reports.iter().filter(|case| case.answerable).count();
     let unanswerable_count = reports.len() - answerable_count;
+    let recovery_case_count = reports
+        .iter()
+        .filter(|case| case.probe_recovery_succeeded.is_some())
+        .count();
+    let recovery_answerable_count = reports
+        .iter()
+        .filter(|case| case.answerable && case.probe_recovery_succeeded.is_some())
+        .count();
     RetrievalSliceAggregate {
         case_count: reports.len(),
         answerable_count,
@@ -1656,6 +2362,107 @@ fn slice_aggregate(reports: &[&RetrievalCaseReport]) -> RetrievalSliceAggregate 
                 .iter()
                 .filter_map(|case| case.candidate_suggestion_artifact_recall),
         ),
+        probe_source_recall_at_5: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.probe_source_recall_at_5),
+        ),
+        probe_source_recall_at_8: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.probe_source_recall_at_8),
+        ),
+        probe_bait_lead_rate_at_5: mean(reports.iter().map(|case| {
+            rate(
+                case.probe_bait_sources_at_5.len(),
+                case.probe_sources_at_5.len(),
+            )
+        })),
+        probe_bait_lead_rate_at_8: mean(reports.iter().map(|case| {
+            rate(
+                case.probe_bait_sources_at_8.len(),
+                case.probe_sources_at_8.len(),
+            )
+        })),
+        mean_probe_result_bytes_at_5: mean(
+            reports
+                .iter()
+                .map(|case| case.probe_result_bytes_at_5 as f64),
+        ),
+        max_probe_result_bytes_at_5: reports
+            .iter()
+            .map(|case| case.probe_result_bytes_at_5)
+            .max()
+            .unwrap_or(0),
+        mean_probe_result_bytes_at_8: mean(
+            reports
+                .iter()
+                .map(|case| case.probe_result_bytes_at_8 as f64),
+        ),
+        max_probe_result_bytes_at_8: reports
+            .iter()
+            .map(|case| case.probe_result_bytes_at_8)
+            .max()
+            .unwrap_or(0),
+        mean_recall_candidate_hint_bytes: mean(
+            reports
+                .iter()
+                .map(|case| case.recall_candidate_hint_bytes as f64),
+        ),
+        max_recall_candidate_hint_bytes: reports
+            .iter()
+            .map(|case| case.recall_candidate_hint_bytes)
+            .max()
+            .unwrap_or(0),
+        probe_fetch_content_bytes_per_lead_p95: percentile_nearest_rank(
+            reports
+                .iter()
+                .flat_map(|case| case.probe_fetched_lead_bytes.iter().copied())
+                .collect(),
+            0.95,
+        ),
+        mean_probe_pipeline_bytes: mean(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_succeeded.is_some())
+                .map(|case| case.probe_pipeline_bytes as f64),
+        ),
+        max_probe_pipeline_bytes: reports
+            .iter()
+            .map(|case| case.probe_pipeline_bytes)
+            .max()
+            .unwrap_or(0),
+        max_large_artifact_pipeline_ratio: reports
+            .iter()
+            .filter_map(|case| case.probe_large_artifact_pipeline_ratio)
+            .fold(0.0, f64::max),
+        probe_bait_fetches: reports
+            .iter()
+            .flat_map(|case| case.probe_selected_sources.iter())
+            .filter(|source| source.starts_with("embedding_bait_"))
+            .count(),
+        probe_recovery_case_count: recovery_case_count,
+        probe_recovery_success_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_succeeded == Some(true))
+                .count(),
+            recovery_case_count,
+        ),
+        probe_recovery_false_answer_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_false_answer == Some(true))
+                .count(),
+            recovery_case_count,
+        ),
+        probe_recovery_false_abstain_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_false_abstain == Some(true))
+                .count(),
+            recovery_answerable_count,
+        ),
         false_answer_rate: rate(
             reports
                 .iter()
@@ -1681,6 +2488,7 @@ fn aggregate_reports(
     reports: &[RetrievalCaseReport],
     budget_violations: usize,
     citation_parity_violations: usize,
+    citation_get_exactness_violations: usize,
     scope_violations: usize,
 ) -> RetrievalAggregate {
     let answerable_count = reports.iter().filter(|case| case.answerable).count();
@@ -1692,6 +2500,14 @@ fn aggregate_reports(
             .or_default()
             .push(report);
     }
+    let recovery_case_count = reports
+        .iter()
+        .filter(|case| case.probe_recovery_succeeded.is_some())
+        .count();
+    let recovery_answerable_count = reports
+        .iter()
+        .filter(|case| case.answerable && case.probe_recovery_succeeded.is_some())
+        .count();
     RetrievalAggregate {
         case_count: reports.len(),
         macro_claim_recall: mean(reports.iter().filter_map(|case| case.claim_recall)),
@@ -1729,6 +2545,108 @@ fn aggregate_reports(
             reports
                 .iter()
                 .filter_map(|case| case.candidate_suggestion_artifact_recall),
+        ),
+        probe_source_recall_at_5: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.probe_source_recall_at_5),
+        ),
+        probe_source_recall_at_8: mean(
+            reports
+                .iter()
+                .filter_map(|case| case.probe_source_recall_at_8),
+        ),
+        probe_bait_lead_rate_at_5: mean(reports.iter().map(|case| {
+            rate(
+                case.probe_bait_sources_at_5.len(),
+                case.probe_sources_at_5.len(),
+            )
+        })),
+        probe_bait_lead_rate_at_8: mean(reports.iter().map(|case| {
+            rate(
+                case.probe_bait_sources_at_8.len(),
+                case.probe_sources_at_8.len(),
+            )
+        })),
+        mean_probe_result_bytes_at_5: mean(
+            reports
+                .iter()
+                .map(|case| case.probe_result_bytes_at_5 as f64),
+        ),
+        max_probe_result_bytes_at_5: reports
+            .iter()
+            .map(|case| case.probe_result_bytes_at_5)
+            .max()
+            .unwrap_or(0),
+        mean_probe_result_bytes_at_8: mean(
+            reports
+                .iter()
+                .map(|case| case.probe_result_bytes_at_8 as f64),
+        ),
+        max_probe_result_bytes_at_8: reports
+            .iter()
+            .map(|case| case.probe_result_bytes_at_8)
+            .max()
+            .unwrap_or(0),
+        mean_recall_candidate_hint_bytes: mean(
+            reports
+                .iter()
+                .map(|case| case.recall_candidate_hint_bytes as f64),
+        ),
+        max_recall_candidate_hint_bytes: reports
+            .iter()
+            .map(|case| case.recall_candidate_hint_bytes)
+            .max()
+            .unwrap_or(0),
+        probe_fetch_content_bytes_per_lead_p95: percentile_nearest_rank(
+            reports
+                .iter()
+                .flat_map(|case| case.probe_fetched_lead_bytes.iter().copied())
+                .collect(),
+            0.95,
+        ),
+        mean_probe_pipeline_bytes: mean(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_succeeded.is_some())
+                .map(|case| case.probe_pipeline_bytes as f64),
+        ),
+        max_probe_pipeline_bytes: reports
+            .iter()
+            .map(|case| case.probe_pipeline_bytes)
+            .max()
+            .unwrap_or(0),
+        max_large_artifact_pipeline_ratio: reports
+            .iter()
+            .filter_map(|case| case.probe_large_artifact_pipeline_ratio)
+            .fold(0.0, f64::max),
+        citation_get_exactness_violations,
+        probe_bait_fetches: reports
+            .iter()
+            .flat_map(|case| case.probe_selected_sources.iter())
+            .filter(|source| source.starts_with("embedding_bait_"))
+            .count(),
+        probe_recovery_case_count: recovery_case_count,
+        probe_recovery_success_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_succeeded == Some(true))
+                .count(),
+            recovery_case_count,
+        ),
+        probe_recovery_false_answer_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_false_answer == Some(true))
+                .count(),
+            recovery_case_count,
+        ),
+        probe_recovery_false_abstain_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.probe_recovery_false_abstain == Some(true))
+                .count(),
+            recovery_answerable_count,
         ),
         false_answer_rate: rate(
             reports
@@ -1858,9 +2776,15 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
+fn conservative_serialized_bytes<T: Serialize>(value: &T) -> Result<usize> {
+    let actual = serde_json::to_vec(value)?.len();
+    Ok(actual.div_ceil(EVAL_WIRE_BUDGET_BLOCK_BYTES) * EVAL_WIRE_BUDGET_BLOCK_BYTES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[tokio::test]
     async fn committed_v1_corpus_passes_in_an_isolated_store() {
@@ -1882,12 +2806,12 @@ mod tests {
         let second = run_retrieval_eval(&corpus).await.unwrap();
         assert!(first.passed, "{:?}", first.hard_failures);
         assert_eq!(first.schema_version, 2);
-        assert_eq!(first.aggregate.case_count, 68);
+        assert_eq!(first.aggregate.case_count, 69);
         assert_eq!(first.aggregate.forbidden_returns, 0);
         assert_eq!(first.aggregate.false_answer_rate, 0.0);
         assert!(first.aggregate.false_abstain_rate > 0.0);
         assert_eq!(first.aggregate.slices["exact_identifier"].case_count, 10);
-        assert_eq!(first.aggregate.slices["paraphrase"].case_count, 10);
+        assert_eq!(first.aggregate.slices["paraphrase"].case_count, 11);
         assert_eq!(first.aggregate.slices["typo_abbreviation"].case_count, 10);
         assert_eq!(first.aggregate.slices["long_document"].case_count, 4);
         assert_eq!(
@@ -1903,10 +2827,82 @@ mod tests {
             1.0
         );
         assert_eq!(first.aggregate.slices["honest_none"].false_answer_rate, 0.0);
-        assert_eq!(
-            serde_json::to_value(&first).unwrap(),
-            serde_json::to_value(&second).unwrap()
-        );
+        let first_value = serde_json::to_value(&first).unwrap();
+        let second_value = serde_json::to_value(&second).unwrap();
+        let first_cases = serde_json::to_value(&first.cases).unwrap();
+        let second_cases = serde_json::to_value(&second.cases).unwrap();
+        if let Some((path, left, right)) =
+            first_json_difference(&first_cases, &second_cases, "$.cases".into())
+        {
+            let index = path
+                .strip_prefix("$.cases[")
+                .and_then(|path| path.split_once(']'))
+                .and_then(|(index, _)| index.parse::<usize>().ok())
+                .unwrap_or(0);
+            let first_case = &first.cases[index];
+            let second_case = &second.cases[index];
+            panic!(
+                "case evaluation changed at {path}: {left} != {right}; bytes {:?} != {:?}",
+                (
+                    &first_case.case_id,
+                    first_case.probe_result_bytes_at_8,
+                    first_case.probe_fetch_response_bytes,
+                    first_case.probe_full_artifact_response_bytes,
+                    first_case.probe_refined_result_bytes,
+                ),
+                (
+                    &second_case.case_id,
+                    second_case.probe_result_bytes_at_8,
+                    second_case.probe_fetch_response_bytes,
+                    second_case.probe_full_artifact_response_bytes,
+                    second_case.probe_refined_result_bytes,
+                )
+            );
+        }
+        if let Some((path, left, right)) =
+            first_json_difference(&first_value, &second_value, "$".into())
+        {
+            panic!("evaluation changed at {path}: {left} != {right}");
+        }
+    }
+
+    fn first_json_difference(
+        left: &Value,
+        right: &Value,
+        path: String,
+    ) -> Option<(String, Value, Value)> {
+        match (left, right) {
+            (Value::Object(left), Value::Object(right)) => {
+                let keys = left.keys().chain(right.keys()).collect::<BTreeSet<_>>();
+                for key in keys {
+                    let next = format!("{path}.{key}");
+                    match (left.get(key), right.get(key)) {
+                        (Some(left), Some(right)) => {
+                            if let Some(difference) = first_json_difference(left, right, next) {
+                                return Some(difference);
+                            }
+                        }
+                        (left, right) => {
+                            return Some((
+                                next,
+                                left.cloned().unwrap_or(Value::Null),
+                                right.cloned().unwrap_or(Value::Null),
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            (Value::Array(left), Value::Array(right)) if left.len() == right.len() => left
+                .iter()
+                .zip(right)
+                .enumerate()
+                .find_map(|(index, (left, right))| {
+                    first_json_difference(left, right, format!("{path}[{index}]"))
+                }),
+            _ if left == right => None,
+            _ => Some((path, left.clone(), right.clone())),
+        }
     }
 
     #[test]
@@ -1937,6 +2933,26 @@ mod tests {
             candidate_pool_artifact_recall_at_32: 1.0,
             candidate_suggestion_claim_recall: 1.0,
             candidate_suggestion_artifact_recall: 1.0,
+            probe_source_recall_at_5: 1.0,
+            probe_source_recall_at_8: 1.0,
+            probe_bait_lead_rate_at_5: 0.0,
+            probe_bait_lead_rate_at_8: 0.0,
+            mean_probe_result_bytes_at_5: 0.0,
+            max_probe_result_bytes_at_5: 0,
+            mean_probe_result_bytes_at_8: 0.0,
+            max_probe_result_bytes_at_8: 0,
+            mean_recall_candidate_hint_bytes: 0.0,
+            max_recall_candidate_hint_bytes: 0,
+            probe_fetch_content_bytes_per_lead_p95: 0,
+            mean_probe_pipeline_bytes: 0.0,
+            max_probe_pipeline_bytes: 0,
+            max_large_artifact_pipeline_ratio: 0.0,
+            citation_get_exactness_violations: 0,
+            probe_bait_fetches: 0,
+            probe_recovery_case_count: 0,
+            probe_recovery_success_rate: 0.0,
+            probe_recovery_false_answer_rate: 0.0,
+            probe_recovery_false_abstain_rate: 0.0,
             false_answer_rate: 0.0,
             false_abstain_rate: 0.0,
             forbidden_returns: 0,

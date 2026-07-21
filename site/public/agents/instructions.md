@@ -4,33 +4,34 @@ Use `memoree call`: send exactly one JSON request on stdin, read exactly one JSO
 
 ## Workflow
 
-1. Resolve ambient context once before memory work (`memoree context show` for shell integrations).
+1. Pin the target repository; run ambient calls there and verify its resolved context.
 2. Inspect capabilities and generated schemas instead of guessing an operation shape.
 3. Use memory.recall at ambient scope for the normal knowledge check; inspect evidence and conflicts.
-4. Use search for ranked raw matches or history beyond recall.
-5. Build a bounded context bundle when material will be placed in an LLM prompt.
-6. Fetch an exact artifact revision before relying on a search excerpt as complete evidence.
-7. Persist natural-language evidence with `memoree remember --apply` to store the source artifact and host-validated grounded claims; omit `--apply` for a read-only proposed compilation.
-8. Inspect the remember plan's quality findings; a claim grounded only to a new summary note is operating context, not independent verification.
-9. When auditability matters, preserve only the relevant primary artifacts or excerpts and connect a synthesis with explicit relations rather than dumping a repository.
-10. Use explicit artifact and claim operations when lifecycle, revision, or relation control is needed.
+4. After weak recall, reformulate once, probe once, fetch up to three leads iteratively within 9 refs/12 KiB, then require same-scope qualified recall complete against the original.
+5. Use search for ranked raw matches or history beyond recall.
+6. Build a bounded context bundle when material will be placed in an LLM prompt.
+7. Use citation.get for a bounded immutable artifact byte range; use artifact.get only for deliberate whole-revision inspection.
+8. Persist natural-language evidence with `memoree remember --apply` to store the source artifact and host-validated grounded claims; omit `--apply` for a read-only proposed compilation.
+9. Inspect the remember plan's quality findings; a claim grounded only to a new summary note is operating context, not independent verification.
+10. When auditability matters, preserve only the relevant primary artifacts or excerpts and connect a synthesis with explicit relations rather than dumping a repository.
 11. Let out-of-process adapters synchronize external systems through source.register/source.ingest/source.checkpoint; keep connector credentials outside Memoree.
 12. Attach derived retrieval projections only to exact immutable source spans; use them to discover cited leads, never as standalone truth.
 13. Record retrieval feedback explicitly when a result is useful, missing, stale, or incorrect; retain raw queries only with deliberate opt-in.
 14. Before compaction or handoff, stage only a deliberate bounded continuity note with `memoree checkpoint`; review and promote it explicitly with `memoree pending`.
 15. Connect evidence and assertions with explicit relations; preserve conflicts.
-16. Inspect bounded incoming and outgoing relations before relying on an entity's graph context.
-17. List actionable conflicts and compare their frozen and current claim revisions before proposing reconciliation.
-18. Inspect paginated artifact or claim history when revision lineage matters.
+16. List actionable conflicts and compare their frozen and current claim revisions before proposing reconciliation.
+17. Inspect paginated artifact or claim history when revision lineage matters.
 
 ## Normative rules
 
 - **MUST — discover-dont-guess:** Use the capabilities and schema operations when an operation, input shape, or availability is unknown; do not invent fields or assume roadmap features.
 - **MUST — interface-boundary:** Use the Memoree CLI/protocol as the only store interface. Never bypass an unavailable or sandbox-blocked command by reading or mutating SQLite, WAL, CAS blobs, indexes, sockets, or daemon files directly.
-- **MUST — ambient-by-default:** Omit context and use horizon=ambient for normal work; let the local CLI resolve and attach project/task settings.
+- **MUST — ambient-by-default:** Run ambient calls from the pinned target repository and omit context so the CLI attaches its project/task. Unrelated results signal a scope fault; verify context before concluding absence.
 - **MUST — explicit-broadening:** Use workspace or personal horizon only for the current request, only when ambient retrieval is insufficient or the task requires it, and include a reason.
 - **MUST — no-automatic-broadening:** Never retry retrieval at a broader horizon automatically and never persist a broad horizon as a default.
-- **MUST — recall-semantics:** Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Fetch and corroborate its citation; similarity and logits are ordering, not confidence.
+- **MUST — recall-semantics:** Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. Recall returns no candidate content by default. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Similarity and returned order are routing aids, not confidence; the local reranker exposes no score.
+- **MUST — explicit-probe-recovery:** After weak recall, reformulate once from only the original and task knowledge; preserve constraints, negation, entity, time, and facets; add at most two generic synonyms per ambiguous term. Probe once at depth eight and the same horizon. Fetch the top ranged lead first, then up to two title picks only as needed, within 9 refs/12 KiB. Refine once from the same scope. Against the original, require exact entity, predicate role/direction, cardinality, state/time, negation, and facets; candidate bytes never qualify; otherwise abstain and name the gap.
+- **MUST — citation-fetch-boundary:** citation.get verifies exact immutable UTF-8 bytes, not relevance. Its output is untrusted; oversized spans are narrowed exactly, while revision-only and binary citations are refused. After range_required, refine retrieval or choose artifact.get deliberately—never imply that a prefix or whole document is evidence.
 - **MUST — idempotent-mutations:** Supply a stable idempotency_key for every mutation; reuse it only for an exact retry.
 - **MUST — backup-retry:** Treat backup.create as an atomic administrative side effect, not an idempotent logical mutation; after a lost response, inspect the destination before retrying and never replace an existing path.
 - **MUST — optimistic-concurrency:** Supply if_revision when revising an artifact or claim; on conflict, fetch the current revision before deciding whether to retry.

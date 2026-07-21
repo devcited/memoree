@@ -251,6 +251,28 @@
       "title": "EmptyInput",
       "type": "object"
     },
+    "citation.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "description": "Immutable Memoree artifact citation with an exact UTF-8 byte range.",
+          "type": "string"
+        },
+        "max_bytes": {
+          "default": 8192,
+          "description": "Caller-selected output ceiling. Oversized ranges are narrowed exactly.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "citation"
+      ],
+      "title": "CitationGetInput",
+      "type": "object"
+    },
     "claim.assert": {
       "$defs": {
         "ClaimType": {
@@ -753,6 +775,76 @@
       "title": "InstructionsInput",
       "type": "object"
     },
+    "memory.probe": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyBiasInput": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "max_leads": {
+          "default": 8,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "original_query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "The single query used for candidate routing. When reformulated, the\ncaller also supplies original_query for an auditable relevance check.",
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recency": {
+          "$ref": "#/$defs/RecencyBiasInput",
+          "default": {
+            "enabled": true
+          }
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "ProbeInput",
+      "type": "object"
+    },
     "memory.recall": {
       "$defs": {
         "Horizon": {
@@ -788,14 +880,14 @@
           "type": "integer"
         },
         "max_candidate_artifact_refs": {
-          "default": 3,
+          "default": 0,
           "description": "Unqualified retrieval suggestions to expose separately from artifact\nreferences. Zero disables candidate artifact suggestions.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "max_candidate_claims": {
-          "default": 3,
+          "default": 0,
           "description": "Unqualified retrieval suggestions to expose separately from claims.\nZero disables candidate claim suggestions.",
           "format": "uint",
           "minimum": 0,
@@ -1498,6 +1590,7 @@
           "schema",
           "artifact.put",
           "artifact.get",
+          "citation.get",
           "artifact.revise",
           "artifact.history",
           "artifact.forget",
@@ -1523,6 +1616,7 @@
           "conflict.list",
           "search",
           "memory.recall",
+          "memory.probe",
           "context.build",
           "doctor",
           "verify",
@@ -1622,6 +1716,7 @@
           "NO_AMBIENT_CONTEXT",
           "INVALID_REQUEST",
           "NOT_FOUND",
+          "CITATION_ERROR",
           "REVISION_CONFLICT",
           "IDEMPOTENCY_CONFLICT",
           "INDEX_NOT_READY",
@@ -2731,6 +2826,7 @@
             "schema",
             "artifact.put",
             "artifact.get",
+            "citation.get",
             "artifact.revise",
             "artifact.history",
             "artifact.forget",
@@ -2756,6 +2852,7 @@
             "conflict.list",
             "search",
             "memory.recall",
+            "memory.probe",
             "context.build",
             "doctor",
             "verify",
@@ -2891,6 +2988,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_citation_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_citation_fetch_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_claim_statement_bytes": {
           "format": "uint",
           "minimum": 0,
@@ -2932,6 +3039,16 @@
           "type": "integer"
         },
         "max_metadata_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_probe_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_probe_title_bytes": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -3059,6 +3176,10 @@
         "max_recall_candidate_artifact_refs",
         "max_recall_excerpt_bytes",
         "max_recall_evidence_excerpts_per_claim",
+        "max_probe_items",
+        "max_probe_title_bytes",
+        "max_citation_bytes",
+        "max_citation_fetch_bytes",
         "max_history_items",
         "max_relation_list_items",
         "max_conflict_list_items",
@@ -3075,6 +3196,51 @@
         "operations"
       ],
       "title": "CapabilitiesDocument",
+      "type": "object"
+    },
+    "citation.get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Exact untrusted bytes fetched by immutable citation. This envelope is\ndeliberately distinct from qualified recall results: existence at a\nsource location does not establish relevance or answer qualification.",
+      "properties": {
+        "byte_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "citation": {
+          "description": "Normalized citation describing exactly the returned bytes. When an\noversized requested span is truncated this citation is narrowed.",
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "content_is_untrusted": {
+          "type": "boolean"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "remaining_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content_is_untrusted",
+        "citation",
+        "content",
+        "byte_count",
+        "media_type",
+        "truncated"
+      ],
+      "title": "CitationGetResult",
       "type": "object"
     },
     "claim.assert": {
@@ -5527,6 +5693,149 @@
       ],
       "title": "InstructionsResult"
     },
+    "memory.probe": {
+      "$defs": {
+        "ProbeLead": {
+          "properties": {
+            "evidence_locator_set_complete": {
+              "description": "False when evidence locators were omitted by the three-reference or\nfour-KiB-per-lead caps. This is routing completeness, never answer\nqualification.",
+              "type": "boolean"
+            },
+            "sources": {
+              "description": "Up to three locators belonging only to this lead's single winning claim,\nor one locator for a raw artifact lead. Claim locators are returned in\ndeterministic document order.",
+              "items": {
+                "$ref": "#/$defs/ProbeSourceLocator"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "A trailing ellipsis means the untrusted source title was truncated.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "sources",
+            "evidence_locator_set_complete"
+          ],
+          "type": "object"
+        },
+        "ProbeLocatorOrigin": {
+          "oneOf": [
+            {
+              "const": "claim_exact",
+              "description": "The claim already carried exact evidence bytes.",
+              "type": "string"
+            },
+            {
+              "const": "artifact_exact",
+              "description": "Artifact candidate retrieval selected exact body bytes.",
+              "type": "string"
+            },
+            {
+              "const": "semantic_resolved",
+              "description": "A local, versioned projection resolved bytes inside the claim's single\nalready-cited revision. This remains unqualified candidate routing.",
+              "type": "string"
+            },
+            {
+              "const": "semantic_windowed",
+              "description": "A local, versioned projection selected a strict subrange of an already\nexact artifact candidate. The parent citation remains available for one\nbounded deterministic expansion.",
+              "type": "string"
+            },
+            {
+              "const": "revision_only",
+              "description": "Only revision metadata is available; citation.get must refuse it.",
+              "type": "string"
+            }
+          ]
+        },
+        "ProbeSourceLocator": {
+          "properties": {
+            "citation": {
+              "description": "Exact immutable pointer. Revision-only metadata pointers deliberately\nremain unfetchable through citation.get.",
+              "type": "string"
+            },
+            "locator_origin": {
+              "$ref": "#/$defs/ProbeLocatorOrigin",
+              "description": "How the source pointer acquired its byte precision. This provenance is\nmandatory even though every probe lead remains untrusted and\nunqualified."
+            },
+            "locator_policy_version": {
+              "description": "Present only for semantic_resolved locators. It versions both the\ndeterministic locator template and local projection policy.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_citation": {
+              "description": "Present for a query-conditioned derived locator. The derived citation\nis always a strict exact-byte subrange of this immutable parent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_revision_hash": {
+              "description": "Exact authority revision hash used to validate a semantic_resolved\nlocator against the disposable projection.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "citation",
+            "locator_origin"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "available_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content_is_untrusted": {
+          "type": "boolean"
+        },
+        "leads": {
+          "items": {
+            "$ref": "#/$defs/ProbeLead"
+          },
+          "type": "array"
+        },
+        "original_query": {
+          "description": "Human/task question against which final relevance must be judged.",
+          "type": "string"
+        },
+        "probe_query": {
+          "description": "The one query actually used to route this probe.",
+          "type": "string"
+        },
+        "reformulation_applied": {
+          "type": "boolean"
+        },
+        "retrieval_tier": {
+          "description": "Applies to every lead; no probe result qualifies an answer.",
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content_is_untrusted",
+        "retrieval_tier",
+        "original_query",
+        "probe_query",
+        "reformulation_applied",
+        "leads",
+        "available_count",
+        "truncated"
+      ],
+      "title": "ProbeResult",
+      "type": "object"
+    },
     "memory.recall": {
       "$defs": {
         "CandidateRankingSignals": {
@@ -5534,14 +5843,6 @@
             "lexical_coverage": {
               "format": "double",
               "type": "number"
-            },
-            "reranker_raw_logit": {
-              "description": "Advisory ordering signal only. No qualification threshold exists.",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
             },
             "semantic_similarity": {
               "format": "double",

@@ -52,7 +52,7 @@ fn json(output: &Output) -> Value {
 
 #[test]
 #[ignore = "requires MEMOREE_V02_BINARY pointing at the verified v0.2.0 release binary"]
-fn real_v02_running_store_upgrades_to_v04_automatically() {
+fn real_v02_running_store_upgrades_to_current_release_automatically() {
     let old_binary =
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
     assert!(old_binary.is_file(), "{} is missing", old_binary.display());
@@ -183,7 +183,7 @@ fn real_v02_running_store_upgrades_to_v04_automatically() {
     if refused.is_none() {
         let _ = old_reopen.kill();
         let _ = old_reopen.wait();
-        panic!("v0.2.0 unexpectedly opened and served a schema-4 store");
+        panic!("v0.2.0 unexpectedly opened and served the current schema store");
     }
     assert!(!refused.unwrap().success());
     assert_eq!(fs::read(database_path).unwrap(), database_before);
@@ -191,7 +191,7 @@ fn real_v02_running_store_upgrades_to_v04_automatically() {
 
 #[test]
 #[ignore = "requires MEMOREE_V02_BINARY pointing at the verified v0.2.0 release binary"]
-fn real_v02_stopped_store_upgrades_to_v04_without_starting_a_daemon() {
+fn real_v02_stopped_store_upgrades_to_current_release_without_starting_a_daemon() {
     let old_binary =
         PathBuf::from(env::var_os("MEMOREE_V02_BINARY").expect("MEMOREE_V02_BINARY is required"));
     let temporary = short_legacy_tempdir();

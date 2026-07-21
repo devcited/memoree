@@ -49,21 +49,24 @@ precision confidence-interval lower bound of at least 0.80, recall of at least
 0.60, and conflict completeness of at least 0.90. Smaller checked-in sets remain
 useful for development diagnostics but cannot produce an acceptance verdict.
 
-Ordering-only use has a separate pre-registered local CPU gate: scoring sixteen
-short passages must remain at or below 500 ms p95 on the reference development
-machine. Passing this budget does not authorize the model to qualify or suppress
-evidence.
+Ordering-only use has a separate local CPU gate: scoring sixteen short passages
+must stay within the host-calibrated inference budget. Ten fixed warm samples
+set that budget to twice the upper median, clamped to 75–150 ms. Passing this
+budget does not authorize the model to qualify or suppress evidence.
 
-The current production policy is `cross_encoder_ordering_v2`: explicit opt-in,
-claim surface only, startup-warmed, at most sixteen non-exact candidates, and
+The current production policy is `cross_encoder_ordering_v4`: installed by a confirmed upgrade unless opted out,
+claim surface only, startup-warmed, and a per-qualification-tier union of the top
+eight fused plus top eight dense non-exact candidates, deduplicated and
+fused-backfilled to sixteen before inference in batches of eight. It is
 fail-open to deterministic fusion. Artifact and mixed surfaces are disabled
 because the realistic shadow showed no artifact uplift and materially exceeded
-the ordering budget. Three consecutive inference-only calls above 500 ms open a
-daemon-local breaker; after 32 skipped calls, one half-open probe may close it.
+the ordering budget. Five consecutive inference-only calls above the calibrated
+budget open a daemon-local breaker; after 16 skipped calls, two healthy
+half-open probes close it.
 This breaker protects subsequent requests and is not a timeout for the slow call.
 
 Default-on promotion for claims requires a cluster-robust top-3 uplift confidence
 interval whose lower bound is above zero, no private-shadow facet regression,
-inference-only p95 at or below 500 ms over at least 200 shadow queries, and a
+inference-only p95 at or below the calibrated budget over at least 200 shadow queries, and a
 breaker trip rate below one percent. Artifacts require their own positive uplift
 and latency evidence rather than inheriting claim-surface promotion.

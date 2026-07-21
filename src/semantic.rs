@@ -19,7 +19,7 @@ use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use chrono::Utc;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use parking_lot::Mutex;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use tokenizers::{
     EncodeInput, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy,
@@ -36,28 +36,36 @@ pub const SEMANTIC_MODEL_ID: &str = "snowflake/snowflake-arctic-embed-s";
 pub const SEMANTIC_MODEL_REVISION: &str = "e596f507467533e48a2e17c007f0e1dacc837b33";
 pub const SEMANTIC_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 pub const SEMANTIC_DIMENSIONS: usize = 384;
-pub const SEMANTIC_POLICY_VERSION: &str = "local_dense_v2";
-pub const RERANKER_MODEL_ID: &str = "cross-encoder/ms-marco-MiniLM-L12-v2";
-pub const RERANKER_MODEL_REVISION: &str = "7b0235231ca2674cb8ca8f022859a6eba2b1c968";
-pub const RERANKER_POLICY_VERSION: &str = "cross_encoder_ordering_v2";
-const COMPATIBLE_RERANKER_INSTALL_POLICY_VERSIONS: &[&str] =
-    &["cross_encoder_ordering_v1", "cross_encoder_ordering_v2"];
+pub const SEMANTIC_POLICY_VERSION: &str = "local_dense_context_v3";
+pub const RERANKER_MODEL_ID: &str = "cross-encoder/ms-marco-TinyBERT-L2-v2";
+pub const RERANKER_MODEL_REVISION: &str = "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc";
+pub const RERANKER_POLICY_VERSION: &str = "cross_encoder_ordering_v4";
+const COMPATIBLE_RERANKER_INSTALL_POLICY_VERSIONS: &[&str] = &[
+    "cross_encoder_ordering_v1",
+    "cross_encoder_ordering_v2",
+    "cross_encoder_ordering_v3",
+    "cross_encoder_ordering_v4",
+];
 /// Floor for retaining a dense candidate before fusion. Cosine is never an
 /// answerability threshold; it only bounds the local candidate pool.
 pub const SEMANTIC_CANDIDATE_MIN_SIMILARITY: f64 = 0.48;
 const MODEL_MANIFEST_SCHEMA: u32 = 2;
 const RERANKER_MANIFEST_SCHEMA: u32 = 1;
-const PROJECTION_SCHEMA: i64 = 1;
+const PROJECTION_SCHEMA: i64 = 2;
 const SEMANTIC_REBUILD_BATCH_SIZE: usize = 8;
 pub const RERANKER_MAX_SEQUENCE_TOKENS: usize = 256;
 pub const RERANKER_MAX_QUERY_TOKENS: usize = 96;
-pub const RERANKER_INFERENCE_BATCH_SIZE: usize = 16;
+pub const RERANKER_INFERENCE_BATCH_SIZE: usize = 8;
 pub const RERANKER_ORDERING_CANDIDATE_LIMIT: usize = 16;
-/// Pre-registered local CPU budget for ordering 16 short candidate passages.
-/// Qualification has a separate, currently unfulfilled calibration gate.
-pub const RERANKER_ORDERING_P95_BUDGET_MS: f64 = 500.0;
-pub const RERANKER_BREAKER_TRIP_THRESHOLD: usize = 3;
-pub const RERANKER_BREAKER_PROBE_AFTER_SKIPS: usize = 32;
+/// Startup calibration doubles the upper median of ten warm, fixed 16-pair
+/// samples, then clamps the breaker budget to this portable range. The model
+/// remains ordering-only; this calibration is not an answerability gate.
+pub const RERANKER_ORDERING_BUDGET_FLOOR_MS: f64 = 75.0;
+pub const RERANKER_ORDERING_BUDGET_CEILING_MS: f64 = 150.0;
+pub const RERANKER_CALIBRATION_SAMPLE_COUNT: usize = 10;
+pub const RERANKER_BREAKER_TRIP_THRESHOLD: usize = 5;
+pub const RERANKER_BREAKER_PROBE_AFTER_SKIPS: usize = 16;
+pub const RERANKER_BREAKER_CLOSE_AFTER_PROBES: usize = 2;
 const MODEL_FILES: &[(&str, &str)] = &[
     ("model.safetensors", "model.safetensors"),
     ("tokenizer.json", "tokenizer.json"),
@@ -72,6 +80,31 @@ const RERANKER_FILES: &[(&str, &str)] = &[
     ("special_tokens_map.json", "special_tokens_map.json"),
     ("tokenizer_config.json", "tokenizer_config.json"),
 ];
+/// Digests are compiled into the signed Memoree release. A pinned Hub commit
+/// identifies the snapshot; these hashes independently authenticate the exact
+/// bytes before activation or startup.
+const RERANKER_EXPECTED_BLAKE3: &[(&str, &str)] = &[
+    (
+        "config.json",
+        "59abdfa33a0d45232ea5d22498b9ef4798423df03374083980ffa55ef31ed87a",
+    ),
+    (
+        "model.safetensors",
+        "50860a9a6651c93dbf80a1ddd76b089282e2c21de3d1ad2cec8e42f17dadd4b7",
+    ),
+    (
+        "special_tokens_map.json",
+        "9975701cad2206293b95afeb93a10d52673523cb212b2e6f613052e264f74ac9",
+    ),
+    (
+        "tokenizer.json",
+        "6e933bf59db40b8b2a0de480fe5006662770757e1e1671eb7e48ff6a5f00b0b4",
+    ),
+    (
+        "tokenizer_config.json",
+        "fd30862e7473e3585960297abf74e498ee3451124d458e7662884d21b85da78b",
+    ),
+];
 
 const PROJECTION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -79,7 +112,8 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 ) STRICT;
 INSERT OR IGNORE INTO meta(key, value) VALUES
-    ('schema_version', '1'),
+    ('schema_version', '2'),
+    ('policy_version', ''),
     ('model_id', ''),
     ('model_revision', ''),
     ('indexed_commit_seq', '0'),
@@ -146,7 +180,7 @@ impl RerankerRetrievalStatus {
             model_load_latency_ms: None,
             breaker: RerankerCircuitBreakerStatus {
                 state: "closed".into(),
-                budget_ms: RERANKER_ORDERING_P95_BUDGET_MS,
+                budget_ms: RERANKER_ORDERING_BUDGET_FLOOR_MS,
                 trip_threshold: RERANKER_BREAKER_TRIP_THRESHOLD,
                 consecutive_over_budget: 0,
                 probe_after_skips: RERANKER_BREAKER_PROBE_AFTER_SKIPS,
@@ -214,6 +248,13 @@ pub(crate) struct SemanticHit {
     pub start_byte: Option<u64>,
     pub end_byte: Option<u64>,
     pub similarity: f64,
+}
+
+#[derive(Clone, Copy)]
+struct SemanticSearchOptions {
+    require_byte_range: bool,
+    required_parent_range: Option<(u64, u64)>,
+    collapse_per_revision: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -342,9 +383,10 @@ impl CandleReranker {
         let device = Device::Cpu;
         let config: BertConfig =
             serde_json::from_slice(&fs::read(model_directory.join("config.json"))?)?;
-        if config.hidden_size != 384
-            || !matches!(config.num_hidden_layers, 6 | 12)
-            || config.max_position_embeddings < RERANKER_MAX_SEQUENCE_TOKENS
+        if !matches!(
+            (config.hidden_size, config.num_hidden_layers),
+            (128, 2) | (384, 6 | 12)
+        ) || config.max_position_embeddings < RERANKER_MAX_SEQUENCE_TOKENS
         {
             return Err(MemoryError::Integrity(
                 "Candle reranker model configuration is incompatible".into(),
@@ -480,6 +522,41 @@ impl CandleReranker {
     }
 }
 
+fn calibrated_reranker_budget_from_median(median_ms: f64) -> f64 {
+    (median_ms * 2.0).clamp(
+        RERANKER_ORDERING_BUDGET_FLOOR_MS,
+        RERANKER_ORDERING_BUDGET_CEILING_MS,
+    )
+}
+
+fn calibrate_reranker_budget(runtime: &mut CandleReranker) -> Result<f64> {
+    let query = "Which exact memory source resolves the implementation constraint?";
+    let passages = (0..RERANKER_ORDERING_CANDIDATE_LIMIT)
+        .map(|index| {
+            format!(
+                "Candidate {index}: immutable cited evidence preserves the implementation constraint and its material qualifier."
+            )
+        })
+        .collect::<Vec<_>>();
+    let passage_refs = passages.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut samples_ms = Vec::with_capacity(RERANKER_CALIBRATION_SAMPLE_COUNT);
+    for _ in 0..RERANKER_CALIBRATION_SAMPLE_COUNT {
+        let started = Instant::now();
+        let scores = runtime.score(query, &passage_refs)?;
+        if scores.len() != passage_refs.len() {
+            return Err(MemoryError::Integrity(
+                "reranker calibration returned an invalid score count".into(),
+            ));
+        }
+        samples_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples_ms.sort_by(f64::total_cmp);
+    // For an even sample count, use the upper middle sample. This is stable,
+    // conservative, and avoids averaging away a real slower half.
+    let upper_median_ms = samples_ms[samples_ms.len() / 2];
+    Ok(calibrated_reranker_budget_from_median(upper_median_ms))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RerankerBreakerPhase {
     Closed,
@@ -507,16 +584,20 @@ enum RerankerPermit {
 #[derive(Debug)]
 struct RerankerBreaker {
     phase: RerankerBreakerPhase,
+    budget_ms: f64,
     consecutive_over_budget: usize,
     skipped_since_open: usize,
+    half_open_successes: usize,
 }
 
 impl Default for RerankerBreaker {
     fn default() -> Self {
         Self {
             phase: RerankerBreakerPhase::Closed,
+            budget_ms: RERANKER_ORDERING_BUDGET_FLOOR_MS,
             consecutive_over_budget: 0,
             skipped_since_open: 0,
+            half_open_successes: 0,
         }
     }
 }
@@ -525,12 +606,13 @@ impl RerankerBreaker {
     fn permit(&mut self) -> RerankerPermit {
         match self.phase {
             RerankerBreakerPhase::Closed => RerankerPermit::Score,
-            RerankerBreakerPhase::HalfOpen => RerankerPermit::Skip,
+            RerankerBreakerPhase::HalfOpen => RerankerPermit::Probe,
             RerankerBreakerPhase::Open
                 if self.skipped_since_open >= RERANKER_BREAKER_PROBE_AFTER_SKIPS =>
             {
                 self.phase = RerankerBreakerPhase::HalfOpen;
                 self.skipped_since_open = 0;
+                self.half_open_successes = 0;
                 RerankerPermit::Probe
             }
             RerankerBreakerPhase::Open => {
@@ -541,7 +623,7 @@ impl RerankerBreaker {
     }
 
     fn record(&mut self, permit: RerankerPermit, inference_latency_ms: f64) {
-        let over_budget = inference_latency_ms > RERANKER_ORDERING_P95_BUDGET_MS;
+        let over_budget = inference_latency_ms > self.budget_ms;
         match permit {
             RerankerPermit::Score => {
                 if over_budget {
@@ -549,6 +631,7 @@ impl RerankerBreaker {
                     if self.consecutive_over_budget >= RERANKER_BREAKER_TRIP_THRESHOLD {
                         self.phase = RerankerBreakerPhase::Open;
                         self.skipped_since_open = 0;
+                        self.half_open_successes = 0;
                     }
                 } else {
                     self.consecutive_over_budget = 0;
@@ -559,10 +642,15 @@ impl RerankerBreaker {
                     self.phase = RerankerBreakerPhase::Open;
                     self.consecutive_over_budget = RERANKER_BREAKER_TRIP_THRESHOLD;
                     self.skipped_since_open = 0;
+                    self.half_open_successes = 0;
                 } else {
-                    self.phase = RerankerBreakerPhase::Closed;
                     self.consecutive_over_budget = 0;
                     self.skipped_since_open = 0;
+                    self.half_open_successes += 1;
+                    if self.half_open_successes >= RERANKER_BREAKER_CLOSE_AFTER_PROBES {
+                        self.phase = RerankerBreakerPhase::Closed;
+                        self.half_open_successes = 0;
+                    }
                 }
             }
             RerankerPermit::Skip => {}
@@ -573,17 +661,21 @@ impl RerankerBreaker {
         if permit == RerankerPermit::Probe {
             self.phase = RerankerBreakerPhase::Open;
             self.skipped_since_open = 0;
+            self.half_open_successes = 0;
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::default();
+    fn reset(&mut self, budget_ms: f64) {
+        *self = Self {
+            budget_ms,
+            ..Self::default()
+        };
     }
 
     fn public(&self) -> RerankerCircuitBreakerStatus {
         RerankerCircuitBreakerStatus {
             state: self.phase.as_str().into(),
-            budget_ms: RERANKER_ORDERING_P95_BUDGET_MS,
+            budget_ms: self.budget_ms,
             trip_threshold: RERANKER_BREAKER_TRIP_THRESHOLD,
             consecutive_over_budget: self.consecutive_over_budget,
             probe_after_skips: RERANKER_BREAKER_PROBE_AFTER_SKIPS,
@@ -640,10 +732,16 @@ impl RerankerManager {
         // The warm-up is deliberately outside request handling. Its timing is
         // not breaker input and it never contributes ranking output.
         runtime.score("memory retrieval warmup", &["memory retrieval warmup"])?;
+        let budget_ms = calibrate_reranker_budget(&mut runtime)?;
         *self.runtime.lock() = Some(runtime);
         *self.model_load_latency_ms.lock() = Some(model_load_latency_ms);
         *self.initialization_error.lock() = None;
-        self.breaker.lock().reset();
+        self.breaker.lock().reset(budget_ms);
+        tracing::info!(
+            reranker_budget_ms = budget_ms,
+            calibration_samples = RERANKER_CALIBRATION_SAMPLE_COUNT,
+            "calibrated local reranker latency breaker"
+        );
         Ok(())
     }
 
@@ -675,10 +773,9 @@ impl RerankerManager {
             let target = staging.path().join(target_name);
             fs::write(&target, &bytes)?;
             set_private_file(&target)?;
-            files.insert(
-                (*target_name).to_owned(),
-                blake3::hash(&bytes).to_hex().to_string(),
-            );
+            let digest = blake3::hash(&bytes).to_hex().to_string();
+            verify_pinned_reranker_digest(target_name, &digest)?;
+            files.insert((*target_name).to_owned(), digest);
         }
         let manifest = RerankerManifest::new(files);
         self.activate_staged_model(&staging, &manifest)?;
@@ -707,10 +804,9 @@ impl RerankerManager {
             let target = staging.path().join(target_name);
             fs::write(&target, &bytes)?;
             set_private_file(&target)?;
-            files.insert(
-                (*target_name).to_owned(),
-                blake3::hash(&bytes).to_hex().to_string(),
-            );
+            let digest = blake3::hash(&bytes).to_hex().to_string();
+            verify_pinned_reranker_digest(target_name, &digest)?;
+            files.insert((*target_name).to_owned(), digest);
         }
         let manifest = RerankerManifest::new(files);
         self.activate_staged_model(&staging, &manifest)?;
@@ -727,6 +823,7 @@ impl RerankerManager {
         let mut validated = CandleReranker::load(staging.path())?;
         let model_load_latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         validated.score("memory retrieval warmup", &["memory retrieval warmup"])?;
+        let budget_ms = calibrate_reranker_budget(&mut validated)?;
         let manifest_bytes = serde_json::to_vec_pretty(manifest)?;
         let staged_manifest = staging.path().join("model-manifest.json");
         fs::write(&staged_manifest, &manifest_bytes)?;
@@ -755,7 +852,12 @@ impl RerankerManager {
         *self.verified_manifest.lock() = Some(manifest.clone());
         *self.model_load_latency_ms.lock() = Some(model_load_latency_ms);
         *self.initialization_error.lock() = None;
-        self.breaker.lock().reset();
+        self.breaker.lock().reset(budget_ms);
+        tracing::info!(
+            reranker_budget_ms = budget_ms,
+            calibration_samples = RERANKER_CALIBRATION_SAMPLE_COUNT,
+            "calibrated installed reranker latency breaker"
+        );
         Ok(())
     }
 
@@ -831,12 +933,12 @@ impl RerankerManager {
         Ok(status)
     }
 
-    pub fn score(
+    pub fn order(
         &self,
         query: &str,
         passages: &[&str],
         candidate_count: usize,
-    ) -> Result<(Vec<f32>, RerankerRetrievalStatus)> {
+    ) -> Result<(Vec<usize>, RerankerRetrievalStatus)> {
         if passages.is_empty() {
             let mut status = self.status()?;
             status.surface = "claim".into();
@@ -904,9 +1006,21 @@ impl RerankerManager {
                 return Err(error);
             }
         };
+        if scores.len() != passages.len() || scores.iter().any(|score| !score.is_finite()) {
+            self.breaker.lock().abort(permit);
+            return Err(MemoryError::Integrity(
+                "reranker returned invalid ordering output".into(),
+            ));
+        }
+        let mut order = (0..scores.len()).collect::<Vec<_>>();
+        order.sort_by(|left, right| {
+            scores[*right]
+                .total_cmp(&scores[*left])
+                .then_with(|| left.cmp(right))
+        });
         self.breaker.lock().record(permit, inference_latency_ms);
         Ok((
-            scores,
+            order,
             RerankerRetrievalStatus {
                 state: "ready".into(),
                 policy_version: RERANKER_POLICY_VERSION.into(),
@@ -923,7 +1037,8 @@ impl RerankerManager {
                 model_load_latency_ms: *self.model_load_latency_ms.lock(),
                 breaker: self.breaker.lock().public(),
                 reason: Some(
-                    "raw logits are advisory ordering metadata; qualification is disabled".into(),
+                    "the local model returned candidate order only; qualification is disabled"
+                        .into(),
                 ),
             },
         ))
@@ -999,10 +1114,30 @@ fn validate_reranker_manifest_shape(
         || !policy_compatible
         || manifest.role != "ordering_only"
         || manifest.files.keys().cloned().collect::<BTreeSet<_>>() != expected_files
+        || manifest.files
+            != RERANKER_EXPECTED_BLAKE3
+                .iter()
+                .map(|(name, digest)| ((*name).to_owned(), (*digest).to_owned()))
+                .collect::<BTreeMap<_, _>>()
     {
         return Err(MemoryError::Integrity(
             "reranker model manifest is incompatible".into(),
         ));
+    }
+    Ok(())
+}
+
+fn verify_pinned_reranker_digest(name: &str, actual: &str) -> Result<()> {
+    let expected = RERANKER_EXPECTED_BLAKE3
+        .iter()
+        .find_map(|(candidate, digest)| (*candidate == name).then_some(*digest))
+        .ok_or_else(|| {
+            MemoryError::Integrity(format!("reranker model file {name} is not pinned"))
+        })?;
+    if actual != expected {
+        return Err(MemoryError::Integrity(format!(
+            "reranker model file {name} failed signed-release digest verification"
+        )));
     }
     Ok(())
 }
@@ -1323,6 +1458,7 @@ impl SemanticManager {
         }
         for (key, value) in [
             ("schema_version", PROJECTION_SCHEMA.to_string()),
+            ("policy_version", SEMANTIC_POLICY_VERSION.to_owned()),
             ("model_id", manifest.model_id.clone()),
             ("model_revision", manifest.model_revision.clone()),
             ("indexed_commit_seq", indexed_commit_seq.to_string()),
@@ -1357,6 +1493,80 @@ impl SemanticManager {
         limit: usize,
         current_commit_seq: i64,
     ) -> Result<(Vec<SemanticHit>, SemanticRetrievalStatus)> {
+        self.search_with_span_requirement(
+            query,
+            eligible,
+            limit,
+            current_commit_seq,
+            SemanticSearchOptions {
+                require_byte_range: false,
+                required_parent_range: None,
+                collapse_per_revision: true,
+            },
+        )
+    }
+
+    /// Return multiple exact windows from the same immutable revision. Each
+    /// projection row remains an exact byte locator; callers are responsible
+    /// for imposing their own diversity and byte budgets.
+    pub fn search_ranged_windows(
+        &self,
+        query: &str,
+        eligible: &BTreeMap<String, EligibleSemanticRevision>,
+        limit: usize,
+        current_commit_seq: i64,
+    ) -> Result<(Vec<SemanticHit>, SemanticRetrievalStatus)> {
+        self.search_with_span_requirement(
+            query,
+            eligible,
+            limit,
+            current_commit_seq,
+            SemanticSearchOptions {
+                require_byte_range: true,
+                required_parent_range: None,
+                collapse_per_revision: false,
+            },
+        )
+    }
+
+    /// Search exact-byte projection rows wholly contained by one immutable
+    /// parent range. This enables subtractive re-windowing without allowing the
+    /// query to move a lead elsewhere in the revision.
+    pub fn search_ranged_within(
+        &self,
+        query: &str,
+        eligible: &BTreeMap<String, EligibleSemanticRevision>,
+        limit: usize,
+        current_commit_seq: i64,
+        parent_start: u64,
+        parent_end: u64,
+    ) -> Result<(Vec<SemanticHit>, SemanticRetrievalStatus)> {
+        self.search_with_span_requirement(
+            query,
+            eligible,
+            limit,
+            current_commit_seq,
+            SemanticSearchOptions {
+                require_byte_range: true,
+                required_parent_range: Some((parent_start, parent_end)),
+                collapse_per_revision: true,
+            },
+        )
+    }
+
+    fn search_with_span_requirement(
+        &self,
+        query: &str,
+        eligible: &BTreeMap<String, EligibleSemanticRevision>,
+        limit: usize,
+        current_commit_seq: i64,
+        options: SemanticSearchOptions,
+    ) -> Result<(Vec<SemanticHit>, SemanticRetrievalStatus)> {
+        let SemanticSearchOptions {
+            require_byte_range,
+            required_parent_range,
+            collapse_per_revision,
+        } = options;
         if eligible.is_empty() {
             return Ok((Vec::new(), self.status(current_commit_seq, eligible)?));
         }
@@ -1379,6 +1589,39 @@ impl SemanticManager {
                 ),
             ));
         }
+        let connection = Connection::open_with_flags(
+            self.projection_path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let indexed_commit_seq = meta_i64(&connection, "indexed_commit_seq")?;
+        let projection_schema = meta_i64_optional(&connection, "schema_version")?.unwrap_or(0);
+        let projection_policy = meta_string_optional(&connection, "policy_version")?;
+        let projection_model_id = meta_string(&connection, "model_id")?;
+        let projection_model_revision = meta_string(&connection, "model_revision")?;
+        if projection_schema != PROJECTION_SCHEMA
+            || projection_policy.as_deref() != Some(SEMANTIC_POLICY_VERSION)
+            || projection_model_id != manifest.model_id
+            || projection_model_revision != manifest.model_revision
+        {
+            return Ok((
+                Vec::new(),
+                SemanticRetrievalStatus {
+                    state: "stale".into(),
+                    policy_version: SEMANTIC_POLICY_VERSION.into(),
+                    model_id: Some(manifest.model_id),
+                    model_revision: Some(manifest.model_revision),
+                    indexed_commit_seq,
+                    current_commit_seq,
+                    eligible_revision_count: eligible.len(),
+                    indexed_revision_count: 0,
+                    coverage: 0.0,
+                    reason: Some(
+                        "semantic projection was built by a different indexing policy or model revision; run `memoree semantic rebuild`"
+                            .into(),
+                    ),
+                },
+            ));
+        }
         let query_embedding = {
             let mut runtime = self.runtime.lock();
             if runtime.is_none() {
@@ -1396,35 +1639,6 @@ impl SemanticManager {
             normalize_embedding(&mut embedding)?;
             embedding
         };
-        let connection = Connection::open_with_flags(
-            self.projection_path(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let indexed_commit_seq = meta_i64(&connection, "indexed_commit_seq")?;
-        let projection_model_id = meta_string(&connection, "model_id")?;
-        let projection_model_revision = meta_string(&connection, "model_revision")?;
-        if projection_model_id != manifest.model_id
-            || projection_model_revision != manifest.model_revision
-        {
-            return Ok((
-                Vec::new(),
-                SemanticRetrievalStatus {
-                    state: "stale".into(),
-                    policy_version: SEMANTIC_POLICY_VERSION.into(),
-                    model_id: Some(manifest.model_id),
-                    model_revision: Some(manifest.model_revision),
-                    indexed_commit_seq,
-                    current_commit_seq,
-                    eligible_revision_count: eligible.len(),
-                    indexed_revision_count: 0,
-                    coverage: 0.0,
-                    reason: Some(
-                        "semantic projection was built by a different model revision; run `memoree semantic rebuild`"
-                            .into(),
-                    ),
-                },
-            ));
-        }
         let revision_json = serde_json::to_string(&eligible.keys().collect::<Vec<_>>())?;
         let mut statement = connection.prepare(
             "SELECT entity_type, entity_id, revision_id, start_byte, end_byte,
@@ -1443,10 +1657,25 @@ impl SemanticManager {
                 row.get::<_, Vec<u8>>(6)?,
             ))
         })?;
-        let mut best = BTreeMap::<(String, String), SemanticHit>::new();
+        let mut best = BTreeMap::<(String, String, Option<i64>, Option<i64>), SemanticHit>::new();
         let mut indexed_revisions = BTreeSet::new();
         for row in rows {
             let (entity_type, entity_id, revision_id, start, end, revision_hash, bytes) = row?;
+            if require_byte_range && (start.is_none() || end.is_none()) {
+                continue;
+            }
+            if let Some((parent_start, parent_end)) = required_parent_range {
+                let (Some(start), Some(end)) = (start, end) else {
+                    continue;
+                };
+                if start < 0
+                    || end < 0
+                    || (start as u64) < parent_start
+                    || (end as u64) > parent_end
+                {
+                    continue;
+                }
+            }
             let Some(expected) = eligible.get(&revision_id) else {
                 continue;
             };
@@ -1467,7 +1696,12 @@ impl SemanticManager {
                 end_byte: end.map(|value| value as u64),
                 similarity,
             };
-            best.entry((entity_type, revision_id))
+            let key = if collapse_per_revision {
+                (entity_type, revision_id, None, None)
+            } else {
+                (entity_type, revision_id, start, end)
+            };
+            best.entry(key)
                 .and_modify(|current| {
                     if hit.similarity > current.similarity {
                         *current = hit.clone();
@@ -1482,6 +1716,8 @@ impl SemanticManager {
                 .partial_cmp(&left.similarity)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.revision_id.cmp(&right.revision_id))
+                .then_with(|| left.start_byte.cmp(&right.start_byte))
+                .then_with(|| left.end_byte.cmp(&right.end_byte))
         });
         hits.retain(|hit| hit.similarity >= SEMANTIC_CANDIDATE_MIN_SIMILARITY);
         hits.truncate(limit);
@@ -1537,9 +1773,13 @@ impl SemanticManager {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let indexed_commit_seq = meta_i64(&connection, "indexed_commit_seq")?;
+        let projection_schema = meta_i64_optional(&connection, "schema_version")?.unwrap_or(0);
+        let projection_policy = meta_string_optional(&connection, "policy_version")?;
         let projection_model_id = meta_string(&connection, "model_id")?;
         let projection_model_revision = meta_string(&connection, "model_revision")?;
-        if projection_model_id != manifest.model_id
+        if projection_schema != PROJECTION_SCHEMA
+            || projection_policy.as_deref() != Some(SEMANTIC_POLICY_VERSION)
+            || projection_model_id != manifest.model_id
             || projection_model_revision != manifest.model_revision
         {
             return Ok(SemanticRetrievalStatus {
@@ -1553,7 +1793,7 @@ impl SemanticManager {
                 indexed_revision_count: 0,
                 coverage: 0.0,
                 reason: Some(
-                    "semantic projection was built by a different model revision; run `memoree semantic rebuild`"
+                    "semantic projection was built by a different indexing policy or model revision; run `memoree semantic rebuild`"
                         .into(),
                 ),
             });
@@ -1771,12 +2011,30 @@ fn meta_i64(connection: &Connection, key: &str) -> Result<i64> {
     })
 }
 
+fn meta_i64_optional(connection: &Connection, key: &str) -> Result<Option<i64>> {
+    meta_string_optional(connection, key)?
+        .map(|value| {
+            value.parse().map_err(|error| {
+                MemoryError::Integrity(format!("semantic metadata {key} is invalid: {error}"))
+            })
+        })
+        .transpose()
+}
+
 fn meta_string(connection: &Connection, key: &str) -> Result<String> {
     Ok(
         connection.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
             row.get(0)
         })?,
     )
+}
+
+fn meta_string_optional(connection: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()?)
 }
 
 fn semantic_error(error: impl std::fmt::Display) -> MemoryError {
@@ -1815,26 +2073,51 @@ mod tests {
     };
 
     #[test]
-    fn reranker_breaker_trips_only_after_three_consecutive_slow_inferences() {
+    fn reranker_breaker_trips_only_after_five_consecutive_slow_inferences() {
         let mut breaker = RerankerBreaker::default();
+        let slow = breaker.public().budget_ms + 1.0;
+        let fast = breaker.public().budget_ms - 1.0;
         assert_eq!(breaker.permit(), RerankerPermit::Score);
-        breaker.record(RerankerPermit::Score, 501.0);
+        breaker.record(RerankerPermit::Score, slow);
         assert_eq!(breaker.public().consecutive_over_budget, 1);
-        breaker.record(RerankerPermit::Score, 499.0);
+        breaker.record(RerankerPermit::Score, fast);
         assert_eq!(breaker.public().consecutive_over_budget, 0);
-        breaker.record(RerankerPermit::Score, 501.0);
-        breaker.record(RerankerPermit::Score, 502.0);
-        assert_eq!(breaker.public().state, "closed");
-        breaker.record(RerankerPermit::Score, 503.0);
+        for expected in 1..RERANKER_BREAKER_TRIP_THRESHOLD {
+            breaker.record(RerankerPermit::Score, slow);
+            assert_eq!(breaker.public().consecutive_over_budget, expected);
+            assert_eq!(breaker.public().state, "closed");
+        }
+        breaker.record(RerankerPermit::Score, slow);
         assert_eq!(breaker.public().state, "open");
-        assert_eq!(breaker.public().consecutive_over_budget, 3);
+        assert_eq!(
+            breaker.public().consecutive_over_budget,
+            RERANKER_BREAKER_TRIP_THRESHOLD
+        );
     }
 
     #[test]
-    fn reranker_breaker_probes_after_exactly_thirty_two_skips() {
+    fn reranker_breaker_ignores_sparse_latency_spikes() {
         let mut breaker = RerankerBreaker::default();
+        let budget = breaker.public().budget_ms;
+        for index in 0..10_000 {
+            let latency = if index % 20 == 0 {
+                budget * 1.5
+            } else {
+                budget * 0.9
+            };
+            assert_eq!(breaker.permit(), RerankerPermit::Score);
+            breaker.record(RerankerPermit::Score, latency);
+        }
+        assert_eq!(breaker.public().state, "closed");
+    }
+
+    #[test]
+    fn reranker_breaker_probes_after_sixteen_skips_and_closes_after_two_successes() {
+        let mut breaker = RerankerBreaker::default();
+        let slow = breaker.public().budget_ms + 1.0;
+        let fast = breaker.public().budget_ms - 1.0;
         for _ in 0..RERANKER_BREAKER_TRIP_THRESHOLD {
-            breaker.record(RerankerPermit::Score, 501.0);
+            breaker.record(RerankerPermit::Score, slow);
         }
         for expected in 1..=RERANKER_BREAKER_PROBE_AFTER_SKIPS {
             assert_eq!(breaker.permit(), RerankerPermit::Skip);
@@ -1842,9 +2125,34 @@ mod tests {
         }
         assert_eq!(breaker.permit(), RerankerPermit::Probe);
         assert_eq!(breaker.public().state, "half_open");
-        breaker.record(RerankerPermit::Probe, 499.0);
+        breaker.record(RerankerPermit::Probe, fast);
+        assert_eq!(breaker.public().state, "half_open");
+        assert_eq!(breaker.permit(), RerankerPermit::Probe);
+        breaker.record(RerankerPermit::Probe, fast);
         assert_eq!(breaker.public().state, "closed");
         assert_eq!(breaker.public().consecutive_over_budget, 0);
+    }
+
+    #[test]
+    fn reranker_breaker_reopens_after_one_slow_half_open_probe() {
+        let mut breaker = RerankerBreaker::default();
+        let slow = breaker.public().budget_ms + 1.0;
+        for _ in 0..RERANKER_BREAKER_TRIP_THRESHOLD {
+            breaker.record(RerankerPermit::Score, slow);
+        }
+        for _ in 0..RERANKER_BREAKER_PROBE_AFTER_SKIPS {
+            assert_eq!(breaker.permit(), RerankerPermit::Skip);
+        }
+        assert_eq!(breaker.permit(), RerankerPermit::Probe);
+        breaker.record(RerankerPermit::Probe, slow);
+        assert_eq!(breaker.public().state, "open");
+    }
+
+    #[test]
+    fn reranker_calibration_budget_is_doubled_and_clamped() {
+        assert_eq!(calibrated_reranker_budget_from_median(20.0), 75.0);
+        assert_eq!(calibrated_reranker_budget_from_median(58.0), 116.0);
+        assert_eq!(calibrated_reranker_budget_from_median(120.0), 150.0);
     }
 
     #[test]
@@ -1880,34 +2188,17 @@ mod tests {
     }
 
     #[test]
-    fn v1_reranker_install_manifest_loads_without_rewrite() {
-        let temporary = tempfile::tempdir().unwrap();
-        // Construct before publishing the fixture so startup warm-up is not
-        // involved; this test isolates read-path manifest compatibility.
-        let manager = RerankerManager::new(temporary.path());
-        fs::create_dir_all(manager.model_dir()).unwrap();
-        let mut files = BTreeMap::new();
-        for (name, _) in RERANKER_FILES {
-            let bytes = format!("fixture-{name}").into_bytes();
-            fs::write(manager.model_dir().join(name), &bytes).unwrap();
-            files.insert(
-                (*name).to_owned(),
-                blake3::hash(&bytes).to_hex().to_string(),
-            );
-        }
+    fn compatible_reranker_policy_still_requires_release_pinned_bytes() {
+        let files = RERANKER_EXPECTED_BLAKE3
+            .iter()
+            .map(|(name, digest)| ((*name).to_owned(), (*digest).to_owned()))
+            .collect();
         let mut manifest = RerankerManifest::new(files);
         manifest.policy_version = "cross_encoder_ordering_v1".into();
         assert!(validate_compatible_reranker_manifest_shape(&manifest).is_ok());
         assert!(validate_current_reranker_manifest_shape(&manifest).is_err());
-        let frozen = serde_json::to_vec_pretty(&manifest).unwrap();
-        fs::write(manager.manifest_path(), &frozen).unwrap();
-
-        manager.verified_manifest().unwrap();
-        let status = manager.status().unwrap();
-
-        assert_eq!(status.state, "ready");
-        assert_eq!(status.policy_version, "cross_encoder_ordering_v2");
-        assert_eq!(fs::read(manager.manifest_path()).unwrap(), frozen);
+        manifest.files.insert("config.json".into(), "wrong".into());
+        assert!(validate_compatible_reranker_manifest_shape(&manifest).is_err());
     }
 
     #[test]
@@ -1917,7 +2208,7 @@ mod tests {
             .map(|(name, _)| ((*name).to_owned(), "fixture-digest".into()))
             .collect();
         let mut manifest = RerankerManifest::new(files);
-        manifest.policy_version = "cross_encoder_ordering_v3".into();
+        manifest.policy_version = "unknown_ordering_policy".into();
         assert!(validate_compatible_reranker_manifest_shape(&manifest).is_err());
         assert!(validate_current_reranker_manifest_shape(&manifest).is_err());
     }
@@ -1990,6 +2281,8 @@ mod tests {
         let projection = Connection::open(manager.projection_path()).unwrap();
         projection.execute_batch(PROJECTION_SQL).unwrap();
         for (key, value) in [
+            ("schema_version", "2"),
+            ("policy_version", SEMANTIC_POLICY_VERSION),
             ("model_id", SEMANTIC_MODEL_ID),
             ("model_revision", SEMANTIC_MODEL_REVISION),
             ("indexed_commit_seq", "7"),
@@ -2023,6 +2316,28 @@ mod tests {
         assert_eq!(ready.state, "ready");
         assert_eq!(ready.indexed_revision_count, 1);
         assert_eq!(ready.coverage, 1.0);
+
+        projection
+            .execute(
+                "UPDATE meta SET value = 'local_dense_v2' WHERE key = 'policy_version'",
+                [],
+            )
+            .unwrap();
+        let stale_policy = manager.status(7, &eligible).unwrap();
+        assert_eq!(stale_policy.state, "stale");
+        assert_eq!(stale_policy.coverage, 0.0);
+        assert!(
+            stale_policy
+                .reason
+                .unwrap()
+                .contains("different indexing policy")
+        );
+        projection
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'policy_version'",
+                [SEMANTIC_POLICY_VERSION],
+            )
+            .unwrap();
 
         eligible.get_mut("revision-1").unwrap().revision_hash = "changed".into();
         let stale = manager.status(8, &eligible).unwrap();
@@ -2222,15 +2537,17 @@ mod tests {
                     "warm_p50_ms": percentile(50, 100),
                     "warm_p95_ms": warm_p95_ms,
                     "warm_max_ms": *samples_ms.last().unwrap(),
-                    "ordering_p95_budget_ms": RERANKER_ORDERING_P95_BUDGET_MS,
-                    "within_ordering_budget": batch_size != 16
-                        || warm_p95_ms <= RERANKER_ORDERING_P95_BUDGET_MS,
+                    "ordering_budget_floor_ms": RERANKER_ORDERING_BUDGET_FLOOR_MS,
+                    "ordering_budget_ceiling_ms": RERANKER_ORDERING_BUDGET_CEILING_MS,
+                    "calibrated_budget_from_p50_ms": calibrated_reranker_budget_from_median(percentile(50, 100)),
+                    "within_ordering_budget": batch_size != RERANKER_INFERENCE_BATCH_SIZE
+                        || warm_p95_ms <= RERANKER_ORDERING_BUDGET_CEILING_MS,
                 })
             );
-            if batch_size == 16 {
+            if batch_size == RERANKER_INFERENCE_BATCH_SIZE {
                 assert!(
-                    warm_p95_ms <= RERANKER_ORDERING_P95_BUDGET_MS,
-                    "batch-16 p95 {warm_p95_ms:.3}ms exceeds the pre-registered ordering budget of {RERANKER_ORDERING_P95_BUDGET_MS:.3}ms"
+                    warm_p95_ms <= RERANKER_ORDERING_BUDGET_CEILING_MS,
+                    "batch-{RERANKER_INFERENCE_BATCH_SIZE} p95 {warm_p95_ms:.3}ms exceeds the adaptive ordering ceiling of {RERANKER_ORDERING_BUDGET_CEILING_MS:.3}ms"
                 );
             }
         }

@@ -24,12 +24,18 @@ pub const MAX_CLAIM_STATEMENT_BYTES: usize = 128 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_EVIDENCE_ITEMS: usize = 128;
 pub const MAX_SEARCH_ITEMS: usize = 100;
-pub const MAX_RECALL_CANDIDATE_CLAIMS: usize = 5;
-pub const MAX_RECALL_CANDIDATE_ARTIFACT_REFS: usize = 5;
+pub const MAX_RECALL_CANDIDATE_CLAIMS: usize = 16;
+pub const MAX_RECALL_CANDIDATE_ARTIFACT_REFS: usize = 16;
 pub const MAX_RECALL_CLAIMS: usize = 10;
 pub const MAX_RECALL_ARTIFACT_REFS: usize = 20;
 pub const MAX_RECALL_EXCERPT_BYTES: usize = 1024;
 pub const MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM: usize = 4;
+pub const MAX_PROBE_ITEMS: usize = 8;
+pub const MAX_PROBE_TITLE_BYTES: usize = 48;
+pub const MAX_PROBE_SOURCES_PER_LEAD: usize = 3;
+pub const MAX_PROBE_EVIDENCE_BYTES_PER_LEAD: usize = 4 * 1024;
+pub const MAX_CITATION_BYTES: usize = 1024;
+pub const MAX_CITATION_FETCH_BYTES: usize = 8 * 1024;
 pub const MAX_HISTORY_ITEMS: usize = 100;
 pub const MAX_RELATION_LIST_ITEMS: usize = 100;
 pub const MAX_CONFLICT_LIST_ITEMS: usize = 100;
@@ -97,6 +103,8 @@ pub enum Operation {
     ArtifactPut,
     #[serde(rename = "artifact.get")]
     ArtifactGet,
+    #[serde(rename = "citation.get")]
+    CitationGet,
     #[serde(rename = "artifact.revise")]
     ArtifactRevise,
     #[serde(rename = "artifact.history")]
@@ -147,6 +155,8 @@ pub enum Operation {
     Search,
     #[serde(rename = "memory.recall")]
     MemoryRecall,
+    #[serde(rename = "memory.probe")]
+    MemoryProbe,
     #[serde(rename = "context.build")]
     ContextBuild,
     #[serde(rename = "doctor")]
@@ -212,6 +222,7 @@ impl Operation {
                 | Self::ConflictList
                 | Self::Search
                 | Self::MemoryRecall
+                | Self::MemoryProbe
                 | Self::ContextBuild
         )
     }
@@ -391,6 +402,16 @@ fn error_details(error: &crate::error::MemoryError) -> Value {
             "received_version": received,
             "supported_version": PROTOCOL_VERSION,
         }),
+        crate::error::MemoryError::Citation { kind, details, .. } => {
+            let mut details = details.clone();
+            if !details.is_object() {
+                details = serde_json::json!({});
+            }
+            if let Some(object) = details.as_object_mut() {
+                object.insert("citation_error".into(), Value::String((*kind).into()));
+            }
+            details
+        }
         _ => Value::Null,
     }
 }
@@ -412,6 +433,7 @@ pub enum ErrorCode {
     NoAmbientContext,
     InvalidRequest,
     NotFound,
+    CitationError,
     RevisionConflict,
     IdempotencyConflict,
     IndexNotReady,
@@ -485,6 +507,20 @@ pub struct ArtifactGetInput {
     pub revision_id: Option<String>,
     #[serde(default = "default_true")]
     pub include_content: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CitationGetInput {
+    /// Immutable Memoree artifact citation with an exact UTF-8 byte range.
+    pub citation: String,
+    /// Caller-selected output ceiling. Oversized ranges are narrowed exactly.
+    #[serde(default = "default_citation_fetch_bytes")]
+    pub max_bytes: usize,
+}
+
+fn default_citation_fetch_bytes() -> usize {
+    MAX_CITATION_FETCH_BYTES
 }
 
 fn default_true() -> bool {
@@ -961,11 +997,11 @@ fn default_recall_excerpt_bytes() -> usize {
 }
 
 fn default_recall_candidate_claims() -> usize {
-    3
+    0
 }
 
 fn default_recall_candidate_artifact_refs() -> usize {
-    3
+    0
 }
 
 fn default_search_limit() -> usize {
@@ -992,6 +1028,30 @@ pub struct ContextBuildInput {
     pub search: SearchInput,
     #[serde(default = "default_context_bytes")]
     pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeInput {
+    /// The single query used for candidate routing. When reformulated, the
+    /// caller also supplies original_query for an auditable relevance check.
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_query: Option<String>,
+    #[serde(default)]
+    pub horizon: Horizon,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default = "default_probe_items")]
+    pub max_leads: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_commit_seq: Option<i64>,
+    #[serde(default)]
+    pub recency: RecencyBiasInput,
+}
+
+fn default_probe_items() -> usize {
+    8
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1256,9 +1316,6 @@ pub struct CandidateRankingSignals {
     pub trigram_similarity: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_similarity: Option<f64>,
-    /// Advisory ordering signal only. No qualification threshold exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reranker_raw_logit: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1326,6 +1383,93 @@ pub struct RecallResult {
     pub claims_refine_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_refs_refine_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeLocatorOrigin {
+    /// The claim already carried exact evidence bytes.
+    ClaimExact,
+    /// Artifact candidate retrieval selected exact body bytes.
+    ArtifactExact,
+    /// A local, versioned projection resolved bytes inside the claim's single
+    /// already-cited revision. This remains unqualified candidate routing.
+    SemanticResolved,
+    /// A local, versioned projection selected a strict subrange of an already
+    /// exact artifact candidate. The parent citation remains available for one
+    /// bounded deterministic expansion.
+    SemanticWindowed,
+    /// Only revision metadata is available; citation.get must refuse it.
+    RevisionOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProbeSourceLocator {
+    /// Exact immutable pointer. Revision-only metadata pointers deliberately
+    /// remain unfetchable through citation.get.
+    pub citation: String,
+    /// How the source pointer acquired its byte precision. This provenance is
+    /// mandatory even though every probe lead remains untrusted and
+    /// unqualified.
+    pub locator_origin: ProbeLocatorOrigin,
+    /// Present only for semantic_resolved locators. It versions both the
+    /// deterministic locator template and local projection policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator_policy_version: Option<String>,
+    /// Exact authority revision hash used to validate a semantic_resolved
+    /// locator against the disposable projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision_hash: Option<String>,
+    /// Present for a query-conditioned derived locator. The derived citation
+    /// is always a strict exact-byte subrange of this immutable parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_citation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProbeLead {
+    /// A trailing ellipsis means the untrusted source title was truncated.
+    pub title: String,
+    /// Up to three locators belonging only to this lead's single winning claim,
+    /// or one locator for a raw artifact lead. Claim locators are returned in
+    /// deterministic document order.
+    pub sources: Vec<ProbeSourceLocator>,
+    /// False when evidence locators were omitted by the three-reference or
+    /// four-KiB-per-lead caps. This is routing completeness, never answer
+    /// qualification.
+    pub evidence_locator_set_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProbeResult {
+    pub content_is_untrusted: bool,
+    /// Applies to every lead; no probe result qualifies an answer.
+    pub retrieval_tier: String,
+    /// Human/task question against which final relevance must be judged.
+    pub original_query: String,
+    /// The one query actually used to route this probe.
+    pub probe_query: String,
+    pub reformulation_applied: bool,
+    pub leads: Vec<ProbeLead>,
+    pub available_count: usize,
+    pub truncated: bool,
+}
+
+/// Exact untrusted bytes fetched by immutable citation. This envelope is
+/// deliberately distinct from qualified recall results: existence at a
+/// source location does not establish relevance or answer qualification.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CitationGetResult {
+    pub content_is_untrusted: bool,
+    /// Normalized citation describing exactly the returned bytes. When an
+    /// oversized requested span is truncated this citation is narrowed.
+    pub citation: String,
+    pub content: String,
+    pub byte_count: usize,
+    pub media_type: String,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1504,8 +1648,8 @@ mod tests {
         assert_eq!(input.max_claims, 5);
         assert_eq!(input.max_artifact_refs, 3);
         assert_eq!(input.max_excerpt_bytes, 320);
-        assert_eq!(input.max_candidate_claims, 3);
-        assert_eq!(input.max_candidate_artifact_refs, 3);
+        assert_eq!(input.max_candidate_claims, 0);
+        assert_eq!(input.max_candidate_artifact_refs, 0);
         assert!(input.recency.enabled);
         assert!(!Operation::MemoryRecall.is_mutating());
         assert!(Operation::MemoryRecall.needs_context());
@@ -1519,6 +1663,42 @@ mod tests {
                 "include_historical": true
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn probe_defaults_to_a_small_explicit_unqualified_read() {
+        let input: ProbeInput = serde_json::from_value(serde_json::json!({
+            "query": "paraphrased deployment decision"
+        }))
+        .unwrap();
+        assert_eq!(input.max_leads, 8);
+        assert!(!Operation::MemoryProbe.is_mutating());
+        assert!(Operation::MemoryProbe.needs_context());
+        assert_eq!(
+            serde_json::to_value(Operation::MemoryProbe).unwrap(),
+            "memory.probe"
+        );
+
+        let unknown = serde_json::json!({
+            "query": "deployment",
+            "trust_candidates": true
+        });
+        assert!(serde_json::from_value::<ProbeInput>(unknown).is_err());
+    }
+
+    #[test]
+    fn citation_get_is_context_free_and_bounded_by_default() {
+        let input: CitationGetInput = serde_json::from_value(serde_json::json!({
+            "citation": "memoree://artifact/art_1@arev_1#4-12"
+        }))
+        .unwrap();
+        assert_eq!(input.max_bytes, MAX_CITATION_FETCH_BYTES);
+        assert!(!Operation::CitationGet.is_mutating());
+        assert!(!Operation::CitationGet.needs_context());
+        assert_eq!(
+            serde_json::to_value(Operation::CitationGet).unwrap(),
+            "citation.get"
         );
     }
 
@@ -1537,6 +1717,22 @@ mod tests {
         assert_eq!(details["entity_type"], "artifact");
         assert_eq!(details["current_revision"], "arev_2");
         assert_eq!(details["requested_revision"], "arev_1");
+
+        let citation = Response::failure(
+            "req_citation",
+            &crate::error::MemoryError::Citation {
+                kind: "range_required",
+                message: "ranged evidence is required".into(),
+                details: serde_json::json!({
+                    "citation": "memoree://artifact/art_1@arev_1",
+                    "total_byte_count": 40000,
+                }),
+            },
+        );
+        let error = citation.error.unwrap();
+        assert_eq!(error.code, ErrorCode::CitationError);
+        assert_eq!(error.details["citation_error"], "range_required");
+        assert_eq!(error.details["total_byte_count"], 40000);
 
         let index = Response::failure(
             "req_index",

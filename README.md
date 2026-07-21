@@ -34,7 +34,7 @@ Install the current checksummed release on macOS or Linux without `sudo`:
 curl --proto '=https' --tlsv1.2 -sfL https://memoree.dev/install.sh | sh
 ```
 
-The installer supports Apple Silicon and Intel macOS plus ARM64 and x86_64 Linux, downloads the matching checksummed release through `memoree.dev`, and writes to `~/.local/bin` by default. A fresh install starts no service. An update records whether the default Memoree-owned daemon was running, atomically replaces the binaries, creates a private verified pre-migration snapshot, migrates and verifies the store, rebuilds an already-enabled semantic projection without downloading models, synchronizes the canonical skill into existing Codex/Claude homes, and restores the original running/stopped state. Explicit or supervisor-owned endpoints are reported and never restarted.
+The installer supports Apple Silicon and Intel macOS plus ARM64 and x86_64 Linux, downloads the matching checksummed release through `memoree.dev`, and writes to `~/.local/bin` by default. A fresh install starts no service. An update records whether the default Memoree-owned daemon was running, atomically replaces the binaries, creates a private verified pre-migration snapshot, migrates and verifies the store, rebuilds an already-enabled semantic projection, installs the release-pinned ordering model unless opted out, synchronizes the canonical skill into detected Codex/Claude homes, and restores the original running/stopped state. Explicit or supervisor-owned endpoints are reported and never restarted; retrieval itself never downloads models.
 
 From v0.4 onward, installer-managed copies check the discovery feed at most every six hours on eligible interactive starts. A new release requires one terminal confirmation; protocol stdin, daemon, CI, session, and non-interactive commands never prompt. The unsigned pointer cannot authorize code: the binary verifies a separate Ed25519-signed manifest containing the exact installer and target archive SHA-256 digests, runs the full installer/reconciler, then re-executes the original command once. Declining suppresses that version; `MEMOREE_AUTO_UPDATE=off` disables checks. A v0.3 binary predates this mechanism and therefore needs one manual installer run to cross the bootstrap boundary. Inspect the script first or choose a destination and version as documented at [memoree.dev/install](https://memoree.dev/install/). Windows is not yet a native target; use WSL2 until the local transport has Windows parity.
 
@@ -130,6 +130,8 @@ memoree pending preview CHECKPOINT_ID
 memoree artifact put ./decision.md --kind decision --title "Storage decision"
 memoree claim assert observation "Checkout terms are draft." --valid-until 2026-08-01T00:00:00Z --evidence ARTIFACT_ID@REVISION_ID#START-END
 memoree recall "what do we know about storage?"
+memoree probe "what did we decide about the storage boundary?"
+memoree citation get 'memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END'
 memoree search "why was the storage design chosen?"
 memoree context build "storage constraints" --max-bytes 4096
 memoree relation list artifact:ARTIFACT_ID --direction outgoing
@@ -142,7 +144,9 @@ The final command materializes text or binary content atomically and reports the
 
 Recall is the normal agent-facing lookup. It keeps claims and raw source matches in separate arrays, attaches immutable evidence citations such as `memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END`, marks conflicted claims as `disputed`, and reports only the horizon it actually searched. `artifacts_only` means useful source material matched but no current claim did; `none` means no match at that horizon, not permission to broaden automatically.
 
-Recall also returns up to three candidate claims and artifact references by default. Every item is labelled `retrieval_tier=unqualified_candidate`; candidates never affect `presence`, omit claim status/evidence hydration, and are excluded from `context.build`. Use them as cited leads: fetch the exact revision, inspect artifact risk signals, and corroborate with a refined query before relying on one. Set either candidate limit to `0` to suppress that channel; the bounded maximum is five.
+Recall returns qualified claims and artifact references only by default. If scoped, lifecycle-filtered unqualified leads exist, its small `candidates_hint` can direct an agent to one explicit `memoree probe` call. After one meaning-preserving implementation-language reformulation, probe returns at most eight untrusted titles plus provenance-labeled exact immutable source arrays; it never affects `presence` or `context.build`. From the pinned target repository, fetch the highest-ranked ranged lead first, then up to two title-selected leads only as needed, bounded to nine refs/12 KiB. Use decisive source terms for one same-scope qualified recall judged against every entity, predicate role, state, and facet in the original question. Candidate/fetched bytes never qualify an answer. If support is partial, conflicted, role-mismatched, or absent, abstain.
+
+`citation get` accepts only immutable artifact citations. A ranged UTF-8 citation returns escaped untrusted text and a citation naming exactly the returned bytes; spans over 8 KiB are safely narrowed. Revision-only citations return machine-readable metadata with `range_required` instead of dumping a misleading prefix, while binary content is refused. Whole-revision `artifact get` remains a deliberate inspection path.
 
 Schema 5 adds cited derived projections to this same candidate channel. `projection.put` requires an immutable artifact revision plus one or more exact raw byte spans; a hit returns raw source bytes and a stable `memoree://artifact/...#START-END` citation, not derived prose as evidence. `source.register`, `source.ingest`, `source.checkpoint`, and `source.withdraw` form the connector-neutral synchronization boundary. `feedback.record` stores a keyed query fingerprint by default; raw query retention is opt-in, and only retained cases appear in `feedback.export`. Feedback never changes live ranking automatically.
 
@@ -151,11 +155,11 @@ Optional local semantic retrieval is candidate-only. It is installed and rebuilt
 ```sh
 memoree semantic enable
 memoree semantic status
-memoree semantic enable-reranker   # opt-in, claim ordering only
+memoree semantic enable-reranker   # explicit reinstall; confirmed upgrades install it by default
 memoree semantic reranker-status
 ```
 
-Dense similarity cannot qualify an answer. Exact-tier ordering is model-independent. The cross-encoder cannot qualify or suppress evidence, is disabled for artifacts and mixed searches, warms at daemon startup, and trips open after three consecutive inference calls above its 500 ms budget. An open breaker skips later model ordering and preserves deterministic fused results; it is not a per-query latency guarantee.
+Dense similarity cannot qualify an answer. The contextual dense projection embeds bounded artifact metadata with exact passage bytes and claim type/component with the exact statement; it remains disposable and rebuilds automatically when its projection policy changes. Exact-tier ordering is model-independent. The release-pinned TinyBERT cross-encoder returns only a stable claim-candidate permutation over a diversified slate: top eight deterministic-fusion positions union top eight dense positions, deduplicated and backfilled to sixteen inside each qualification tier. No logit is serialized or persisted, qualification tiers cannot be crossed, and artifacts/mixed searches remain disabled. At daemon startup, ten fixed warm samples set an inference-only breaker budget to twice the upper median, clamped to 75–150 ms. Five consecutive overruns open the breaker; it probes after 16 deterministic fallbacks and requires two healthy probes to close.
 
 Recall, search, and context construction apply the bounded recency policy by default. The `memoree recall`, `memoree search`, and `memoree context build` wrappers accept `--no-recency` for one retrieval; raw `memoree call` clients can send `"recency":{"enabled":false}` on `memory.recall`, `search`, or `context.build`.
 
