@@ -19,6 +19,7 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - The local reranker exposes only a stable permutation, cannot cross exact or qualification tiers, serializes no logits, orders a diversified top-eight fused plus top-eight dense slate in batches of eight, and calibrates a 75–150 ms host-specific breaker budget from ten fixed startup samples; five consecutive overruns open it, with faster two-probe recovery.
 - The canonical `use-memoree` skill now pins the target repository, fetches the highest-ranked ranged lead followed by up to two title-selected leads only as needed within nine references/12 KiB, requires exact predicate-role/facet matching, and finishes with one same-scope qualified recall judged against the original question.
 - Confirmed upgrades atomically refresh that canonical skill in every detected Codex and Claude home while preserving differing prior copies.
+- Daemon autostart and upgrade restart now share a bounded 30-second cold-model readiness window and fail immediately when the spawned process exits.
 
 ## [0.4.1] - 2026-07-20
 

@@ -4,9 +4,9 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
+    process::{Child, Command as ProcessCommand, Stdio},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -60,6 +60,8 @@ const ENDPOINT_ENV: &str = "MEMOREE_ENDPOINT";
 const ACTOR_ENV: &str = "MEMOREE_ACTOR";
 const NO_AUTOSTART_ENV: &str = "MEMOREE_NO_AUTOSTART";
 const DAEMON_CHILD_ENV: &str = "MEMOREE_DAEMON_CHILD";
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1906,30 +1908,33 @@ async fn apply_upgrade(
     drop(daemon_data_lock);
     let should_restart = state.prior_daemon_running && (daemon_stopped || observed.is_none());
     let daemon = if should_restart {
-        if let Err(error) = start_daemon(&endpoint, paths) {
-            state.set_phase("daemon_restart_failed");
-            write_upgrade_state(paths, &state)?;
-            warnings.push(format!("new daemon could not be started: {error}"));
-            let report = UpgradeApplyReport {
-                from_version: previous_daemon_version,
-                to_version: env!("CARGO_PKG_VERSION").into(),
-                authority,
-                daemon: json!({
-                    "state": "restart_failed",
-                    "running_before": true,
-                    "remediation": "run `memoree daemon restart`"
-                }),
-                semantic,
-                reranker,
-                compiler: compiler.clone(),
-                skills,
-                state,
-                warnings,
-            };
-            print_upgrade_report(report, pretty)?;
-            return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
-        }
-        match wait_for_daemon(&endpoint).await {
+        let mut child = match start_daemon(&endpoint, paths) {
+            Ok(child) => child,
+            Err(error) => {
+                state.set_phase("daemon_restart_failed");
+                write_upgrade_state(paths, &state)?;
+                warnings.push(format!("new daemon could not be started: {error}"));
+                let report = UpgradeApplyReport {
+                    from_version: previous_daemon_version,
+                    to_version: env!("CARGO_PKG_VERSION").into(),
+                    authority,
+                    daemon: json!({
+                        "state": "restart_failed",
+                        "running_before": true,
+                        "remediation": "run `memoree daemon restart`"
+                    }),
+                    semantic,
+                    reranker,
+                    compiler: compiler.clone(),
+                    skills,
+                    state,
+                    warnings,
+                };
+                print_upgrade_report(report, pretty)?;
+                return Ok(UPGRADE_POST_COMMIT_EXIT_CODE);
+            }
+        };
+        match wait_for_daemon(&endpoint, &mut child).await {
             Ok(response) => {
                 let doctor = require_matching_daemon(&response, &endpoint)?;
                 if doctor.schema_version != SCHEMA_VERSION || doctor.lifecycle_owner != "memoree" {
@@ -2532,21 +2537,12 @@ async fn dispatch(
             require_matching_daemon(&doctor_response, endpoint)?;
             transport::request(endpoint, request).await
         }
-        Err(first_error) if autostart => {
+        Err(_) if autostart => {
             ensure_upgrade_not_in_progress(paths)?;
-            start_daemon(endpoint, paths)?;
-            let mut last_error = first_error;
-            for _ in 0..60 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                match probe_daemon(endpoint).await {
-                    Ok(doctor_response) => {
-                        require_matching_daemon(&doctor_response, endpoint)?;
-                        return transport::request(endpoint, request).await;
-                    }
-                    Err(error) => last_error = error,
-                }
-            }
-            Err(last_error)
+            let mut child = start_daemon(endpoint, paths)?;
+            let doctor_response = wait_for_daemon(endpoint, &mut child).await?;
+            require_matching_daemon(&doctor_response, endpoint)?;
+            transport::request(endpoint, request).await
         }
         Err(error) => Err(error),
     }
@@ -2569,7 +2565,7 @@ fn require_matching_daemon(response: &Response, endpoint: &Endpoint) -> Result<D
     )))
 }
 
-fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<()> {
+fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<Child> {
     create_private_directory(&paths.data_dir)?;
     create_private_directory(&paths.runtime_dir)?;
     let log_path = paths.data_dir.join("memoreed.log");
@@ -2606,10 +2602,10 @@ fn start_daemon(endpoint: &Endpoint, paths: &AppPaths) -> Result<()> {
             });
         }
     }
-    command
+    let child = command
         .spawn()
         .map_err(|error| MemoryError::Transport(format!("failed to start daemon: {error}")))?;
-    Ok(())
+    Ok(child)
 }
 
 async fn daemon_command(
@@ -2666,8 +2662,8 @@ async fn daemon_command(
                 return Ok(0);
             }
 
-            start_daemon(&endpoint, paths)?;
-            let response = wait_for_daemon(&endpoint).await?;
+            let mut child = start_daemon(&endpoint, paths)?;
+            let response = wait_for_daemon(&endpoint, &mut child).await?;
             print_json(&response, pretty);
             Ok(response_exit_code(&response))
         }
@@ -2779,10 +2775,31 @@ fn unix_process_is_alive(pid: u32) -> Result<bool> {
     }
 }
 
-async fn wait_for_daemon(endpoint: &Endpoint) -> Result<Response> {
-    let mut last_error = MemoryError::Transport("daemon has not started yet".into());
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+async fn wait_for_daemon(endpoint: &Endpoint, child: &mut Child) -> Result<Response> {
+    let deadline = Instant::now() + DAEMON_START_TIMEOUT;
+    let mut last_error = match probe_daemon(endpoint).await {
+        Ok(response) => {
+            let doctor = doctor_result(&response)?;
+            if doctor.running {
+                return Ok(response);
+            }
+            MemoryError::Transport("daemon reported running=false".into())
+        }
+        Err(error) => error,
+    };
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(MemoryError::Transport(format!(
+                "daemon exited during startup with {status}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(MemoryError::Transport(format!(
+                "daemon did not become ready within {} seconds: {last_error}",
+                DAEMON_START_TIMEOUT.as_secs()
+            )));
+        }
+        tokio::time::sleep(DAEMON_START_POLL_INTERVAL).await;
         match probe_daemon(endpoint).await {
             Ok(response) => {
                 let doctor = doctor_result(&response)?;
@@ -2794,7 +2811,6 @@ async fn wait_for_daemon(endpoint: &Endpoint) -> Result<Response> {
             Err(error) => last_error = error,
         }
     }
-    Err(last_error)
 }
 
 async fn serve_daemon(args: ServeArgs, paths: &AppPaths) -> Result<i32> {
@@ -3349,6 +3365,25 @@ mod tests {
             panic!("expected serve command");
         };
         assert!(args.dangerously_allow_non_loopback_tcp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_readiness_fails_fast_when_the_child_exits() {
+        let temporary = tempfile::tempdir().unwrap();
+        let endpoint = Endpoint::Unix(temporary.path().join("never-created.sock"));
+        let mut child = ProcessCommand::new(env::current_exe().unwrap())
+            .arg("--definitely-not-a-test-harness-option")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        let error = wait_for_daemon(&endpoint, &mut child).await.unwrap_err();
+
+        assert!(error.to_string().contains("exited during startup"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[cfg(unix)]
