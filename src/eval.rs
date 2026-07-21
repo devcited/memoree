@@ -12,6 +12,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 use crate::{
     error::{MemoryError, Result},
@@ -3278,14 +3279,41 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn conservative_serialized_bytes<T: Serialize>(value: &T) -> Result<usize> {
-    let actual = serde_json::to_vec(value)?.len();
+    let mut value = serde_json::to_value(value)?;
+    canonicalize_wire_timestamps(&mut value);
+    let actual = serde_json::to_vec(&value)?.len();
     Ok(actual.div_ceil(EVAL_WIRE_BUDGET_BLOCK_BYTES) * EVAL_WIRE_BUDGET_BLOCK_BYTES)
+}
+
+fn canonicalize_wire_timestamps(value: &mut Value) {
+    const MAX_UTC_RFC3339: &str = "9999-12-31T23:59:59.999999999Z";
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let timestamp_field =
+                    key.ends_with("_at") || matches!(key.as_str(), "valid_from" | "valid_until");
+                if timestamp_field
+                    && let Some(serialized) = value.as_str()
+                    && DateTime::parse_from_rfc3339(serialized).is_ok()
+                {
+                    *value = Value::String(MAX_UTC_RFC3339.into());
+                } else {
+                    canonicalize_wire_timestamps(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                canonicalize_wire_timestamps(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     #[tokio::test]
     async fn committed_v1_corpus_passes_in_an_isolated_store() {
@@ -3433,6 +3461,25 @@ mod tests {
         assert_eq!(precision(&direct, &helpful, &reversed), 1.0);
         assert_eq!(ndcg(&direct, &helpful, &ideal), Some(1.0));
         assert!(ndcg(&direct, &helpful, &reversed) < ndcg(&direct, &helpful, &ideal));
+    }
+
+    #[test]
+    fn wire_accounting_normalizes_timestamp_precision_without_touching_content() {
+        let short = serde_json::json!({
+            "created_at": "2026-07-21T16:09:46Z",
+            "content": {"data": "2026-07-21T16:09:46Z"}
+        });
+        let precise = serde_json::json!({
+            "created_at": "2026-07-21T16:09:46.123456789Z",
+            "content": {"data": "2026-07-21T16:09:46Z"}
+        });
+        assert_eq!(
+            conservative_serialized_bytes(&short).unwrap(),
+            conservative_serialized_bytes(&precise).unwrap()
+        );
+        let mut normalized = short;
+        canonicalize_wire_timestamps(&mut normalized);
+        assert_eq!(normalized["content"]["data"], "2026-07-21T16:09:46Z");
     }
 
     #[test]
