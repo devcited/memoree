@@ -4,6 +4,21 @@ set -eu
 repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_dir"
 
+package_version="$(awk -F'"' '
+  /^\[/ { in_package = 0 }
+  /^\[package\]$/ { in_package = 1 }
+  in_package && /^version[[:space:]]*=/ { print $2; exit }
+' Cargo.toml)"
+printf '%s\n' "$package_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+  printf 'unparseable [package] version: "%s"\n' "$package_version" >&2
+  exit 1
+}
+IFS=. read -r package_major package_minor package_patch <<EOF
+$package_version
+EOF
+fixture_version="$package_major.$package_minor.$((package_patch + 1))"
+fixture_tag="v$fixture_version"
+
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64 | Darwin:aarch64) target="aarch64-apple-darwin" ;;
   Darwin:x86_64 | Darwin:amd64) target="x86_64-apple-darwin" ;;
@@ -53,7 +68,7 @@ marker="$test_root/installer-ran"
 cat > "$server_root/install.sh" <<'INSTALLER'
 #!/bin/sh
 set -eu
-[ "${MEMOREE_VERSION:-}" = "v0.4.2" ]
+[ "${MEMOREE_VERSION:-}" = "${MEMOREE_TEST_EXPECTED_VERSION:-}" ]
 [ -n "${MEMOREE_INSTALL_DIR:-}" ]
 [ -n "${MEMOREE_EXPECTED_ARCHIVE_SHA256:-}" ]
 replacement="${MEMOREE_TEST_REPLACEMENT_BINARY:?}"
@@ -76,8 +91,8 @@ cat > "$server_root/memoree-release.json" <<EOF
 {
   "schema": 1,
   "name": "memoree",
-  "version": "0.4.2",
-  "tag": "v0.4.2",
+  "version": "$fixture_version",
+  "tag": "$fixture_tag",
   "store_schema_version": 5,
   "published_at": "2026-07-20T00:00:00Z",
   "installer": {"url": "$base_url/install.sh", "sha256": "$installer_sha"},
@@ -92,8 +107,8 @@ cat > "$server_root/latest.json" <<EOF
 {
   "schema": 2,
   "name": "memoree",
-  "version": "0.4.2",
-  "tag": "v0.4.2",
+  "version": "$fixture_version",
+  "tag": "$fixture_tag",
   "signed_manifest_url": "$base_url/memoree-release.json",
   "signature_url": "$base_url/memoree-release.json.sig"
 }
@@ -121,6 +136,7 @@ export MEMOREE_UPDATE_ALLOW_INSECURE=1
 export MEMOREE_TEST_UPDATE_PUBLIC_KEY="$test_public_key"
 export MEMOREE_TEST_UPDATE_MARKER="$marker"
 export MEMOREE_TEST_REPLACEMENT_BINARY="$test_root/replacement-memoree"
+export MEMOREE_TEST_EXPECTED_VERSION="$fixture_tag"
 unset CI
 
 "$install_dir/memoree" upgrade apply >/dev/null
