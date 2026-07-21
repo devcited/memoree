@@ -33,6 +33,8 @@ export default defineConfig({
           items: [
             { label: 'Install', link: '/install/' },
             { label: 'Context & configuration', link: '/docs/configuration/' },
+            { label: 'Project source indexing', link: '/docs/project-index/' },
+            { label: 'Metrics & experiments', link: '/docs/metrics/' },
             { label: 'Agent integration', link: '/docs/model-integration/' },
             { label: 'Session checkpoints', link: '/docs/checkpoints/' },
           ],

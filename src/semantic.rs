@@ -204,6 +204,8 @@ pub struct SemanticInstallReport {
     pub embedded_vector_count: usize,
     pub deleted_vector_count: usize,
     pub indexed_commit_seq: i64,
+    pub model_load_latency_ms: f64,
+    pub embedding_generation_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -225,6 +227,8 @@ pub(crate) struct SemanticRebuildStats {
     pub reused_vector_count: usize,
     pub embedded_vector_count: usize,
     pub deleted_vector_count: usize,
+    pub model_load_latency_ms: f64,
+    pub embedding_generation_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1390,11 +1394,18 @@ impl SemanticManager {
             .collect::<Vec<_>>();
         let embedded_vector_count = changed.len();
         let deleted_vector_count = stale_keys.len();
+        let model_load_started = Instant::now();
         let mut loaded_model = if changed.is_empty() {
             None
         } else {
             Some(self.load_model(&manifest)?)
         };
+        let model_load_latency_ms = if loaded_model.is_some() {
+            model_load_started.elapsed().as_secs_f64() * 1_000.0
+        } else {
+            0.0
+        };
+        let mut embedding_generation_ms = 0.0;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (entity_type, revision_id, ordinal) in &stale_keys {
             transaction.execute(
@@ -1408,10 +1419,12 @@ impl SemanticManager {
                 .iter()
                 .map(|(document, _, _, _, _)| document.text.as_str())
                 .collect::<Vec<_>>();
+            let embedding_started = Instant::now();
             let embeddings = loaded_model
                 .as_mut()
                 .expect("changed documents require a loaded semantic model")
                 .embed(&texts)?;
+            embedding_generation_ms += embedding_started.elapsed().as_secs_f64() * 1_000.0;
             if embeddings.len() != batch.len() {
                 return Err(MemoryError::Integrity(
                     "semantic model returned the wrong embedding count".into(),
@@ -1482,6 +1495,8 @@ impl SemanticManager {
                 reused_vector_count,
                 embedded_vector_count,
                 deleted_vector_count,
+                model_load_latency_ms,
+                embedding_generation_ms,
             },
         ))
     }

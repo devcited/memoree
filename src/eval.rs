@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -19,7 +20,8 @@ use crate::{
         CitationGetResult, ClaimAssertInput, ClaimType, ConflictSummary, ContextBuildInput,
         ContextSource, EntityType, EvidenceLocator, Horizon, MAX_CITATION_FETCH_BYTES, Operation,
         ProbeInput, ProbeLead, ProbeResult, RecallInput, RecallPresence, RecallResult,
-        RecencyBiasInput, RelationPutInput, RelationType, Request, SearchInput, SearchResult,
+        RecencyBiasInput, RelationPutInput, RelationType, Request, RetrieveInput, RetrieveResult,
+        SearchInput, SearchResult,
     },
     service::MemoryService,
     store::{ArtifactRecord, ClaimRecord, MutationResult, RelationRecord, Store},
@@ -311,6 +313,52 @@ struct SeededEntity {
     text: Option<String>,
 }
 
+/// Bounded controls for one isolated retrieval evaluation run.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvalOptions {
+    pub recovery_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_id: Option<String>,
+    pub case_timeout_ms: u64,
+    pub suite_timeout_ms: u64,
+    pub jobs: usize,
+    pub prewarm_models: bool,
+}
+
+impl Default for EvalOptions {
+    fn default() -> Self {
+        Self {
+            recovery_only: false,
+            case_id: None,
+            case_timeout_ms: 60_000,
+            suite_timeout_ms: 600_000,
+            jobs: 1,
+            prewarm_models: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvalStageTiming {
+    pub stage: String,
+    pub duration_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvalCaseTiming {
+    pub case_id: String,
+    pub total_ms: f64,
+    pub stages: Vec<EvalStageTiming>,
+}
+
+/// Privacy-safe timings: identifiers, stage names, counts, and durations only.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvalTimings {
+    pub total_ms: f64,
+    pub setup: Vec<EvalStageTiming>,
+    pub cases: Vec<EvalCaseTiming>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalEvalReport {
     pub schema_version: u32,
@@ -320,6 +368,16 @@ pub struct RetrievalEvalReport {
     pub aggregate: RetrievalAggregate,
     pub baseline: BaselineComparison,
     pub hard_failures: Vec<String>,
+    pub requested_case_count: usize,
+    pub completed_case_count: usize,
+    pub complete: bool,
+    pub timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out_case: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out_stage: Option<String>,
+    pub options: EvalOptions,
+    pub timings: EvalTimings,
     pub passed: bool,
 }
 
@@ -388,6 +446,19 @@ pub struct RetrievalCaseReport {
     pub probe_recovery_false_answer: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_recovery_false_abstain: Option<bool>,
+    pub retrieve_presence: RecallPresence,
+    pub retrieve_qualified_evidence_artifacts: Vec<String>,
+    pub retrieve_recovery_artifacts: Vec<String>,
+    pub retrieve_recovery_bait_artifacts: Vec<String>,
+    pub retrieve_recovery_forbidden_artifacts: Vec<String>,
+    pub retrieve_packet_bytes: usize,
+    pub retrieve_latency_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieve_recovery_succeeded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieve_recovery_false_answer: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieve_recovery_false_abstain: Option<bool>,
     pub claim_recall: Option<f64>,
     pub claim_precision: f64,
     pub claim_ndcg: Option<f64>,
@@ -447,6 +518,15 @@ pub struct RetrievalAggregate {
     pub probe_recovery_success_rate: f64,
     pub probe_recovery_false_answer_rate: f64,
     pub probe_recovery_false_abstain_rate: f64,
+    pub retrieve_recovery_case_count: usize,
+    pub retrieve_recovery_success_rate: f64,
+    pub retrieve_recovery_false_answer_rate: f64,
+    pub retrieve_recovery_false_abstain_rate: f64,
+    pub retrieve_bait_fetches: usize,
+    pub retrieve_forbidden_fetches: usize,
+    pub mean_retrieve_packet_bytes: f64,
+    pub max_retrieve_packet_bytes: usize,
+    pub retrieve_latency_p95_ms: f64,
     pub false_answer_rate: f64,
     pub false_abstain_rate: f64,
     pub forbidden_returns: usize,
@@ -526,15 +606,44 @@ pub async fn run_retrieval_eval_with_models(
     semantic_model_directory: Option<&Path>,
     reranker_model_directory: Option<&Path>,
 ) -> Result<RetrievalEvalReport> {
+    run_retrieval_eval_with_options(
+        corpus_dir,
+        semantic_model_directory,
+        reranker_model_directory,
+        EvalOptions::default(),
+    )
+    .await
+}
+
+/// Run a bounded, selectable evaluation. Model paths are local-only and the
+/// temporary store is always isolated from the operator's Memoree home.
+pub async fn run_retrieval_eval_with_options(
+    corpus_dir: &Path,
+    semantic_model_directory: Option<&Path>,
+    reranker_model_directory: Option<&Path>,
+    options: EvalOptions,
+) -> Result<RetrievalEvalReport> {
+    if options.jobs != 1 {
+        return Err(MemoryError::InvalidRequest(
+            "memoree-eval currently requires --jobs 1 for deterministic model execution".into(),
+        ));
+    }
+    if options.case_timeout_ms == 0 || options.suite_timeout_ms == 0 {
+        return Err(MemoryError::InvalidRequest(
+            "evaluation timeout values must be greater than zero".into(),
+        ));
+    }
+    let suite_started = Instant::now();
+    let corpus_started = Instant::now();
     let corpus_version = corpus_dir
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| MemoryError::InvalidRequest("corpus directory needs a UTF-8 name".into()))?
         .to_owned();
     let seeds: Vec<SeedRecord> = read_jsonl(&corpus_dir.join("seed.jsonl"))?;
-    let cases: Vec<EvalCase> = read_jsonl(&corpus_dir.join("cases.jsonl"))?;
+    let all_cases: Vec<EvalCase> = read_jsonl(&corpus_dir.join("cases.jsonl"))?;
     let baseline: EvalBaseline = read_json(&corpus_dir.join("baseline.json"))?;
-    validate_corpus(&corpus_version, &seeds, &cases, &baseline)?;
+    validate_corpus(&corpus_version, &seeds, &all_cases, &baseline)?;
     let recovery_path = corpus_dir.join("probe-recovery.json");
     let recovery_suite = recovery_path
         .exists()
@@ -568,25 +677,97 @@ pub async fn run_retrieval_eval_with_models(
         }
     }
 
+    if let Some(case_id) = options.case_id.as_deref()
+        && !all_cases.iter().any(|case| case.case_id == case_id)
+    {
+        return Err(MemoryError::InvalidRequest(format!(
+            "evaluation case {case_id} does not exist in {corpus_version}"
+        )));
+    }
+    let cases = all_cases
+        .iter()
+        .filter(|case| {
+            options
+                .case_id
+                .as_deref()
+                .is_none_or(|case_id| case.case_id == case_id)
+                && (!options.recovery_only || recovery_by_case.contains_key(&case.case_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if cases.is_empty() {
+        return Err(MemoryError::InvalidRequest(
+            "evaluation selection contains no cases".into(),
+        ));
+    }
+    let requested_case_count = cases.len();
+    let full_suite_selected = requested_case_count == all_cases.len();
+    let full_recovery_suite_selected = options.recovery_only
+        && options.case_id.is_none()
+        && requested_case_count == recovery_by_case.len();
+    let mut setup_timings = vec![stage_timing("corpus_loading", corpus_started)];
+
     let temporary = tempfile::tempdir()?;
     let service = MemoryService::new(Store::open(temporary.path())?);
+    let seed_started = Instant::now();
     let entities = seed_store(&service, &seeds).await?;
+    setup_timings.push(stage_timing("seed_loading", seed_started));
     if let Some(model_directory) = semantic_model_directory {
-        service
+        let semantic_started = Instant::now();
+        let semantic_report = service
             .store()
             .semantic_enable_from_directory(model_directory)?;
+        setup_timings.push(EvalStageTiming {
+            stage: "semantic_model_loading".into(),
+            duration_ms: semantic_report.model_load_latency_ms,
+        });
+        setup_timings.push(EvalStageTiming {
+            stage: "embedding_generation".into(),
+            duration_ms: semantic_report.embedding_generation_ms,
+        });
+        setup_timings.push(EvalStageTiming {
+            stage: "semantic_projection_io".into(),
+            duration_ms: (elapsed_ms(semantic_started)
+                - semantic_report.model_load_latency_ms
+                - semantic_report.embedding_generation_ms)
+                .max(0.0),
+        });
     }
     if let Some(model_directory) = reranker_model_directory {
+        let reranker_started = Instant::now();
         service
             .store()
             .reranker_enable_from_directory(model_directory)?;
+        setup_timings.push(stage_timing("reranker_loading", reranker_started));
     }
     let labels_by_id: BTreeMap<String, String> = entities
         .iter()
         .map(|(label, entity)| (entity.entity_id.clone(), label.clone()))
         .collect();
 
+    if options.prewarm_models {
+        let prewarm_started = Instant::now();
+        let prewarm_case = &cases[0];
+        let _ = service.store().search(
+            &prewarm_case.context.ambient(),
+            &SearchInput {
+                query: prewarm_case.query.clone(),
+                horizon: prewarm_case.horizon,
+                reason: prewarm_case.reason.clone(),
+                limit: crate::protocol::MAX_SEARCH_ITEMS,
+                include_historical: false,
+                min_commit_seq: None,
+                recency: RecencyBiasInput::default(),
+            },
+        )?;
+        setup_timings.push(stage_timing("model_prewarm", prewarm_started));
+    }
+
     let mut case_reports = Vec::new();
+    let mut case_timings = Vec::new();
+    let mut timed_out = false;
+    let mut timed_out_case = None;
+    let mut timed_out_stage = None;
     let mut hard_failures = Vec::new();
     let mut budget_violations = 0usize;
     let mut citation_parity_violations = 0usize;
@@ -594,11 +775,20 @@ pub async fn run_retrieval_eval_with_models(
     let mut scope_violations = 0usize;
 
     for case in &cases {
+        if elapsed_ms(suite_started) >= options.suite_timeout_ms as f64 {
+            timed_out = true;
+            timed_out_case = Some(case.case_id.clone());
+            timed_out_stage = Some("suite_budget".into());
+            break;
+        }
+        let case_started = Instant::now();
+        let mut stages = Vec::new();
         let ambient = case.context.ambient();
         let recovery = recovery_by_case.get(&case.case_id);
         let probe_query = recovery
             .map(|recovery| recovery.probe_query.as_str())
             .unwrap_or(case.query.as_str());
+        let recall_started = Instant::now();
         let recall: RecallResult = read_operation(
             &service,
             Operation::MemoryRecall,
@@ -617,6 +807,8 @@ pub async fn run_retrieval_eval_with_models(
             &ambient,
         )
         .await?;
+        push_stage_duration(&mut stages, "recall", recall_started);
+        let probe_started = Instant::now();
         let probe_at_8: ProbeResult = read_operation(
             &service,
             Operation::MemoryProbe,
@@ -647,6 +839,8 @@ pub async fn run_retrieval_eval_with_models(
             &ambient,
         )
         .await?;
+        push_stage_duration(&mut stages, "probe", probe_started);
+        let supporting_retrieval_started = Instant::now();
         let search: SearchResult = read_operation(
             &service,
             Operation::Search,
@@ -662,6 +856,7 @@ pub async fn run_retrieval_eval_with_models(
             &ambient,
         )
         .await?;
+        push_stage_duration(&mut stages, "recall", supporting_retrieval_started);
         let candidate_pool = service.store().search(
             &ambient,
             &SearchInput {
@@ -694,6 +889,29 @@ pub async fn run_retrieval_eval_with_models(
             &ambient,
         )
         .await?;
+        let retrieve_started = Instant::now();
+        let retrieve: RetrieveResult = read_operation(
+            &service,
+            Operation::MemoryRetrieve,
+            RetrieveInput {
+                query: case.query.clone(),
+                reformulation: recovery.map(|recovery| recovery.probe_query.clone()),
+                horizon: case.horizon,
+                reason: case.reason.clone(),
+                max_claims: case.max_claims,
+                max_artifact_refs: case.max_artifact_refs,
+                max_excerpt_bytes: case.max_excerpt_bytes,
+                max_recovery_leads: 8,
+                max_recovery_bytes: 12 * 1024,
+                min_commit_seq: None,
+                recency: RecencyBiasInput::default(),
+                profile: false,
+            },
+            &ambient,
+        )
+        .await?;
+        let retrieve_latency_ms = elapsed_ms(retrieve_started);
+        push_stage_ms(&mut stages, "one_call_retrieve", retrieve_latency_ms);
 
         let mut failures = Vec::new();
         if recall.presence != case.expected_presence {
@@ -738,6 +956,49 @@ pub async fn run_retrieval_eval_with_models(
             &labels_by_id,
             &mut failures,
         );
+        let retrieve_returned_claims = ranked_labels_for_ids(
+            retrieve.claims.iter().map(|claim| claim.claim_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let retrieve_returned_artifacts = ranked_labels_for_ids(
+            retrieve
+                .artifact_refs
+                .iter()
+                .map(|artifact| artifact.artifact_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        let mut retrieve_qualified_evidence_artifacts = ranked_labels_for_ids(
+            retrieve
+                .claims
+                .iter()
+                .flat_map(|claim| claim.evidence.iter())
+                .map(|evidence| evidence.artifact_id.as_str()),
+            &labels_by_id,
+            &mut failures,
+        );
+        retrieve_qualified_evidence_artifacts.sort();
+        retrieve_qualified_evidence_artifacts.dedup();
+        let mut retrieve_recovery_artifacts = retrieve
+            .recovery
+            .iter()
+            .flat_map(|recovery| recovery.evidence.iter())
+            .filter_map(|evidence| artifact_citation_parts(&evidence.citation))
+            .filter_map(|(artifact_id, _)| labels_by_id.get(artifact_id).cloned())
+            .collect::<Vec<_>>();
+        retrieve_recovery_artifacts.sort();
+        retrieve_recovery_artifacts.dedup();
+        let retrieve_recovery_bait_artifacts = retrieve_recovery_artifacts
+            .iter()
+            .filter(|label| label.starts_with("embedding_bait_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let retrieve_recovery_forbidden_artifacts = retrieve_recovery_artifacts
+            .iter()
+            .filter(|label| case.forbidden.contains(*label))
+            .cloned()
+            .collect::<Vec<_>>();
         let candidate_pool_claims = ranked_labels_for_ids(
             candidate_pool
                 .hits
@@ -808,6 +1069,7 @@ pub async fn run_retrieval_eval_with_models(
         let mut probe_recovery_path_failures = Vec::new();
         let mut selected_has_large_artifact = false;
         if let Some(recovery) = recovery {
+            let citation_started = Instant::now();
             if matches!(recovery.verdict, ProbeRecoveryVerdict::Supported)
                 && recovery.selected_sources.is_empty()
             {
@@ -918,6 +1180,8 @@ pub async fn run_retrieval_eval_with_models(
                 }
                 probe_fetched_lead_bytes.push(fetched_lead_bytes);
             }
+            push_stage_duration(&mut stages, "citation_fetching", citation_started);
+            let refined_started = Instant::now();
             match (recovery.verdict, recovery.refined_query.as_deref()) {
                 (ProbeRecoveryVerdict::Supported, Some(refined_query)) => {
                     let refined: RecallResult = read_operation(
@@ -961,6 +1225,7 @@ pub async fn run_retrieval_eval_with_models(
                     )));
                 }
             }
+            push_stage_duration(&mut stages, "refined_recall", refined_started);
         }
         check_expected_labels(
             "claim",
@@ -1052,6 +1317,10 @@ pub async fn run_retrieval_eval_with_models(
             .chain(suggested_candidate_claims.iter())
             .chain(suggested_candidate_artifacts.iter())
             .chain(probe_sources_at_8.iter())
+            .chain(retrieve_returned_claims.iter())
+            .chain(retrieve_returned_artifacts.iter())
+            .chain(retrieve_qualified_evidence_artifacts.iter())
+            .chain(retrieve_recovery_artifacts.iter())
         {
             let entity = entities.get(label).ok_or_else(|| {
                 MemoryError::Integrity(format!("returned label {label} was not seeded"))
@@ -1104,6 +1373,32 @@ pub async fn run_retrieval_eval_with_models(
                 matches!(recovery.verdict, ProbeRecoveryVerdict::Abstain)
             }
         });
+        let retrieve_recovery_succeeded = recovery.map(|_| {
+            if !retrieve_recovery_forbidden_artifacts.is_empty() {
+                false
+            } else if answerable {
+                if !case.relevant_artifacts.is_empty() {
+                    case.relevant_artifacts.iter().all(|label| {
+                        retrieve_returned_artifacts.contains(label)
+                            || retrieve_qualified_evidence_artifacts.contains(label)
+                            || retrieve_recovery_artifacts.contains(label)
+                    })
+                } else {
+                    case.relevant_claims
+                        .iter()
+                        .all(|label| retrieve_returned_claims.contains(label))
+                }
+            } else {
+                matches!(retrieve.presence, RecallPresence::None)
+            }
+        });
+        let retrieve_recovery_false_answer = recovery.map(|_| {
+            !retrieve_recovery_forbidden_artifacts.is_empty()
+                || (!answerable && !matches!(retrieve.presence, RecallPresence::None))
+        });
+        let retrieve_recovery_false_abstain =
+            retrieve_recovery_succeeded.map(|succeeded| answerable && !succeeded);
+        let retrieve_packet_bytes = conservative_serialized_bytes(&retrieve)?;
         let probe_result_bytes_at_5 = conservative_serialized_bytes(&probe_at_5)?;
         let shipped_probe_result_bytes = conservative_serialized_bytes(&probe_at_8)?;
         let probe_pipeline_bytes = recovery
@@ -1222,6 +1517,16 @@ pub async fn run_retrieval_eval_with_models(
                 .map(|(supported, grounded)| supported && !grounded),
             probe_recovery_false_abstain: probe_recovery_succeeded
                 .map(|succeeded| answerable && !succeeded),
+            retrieve_presence: retrieve.presence,
+            retrieve_qualified_evidence_artifacts,
+            retrieve_recovery_artifacts,
+            retrieve_recovery_bait_artifacts,
+            retrieve_recovery_forbidden_artifacts,
+            retrieve_packet_bytes,
+            retrieve_latency_ms,
+            retrieve_recovery_succeeded,
+            retrieve_recovery_false_answer,
+            retrieve_recovery_false_abstain,
             probe_refined_returned_claims,
             probe_refined_returned_artifacts,
             probe_sources_at_5,
@@ -1257,6 +1562,18 @@ pub async fn run_retrieval_eval_with_models(
             context_max_bytes: bundle.max_bytes,
             failures: failures.clone(),
         };
+        let reranker_inference_ms = recall.reranker_claims.inference_latency_ms.unwrap_or(0.0)
+            + recall
+                .reranker_artifacts
+                .inference_latency_ms
+                .unwrap_or(0.0)
+            + search.reranker.inference_latency_ms.unwrap_or(0.0);
+        if reranker_inference_ms > 0.0 {
+            push_stage_ms(&mut stages, "reranker_inference", reranker_inference_ms);
+        }
+        let serialization_started = Instant::now();
+        let _ = serde_json::to_vec(&report)?;
+        push_stage_duration(&mut stages, "serialization", serialization_started);
         if matches!(case.gate, CaseGate::Hard) {
             hard_failures.extend(
                 failures
@@ -1265,6 +1582,30 @@ pub async fn run_retrieval_eval_with_models(
             );
         }
         case_reports.push(report);
+        let total_ms = elapsed_ms(case_started);
+        case_timings.push(EvalCaseTiming {
+            case_id: case.case_id.clone(),
+            total_ms,
+            stages: stages.clone(),
+        });
+        if total_ms >= options.case_timeout_ms as f64
+            || elapsed_ms(suite_started) >= options.suite_timeout_ms as f64
+        {
+            timed_out = true;
+            timed_out_case = Some(case.case_id.clone());
+            timed_out_stage = stages
+                .iter()
+                .max_by(|left, right| left.duration_ms.total_cmp(&right.duration_ms))
+                .map(|timing| timing.stage.clone())
+                .or_else(|| Some("case_total".into()));
+            hard_failures.push(format!(
+                "evaluation timed out after case {} (case {:.1} ms, suite {:.1} ms)",
+                case.case_id,
+                total_ms,
+                elapsed_ms(suite_started)
+            ));
+            break;
+        }
     }
 
     let aggregate = aggregate_reports(
@@ -1274,7 +1615,10 @@ pub async fn run_retrieval_eval_with_models(
         citation_get_exactness_violations,
         scope_violations,
     );
-    if semantic_model_directory.is_some() {
+    if semantic_model_directory.is_some()
+        && (full_suite_selected || full_recovery_suite_selected)
+        && !timed_out
+    {
         if let Some(paraphrase) = aggregate.slices.get("paraphrase") {
             if paraphrase.probe_source_recall_at_5 + f64::EPSILON < 0.80 {
                 hard_failures.push(format!(
@@ -1333,10 +1677,67 @@ pub async fn run_retrieval_eval_with_models(
                 aggregate.probe_bait_fetches
             ));
         }
+        if aggregate.retrieve_recovery_case_count > 0
+            && (aggregate.retrieve_recovery_success_rate + f64::EPSILON < 0.90
+                || aggregate.retrieve_recovery_false_answer_rate > f64::EPSILON
+                || aggregate.retrieve_recovery_false_abstain_rate > 0.10 + f64::EPSILON)
+        {
+            hard_failures.push(format!(
+                "one-call recovery gates failed: success {:.3}, false-answer {:.3}, false-abstain {:.3}",
+                aggregate.retrieve_recovery_success_rate,
+                aggregate.retrieve_recovery_false_answer_rate,
+                aggregate.retrieve_recovery_false_abstain_rate
+            ));
+        }
+        if aggregate.retrieve_bait_fetches > 0 {
+            hard_failures.push(format!(
+                "one-call recovery fetched {} semantic bait sources",
+                aggregate.retrieve_bait_fetches
+            ));
+        }
+        if aggregate.retrieve_forbidden_fetches > 0 {
+            hard_failures.push(format!(
+                "one-call recovery fetched {} case-forbidden sources",
+                aggregate.retrieve_forbidden_fetches
+            ));
+        }
+        if aggregate.max_retrieve_packet_bytes > 12 * 1024 {
+            hard_failures.push(format!(
+                "one-call packet used {} serialized bytes; maximum is 12288",
+                aggregate.max_retrieve_packet_bytes
+            ));
+        }
+        if aggregate.retrieve_latency_p95_ms > 2_000.0 {
+            hard_failures.push(format!(
+                "one-call recovery p95 {:.1} ms exceeds 2000 ms",
+                aggregate.retrieve_latency_p95_ms
+            ));
+        }
     }
     let report_schema_version = baseline.schema_version;
-    let baseline = compare_baseline(&aggregate, &baseline);
-    let passed = hard_failures.is_empty() && baseline.passed;
+    if timed_out
+        && !hard_failures
+            .iter()
+            .any(|failure| failure.contains("timed out"))
+    {
+        hard_failures.push(format!(
+            "evaluation timed out before completing {} selected cases",
+            requested_case_count
+        ));
+    }
+    let complete = !timed_out && case_reports.len() == requested_case_count;
+    let baseline = if full_suite_selected && complete {
+        compare_baseline(&aggregate, &baseline)
+    } else {
+        BaselineComparison {
+            epsilon: baseline.epsilon,
+            checked_metrics: vec![],
+            regressions: vec![],
+            passed: true,
+        }
+    };
+    let passed = complete && hard_failures.is_empty() && baseline.passed;
+    let total_ms = elapsed_ms(suite_started);
     Ok(RetrievalEvalReport {
         schema_version: report_schema_version,
         corpus_version,
@@ -1345,8 +1746,46 @@ pub async fn run_retrieval_eval_with_models(
         aggregate,
         baseline,
         hard_failures,
+        requested_case_count,
+        completed_case_count: case_timings.len(),
+        complete,
+        timed_out,
+        timed_out_case,
+        timed_out_stage,
+        options,
+        timings: EvalTimings {
+            total_ms,
+            setup: setup_timings,
+            cases: case_timings,
+        },
         passed,
     })
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn stage_timing(stage: &str, started: Instant) -> EvalStageTiming {
+    EvalStageTiming {
+        stage: stage.into(),
+        duration_ms: elapsed_ms(started),
+    }
+}
+
+fn push_stage_duration(stages: &mut Vec<EvalStageTiming>, stage: &str, started: Instant) {
+    push_stage_ms(stages, stage, elapsed_ms(started));
+}
+
+fn push_stage_ms(stages: &mut Vec<EvalStageTiming>, stage: &str, duration_ms: f64) {
+    if let Some(existing) = stages.iter_mut().find(|timing| timing.stage == stage) {
+        existing.duration_ms += duration_ms;
+    } else {
+        stages.push(EvalStageTiming {
+            stage: stage.into(),
+            duration_ms,
+        });
+    }
 }
 
 fn validate_corpus(
@@ -2311,6 +2750,15 @@ fn percentile_nearest_rank(mut values: Vec<usize>, percentile: f64) -> usize {
     values[rank.saturating_sub(1).min(values.len() - 1)]
 }
 
+fn percentile_nearest_rank_f64(mut values: Vec<f64>, percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(f64::total_cmp);
+    let rank = (percentile.clamp(0.0, 1.0) * values.len() as f64).ceil() as usize;
+    values[rank.saturating_sub(1).min(values.len() - 1)]
+}
+
 fn slice_aggregate(reports: &[&RetrievalCaseReport]) -> RetrievalSliceAggregate {
     let answerable_count = reports.iter().filter(|case| case.answerable).count();
     let unanswerable_count = reports.len() - answerable_count;
@@ -2508,6 +2956,14 @@ fn aggregate_reports(
         .iter()
         .filter(|case| case.answerable && case.probe_recovery_succeeded.is_some())
         .count();
+    let retrieve_recovery_case_count = reports
+        .iter()
+        .filter(|case| case.retrieve_recovery_succeeded.is_some())
+        .count();
+    let retrieve_recovery_answerable_count = reports
+        .iter()
+        .filter(|case| case.answerable && case.retrieve_recovery_succeeded.is_some())
+        .count();
     RetrievalAggregate {
         case_count: reports.len(),
         macro_claim_recall: mean(reports.iter().filter_map(|case| case.claim_recall)),
@@ -2647,6 +3103,51 @@ fn aggregate_reports(
                 .filter(|case| case.probe_recovery_false_abstain == Some(true))
                 .count(),
             recovery_answerable_count,
+        ),
+        retrieve_recovery_case_count,
+        retrieve_recovery_success_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.retrieve_recovery_succeeded == Some(true))
+                .count(),
+            retrieve_recovery_case_count,
+        ),
+        retrieve_recovery_false_answer_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.retrieve_recovery_false_answer == Some(true))
+                .count(),
+            retrieve_recovery_case_count,
+        ),
+        retrieve_recovery_false_abstain_rate: rate(
+            reports
+                .iter()
+                .filter(|case| case.retrieve_recovery_false_abstain == Some(true))
+                .count(),
+            retrieve_recovery_answerable_count,
+        ),
+        retrieve_bait_fetches: reports
+            .iter()
+            .map(|case| case.retrieve_recovery_bait_artifacts.len())
+            .sum(),
+        retrieve_forbidden_fetches: reports
+            .iter()
+            .map(|case| case.retrieve_recovery_forbidden_artifacts.len())
+            .sum(),
+        mean_retrieve_packet_bytes: mean(
+            reports.iter().map(|case| case.retrieve_packet_bytes as f64),
+        ),
+        max_retrieve_packet_bytes: reports
+            .iter()
+            .map(|case| case.retrieve_packet_bytes)
+            .max()
+            .unwrap_or(0),
+        retrieve_latency_p95_ms: percentile_nearest_rank_f64(
+            reports
+                .iter()
+                .map(|case| case.retrieve_latency_ms)
+                .collect(),
+            0.95,
         ),
         false_answer_rate: rate(
             reports
@@ -2794,8 +3295,8 @@ mod tests {
         assert!(first.passed, "{:?}", first.hard_failures);
         assert!(first.isolated_temporary_store);
         assert_eq!(
-            serde_json::to_value(&first).unwrap(),
-            serde_json::to_value(&second).unwrap()
+            deterministic_eval_value(&first),
+            deterministic_eval_value(&second)
         );
     }
 
@@ -2827,10 +3328,10 @@ mod tests {
             1.0
         );
         assert_eq!(first.aggregate.slices["honest_none"].false_answer_rate, 0.0);
-        let first_value = serde_json::to_value(&first).unwrap();
-        let second_value = serde_json::to_value(&second).unwrap();
-        let first_cases = serde_json::to_value(&first.cases).unwrap();
-        let second_cases = serde_json::to_value(&second.cases).unwrap();
+        let first_value = deterministic_eval_value(&first);
+        let second_value = deterministic_eval_value(&second);
+        let first_cases = first_value["cases"].clone();
+        let second_cases = second_value["cases"].clone();
         if let Some((path, left, right)) =
             first_json_difference(&first_cases, &second_cases, "$.cases".into())
         {
@@ -2864,6 +3365,23 @@ mod tests {
         {
             panic!("evaluation changed at {path}: {left} != {right}");
         }
+    }
+
+    fn deterministic_eval_value(report: &RetrievalEvalReport) -> Value {
+        let mut value = serde_json::to_value(report).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("timings");
+        if let Some(aggregate) = object.get_mut("aggregate").and_then(Value::as_object_mut) {
+            aggregate.remove("retrieve_latency_p95_ms");
+        }
+        if let Some(cases) = object.get_mut("cases").and_then(Value::as_array_mut) {
+            for case in cases {
+                if let Some(case) = case.as_object_mut() {
+                    case.remove("retrieve_latency_ms");
+                }
+            }
+        }
+        value
     }
 
     fn first_json_difference(
@@ -2953,6 +3471,15 @@ mod tests {
             probe_recovery_success_rate: 0.0,
             probe_recovery_false_answer_rate: 0.0,
             probe_recovery_false_abstain_rate: 0.0,
+            retrieve_recovery_case_count: 0,
+            retrieve_recovery_success_rate: 0.0,
+            retrieve_recovery_false_answer_rate: 0.0,
+            retrieve_recovery_false_abstain_rate: 0.0,
+            retrieve_bait_fetches: 0,
+            retrieve_forbidden_fetches: 0,
+            mean_retrieve_packet_bytes: 0.0,
+            max_retrieve_packet_bytes: 0,
+            retrieve_latency_p95_ms: 0.0,
             false_answer_rate: 0.0,
             false_abstain_rate: 0.0,
             forbidden_returns: 0,

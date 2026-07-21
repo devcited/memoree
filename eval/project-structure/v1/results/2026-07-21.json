@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-07-21",
+  "model": "claude-fable-5",
+  "status": "failed_promotion_gate",
+  "authority": "aggregate matched-agent observations; not a universal benchmark",
+  "processed_input_definition": "provider input_tokens + cache_creation_input_tokens + cache_read_input_tokens",
+  "batches": [
+    {
+      "id": "complex-development-initial",
+      "role": "development",
+      "cases": 10,
+      "processed_input_delta_percent": -28.89,
+      "quality_equal_or_better_cases": 7,
+      "quality_note": "serious omissions in qualified-parser and budget-compactor behavior prompted two correctness rounds"
+    },
+    {
+      "id": "complex-development-heldout-2",
+      "role": "heldout",
+      "cases": 10,
+      "processed_input_delta_percent": -7.38,
+      "latency_delta_percent": 5.22,
+      "blind_quality": {
+        "better": 0,
+        "tied": 2,
+        "worse": 8
+      },
+      "quality_note": "map answers commonly omitted relevant helpers, paths, integration or harness behavior, or stopped exploration early"
+    },
+    {
+      "id": "narrow-lookup-small-repository",
+      "role": "development",
+      "cases": 10,
+      "processed_input_delta_percent": 55.34,
+      "latency_delta_percent": 36.77,
+      "baseline_turns": 42,
+      "map_turns": 49,
+      "quality_note": "no demonstrated quality gain"
+    },
+    {
+      "id": "narrow-lookup-large-repository",
+      "role": "heldout",
+      "cases": 5,
+      "repository_tracked_files": 4227,
+      "baseline_processed_input": 122703,
+      "map_processed_input": 167390,
+      "processed_input_delta_percent": 36.42,
+      "baseline_elapsed_ms": 58463,
+      "map_elapsed_ms": 90463,
+      "latency_delta_percent": 54.74,
+      "baseline_turns": 17,
+      "map_turns": 21,
+      "blind_quality": "equal_correctness",
+      "index": {
+        "indexed_files": 3510,
+        "indexed_bytes": 48473574,
+        "symbols": 18573,
+        "edges": 764832,
+        "structural_parse_ms": 185123,
+        "total_time_note": "approximately five minutes on the tested machine"
+      }
+    }
+  ],
+  "decision": "keep project index explicit and experimental; do not route it through the canonical agent skill",
+  "promotion_gate": {
+    "frozen_batches_required": 2,
+    "minimum_non_loss_percent_per_routed_stratum": 90,
+    "maximum_severe_misses": 0,
+    "aggregate_blind_quality": "equal_or_better",
+    "maximum_processed_input_delta_percent": -10,
+    "maximum_latency_delta_percent": 10
+  }
+}

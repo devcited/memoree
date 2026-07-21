@@ -1,0 +1,40 @@
+{"case_id":"project-map-callers","query":"Identify every direct caller and every test of ProjectIndex::map, and state which call sites would need updates if its return type changed."}
+{"case_id":"retrieval-eval-entrypoint","query":"Identify every direct caller and test of run_retrieval_eval_with_options, then state which call sites would need updates if EvalOptions gained a required field."}
+{"case_id":"source-withdraw-impact","query":"Identify every production caller and direct test of MemoryStore::source_withdraw, plus the adjacent result/input types that would change if its return contract changed."}
+{"case_id":"auto-update-path","query":"Trace direct callers and tests of maybe_auto_update through the re-exec boundary, naming the exact functions and files affected if AutoUpdateOutcome changed."}
+{"case_id":"compiler-upgrade-reconcile","query":"Identify every production caller and direct test of CompilerManager::reconcile_upgrade, and the selection persistence helpers it directly depends on."}
+{"case_id":"project-edge-rebuild","query":"Identify every caller and direct test coverage of rebuild_project_edges, and list the projection tables it reads or writes."}
+{"case_id":"projection-candidate-append","query":"Identify every caller and direct test of append_projection_candidates, and state which retrieval result fields depend on it."}
+{"case_id":"metric-best-effort-impact","query":"Identify every production call-site category and direct test of record_metric_best_effort, and state what would break if it began returning Result instead of swallowing failures."}
+{"case_id":"checkpoint-put-impact","query":"Identify every production caller and direct test of CheckpointStore::put, plus the validation and persistence helpers on its direct path."}
+{"case_id":"profile-command-impact","query":"Identify every direct caller and test of profile_command, and trace its direct measurement/output helpers that would need updates if stage timing fields changed."}
+{"case_id":"index-reconciliation-impact","query":"Identify every production caller and direct test of ProjectIndex::index, and state which report fields and projection-rebuild helpers are on its direct path."}
+{"case_id":"project-get-contract","query":"Identify every caller and direct test of ProjectIndex::get, and state which citation-validation helpers and result fields would change if bounded reads returned line ranges."}
+{"case_id":"project-watch-path","query":"Identify every caller and direct test of ProjectIndex::watch_observed, plus the direct debounce, lock, and reindex path it invokes."}
+{"case_id":"qualified-call-parser","query":"Find the definition and every direct caller/test of call_target_name, then explain which call syntaxes its immediate caller uses it to recover."}
+{"case_id":"map-budget-compactor","query":"Identify every caller and direct test of enforce_project_map_budget, and list the packet sections it directly compacts in priority order."}
+{"case_id":"service-handle-routing","query":"Identify the production caller and direct tests of MemoryService::handle, and name the dispatch boundary affected if its Response contract changed."}
+{"case_id":"artifact-revise-impact","query":"Identify every production caller and direct test of Store::artifact_revise, plus the validation and persistence helpers on its immediate path."}
+{"case_id":"claim-revise-impact","query":"Identify every production caller and direct test of Store::claim_revise, and state which lifecycle/conflict behavior its direct path updates."}
+{"case_id":"relation-put-impact","query":"Identify every production caller and direct test of Store::relation_put, plus the immediate entity-validation and commit helpers it depends on."}
+{"case_id":"backup-create-path","query":"Identify every production caller and direct test of Store::backup_create, and trace its direct database/CAS synchronization helpers."}
+{"case_id":"semantic-rebuild-path","query":"Identify every production caller and direct test of Store::semantic_rebuild, and state which model/index status methods are directly involved."}
+{"case_id":"semantic-search-callees","query":"Find SemanticIndex::search and list the direct functions it calls to produce ranked windows, with direct test evidence."}
+{"case_id":"reranker-order-callees","query":"Find CandleReranker::order and list its direct scoring/calibration dependencies and direct tests."}
+{"case_id":"compiler-compile-path","query":"Identify every production caller and direct test of CompilerManager::compile, and list the direct provider invocation and output-validation helpers."}
+{"case_id":"compiler-configure-path","query":"Identify every production caller and direct test of CompilerManager::configure, and trace the immediate login/model-selection persistence path."}
+{"case_id":"update-apply-path","query":"Identify every production caller and direct test of apply_available_update, and list the direct signature, archive, replacement, and managed-install helpers."}
+{"case_id":"update-check-path","query":"Identify every production caller and direct test of check_for_update, and trace its immediate state/cache/manifest decision path."}
+{"case_id":"skill-sync-path","query":"Identify every production caller and direct test of sync_skills, and state which detected agent roots and atomic-write helpers are directly involved."}
+{"case_id":"metrics-record-path","query":"Identify every production caller and direct test of MetricsStore::record_event, and state which privacy validation and retention behavior is on its direct path."}
+{"case_id":"experiment-observation-path","query":"Identify every caller and direct test of MetricsStore::record_observation, and list the direct assignment/completion guards affected by a schema change."}
+{"case_id":"context-resolve-precedence","query":"Find AmbientResolver::resolve, identify every production caller and direct test, and state the source-precedence helpers on its immediate path."}
+{"case_id":"cas-put-path","query":"Identify every production caller and direct test of Cas::put, and trace its direct inline-versus-external integrity path."}
+{"case_id":"checkpoint-list-path","query":"Identify every production caller and direct test of CheckpointStore::list, and state how expiry/filtering helpers affect returned summaries."}
+{"case_id":"daemon-dispatch-path","query":"Identify every caller and direct test of dispatch in src/main.rs, and trace the direct daemon-autostart/request boundary affected by an endpoint contract change."}
+{"case_id":"remember-command-path","query":"Identify every caller and direct test of remember_command, and list the immediate source-capture, compiler, quality, and apply helpers it uses."}
+{"case_id":"projection-put-path","query":"Identify every production caller and direct test of Store::projection_put, and state which source-revision and derived-candidate validations are directly enforced."}
+{"case_id":"feedback-record-path","query":"Identify every production caller and direct test of Store::feedback_record, and trace its direct target-validation and append-only persistence path."}
+{"case_id":"conflict-list-path","query":"Identify every production caller and direct test of Store::conflict_list, and list the immediate scope, pagination, and lifecycle filters it applies."}
+{"case_id":"source-ingest-path","query":"Identify every production caller and direct test of Store::source_ingest, and trace its direct checkpoint, revision, and projection-staleness effects."}
+{"case_id":"store-verify-path","query":"Identify every production caller and direct test of Store::verify, and list the database, CAS, citation, and projection integrity checks on its direct path."}

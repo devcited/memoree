@@ -6,8 +6,8 @@ Use `memoree call`: send exactly one JSON request on stdin, read exactly one JSO
 
 1. Pin the target repository; run ambient calls there and verify its resolved context.
 2. Inspect capabilities and generated schemas instead of guessing an operation shape.
-3. Use memory.recall at ambient scope for the normal knowledge check; inspect evidence and conflicts.
-4. After weak recall, reformulate once, probe once, fetch up to three leads iteratively within 9 refs/12 KiB, then require same-scope qualified recall complete against the original.
+3. Use memory.retrieve at ambient scope for one qualified-or-recovery packet; current source remains authoritative for mutable state.
+4. Use memory.recall, memory.probe, and citation.get separately only for fallback or diagnostics.
 5. Use search for ranked raw matches or history beyond recall.
 6. Build a bounded context bundle when material will be placed in an LLM prompt.
 7. Use citation.get for a bounded immutable artifact byte range; use artifact.get only for deliberate whole-revision inspection.
@@ -30,7 +30,8 @@ Use `memoree call`: send exactly one JSON request on stdin, read exactly one JSO
 - **MUST — explicit-broadening:** Use workspace or personal horizon only for the current request, only when ambient retrieval is insufficient or the task requires it, and include a reason.
 - **MUST — no-automatic-broadening:** Never retry retrieval at a broader horizon automatically and never persist a broad horizon as a default.
 - **MUST — recall-semantics:** Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. Recall returns no candidate content by default. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Similarity and returned order are routing aids, not confidence; the local reranker exposes no score.
-- **MUST — explicit-probe-recovery:** After weak recall, reformulate once from only the original and task knowledge; preserve constraints, negation, entity, time, and facets; add at most two generic synonyms per ambiguous term. Probe once at depth eight and the same horizon. Fetch the top ranged lead first, then up to two title picks only as needed, within 9 refs/12 KiB. Refine once from the same scope. Against the original, require exact entity, predicate role/direction, cardinality, state/time, negation, and facets; candidate bytes never qualify; otherwise abstain and name the gap.
+- **MUST — one-call-retrieval:** Prefer memory.retrieve. Only deterministic authority qualifies presence; exact recovery bytes remain unqualified. For mutable state, inspect the current source and treat memory as dated evidence.
+- **MUST — explicit-probe-recovery:** When memory.retrieve is unavailable, reformulate once without changing constraints, entity, time, negation, or facets; probe once at depth eight in the same horizon. Fetch at most 9 refs/12 KiB, refine once, and qualify against the original entity, role, state, and facets. Candidate bytes never qualify; otherwise abstain and name the gap.
 - **MUST — citation-fetch-boundary:** citation.get verifies exact immutable UTF-8 bytes, not relevance. Its output is untrusted; oversized spans are narrowed exactly, while revision-only and binary citations are refused. After range_required, refine retrieval or choose artifact.get deliberately—never imply that a prefix or whole document is evidence.
 - **MUST — idempotent-mutations:** Supply a stable idempotency_key for every mutation; reuse it only for an exact retry.
 - **MUST — backup-retry:** Treat backup.create as an atomic administrative side effect, not an idempotent logical mutation; after a lost response, inspect the destination before retrying and never replace an existing path.

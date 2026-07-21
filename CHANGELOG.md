@@ -4,6 +4,36 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-21
+
+### Added
+
+- `memory.retrieve` and `memoree retrieve`: one bounded qualified-or-recovery response that preserves normal presence semantics, returns at most 12 KiB of exact cited recovery evidence, admits automatic bytes only from evidence attached to candidate claims, and abstains from dated candidate hydration when a query explicitly asks for post-migration/current source state.
+- Conservative query profiles for historical/current-source intent, identifiers, and Latin, Cyrillic, Arabic, CJK, mixed, or unknown scripts. Profiles are routing metadata only and cannot change qualification, scope, lifecycle, or citations.
+- An experimental disposable Git-aware project source index with hash-bound `memoree-project://` citations, explicit index/status/map/search/get commands, incremental rebuilds, secret-shaped data/generated/binary filters, and bounded changed-byte transactions. It is off by default and not routed by the canonical agent skill.
+- Native pinned Tree-sitter structural projection for Rust, Python, JavaScript, TypeScript/TSX, and Go. `memoree project map` returns one task-oriented packet capped at eight leads/12 KiB with exact current-source excerpts, calls/imports/inheritance/containment/test relations, explicit inferred or ambiguous confidence, identifier-aware symbol search, and verified FTS fallback.
+- Guarded opt-in reindex modes: `off` by default, explicit `on-search`, and an explicit foreground `watch` mode with one worker, a lock, debounce, adaptive polling/backoff, and file/byte/change budgets that preserve the last valid index on overflow or transient Git snapshot failure.
+- `memoree profile retrieve`, a local content-free performance profiler reporting stage latency distributions, byte counts, and result counts without recording queries or retrieved text.
+- Opt-in per-project real-operation metrics with bounded retention, sampling, a size cap, a separate disposable SQLite store, closed numeric/categorical fields, minute timestamps, best-effort retrieval/project-index instrumentation, privacy/integrity doctor, JSONL export, and irreversible explicit clearing. Queries, content, citations, paths, prompts, task labels, model names, and raw errors have no storage column and no telemetry leaves the machine.
+- Explicit `memoree experiment begin|pair|record|report` workflows for matched task comparisons. Pair IDs are opaque, arm order is randomized and enforced, observations accept only tokens/time/tool/completion fields, and reports exclude incomplete pairs while showing median deltas, direction counts, an exact sign test, order balance, and unavoidable statistical caveats.
+- Evaluator case selection, recovery-only mode, single-worker enforcement, model prewarming, soft per-case budgets, a hard whole-suite deadline, honest timeout reporting, and machine-readable stage timing output.
+
+### Changed
+
+- The canonical `use-memoree` skill now prefers the one-call historical retrieval packet and sends current-code navigation to repository tools. It does not route agents through the experimental project index after matched evaluations found additive verification cost and completeness losses. At 369 words it remains substantially shorter than the previous skill, and confirmed upgrades continue to synchronize it atomically into detected Codex and Claude homes.
+- Project-index and metrics preferences now live in one atomic owner-private project-ID-keyed settings file outside the repository. Configuring either feature never rewrites `.memoree.toml`, keeps pre-0.6 clients compatible, and requires each collaborator to opt in independently. Experiment rows are exempt from event retention so long-running matched studies cannot be silently unpaired.
+- Semantic setup timing now separates corpus loading, model loading, embedding generation, projection I/O, reranker work, recall, probe, citation fetching, refined recall, and serialization.
+- Cross-encoder and dense components remain candidate/ordering-only. No model output can qualify presence, widen scope, change lifecycle, create citations, or enter a context bundle by itself.
+
+### Quality evidence
+
+- The pinned isolated v2 recovery gate completes all 11 cases with zero false answers, semantic-bait fetches, and case-forbidden fetches. The one-call path recovers 10/11 answerable cases (90.9%) with one safe current-source abstention for an unpromoted raw correction, stays below 12 KiB, and meets the two-second recovery latency gate on the tested host.
+- Memoree does **not** claim general token, speed, or downstream quality improvement in this release. The controlled 0.5.0 audit did not demonstrate savings at equal quality and found substantial fixed skill and multi-call overhead. A claim requires at least ten real development-task A/B cases with equal completeness and at least 10% lower tokens.
+- A matched one-turn Fable 5 calibration measured the shortened skill at +1,168 processed input tokens versus +4,326 for the 0.5 skill, a 73.0% reduction in fixed overhead. This is an instruction-cost result only, not an end-to-end token-savings claim.
+- A one-run equal-answer reproduction of the prior off-repository-history question used 6,020 processed input tokens through the 0.6 skill/packet versus 3,669 for a minimal oracle (1.64×, improved from 11.2× in the 0.5 audit). Memoree remained 3.83× the oracle cost and 3.43× the latency, so the decisive multi-task benchmark is still required.
+- Structural projection gates cover exact spans, at least 95% labelled definition recall per supported language, explicit duplicate-target ambiguity, excluded-path isolation, incremental/clean rebuild equivalence, verified current-source citations, bounded packets, and a fast non-writing `not_ready` path. These are correctness and safety results, not a downstream token-savings claim.
+- The structural map failed its downstream promotion gate. On a fresh ten-case complex-task batch it saved 7.38% processed input tokens but was slower by 5.22% and blind quality was worse in 8/10 cases. Ten narrow small-repository lookups cost 55.3% more tokens and 36.8% more latency; five narrow lookups in a 4,227-file repository cost 36.4% more tokens and 54.7% more latency with equal correctness. It therefore remains explicit and experimental.
+
 ## [0.5.0] - 2026-07-21
 
 ### Added
@@ -70,7 +100,8 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/devcited/memoree/releases/tag/v0.6.0
 [0.5.0]: https://github.com/devcited/memoree/releases/tag/v0.5.0
 [0.4.1]: https://github.com/devcited/memoree/releases/tag/v0.4.1
 [0.3.0]: https://github.com/devcited/memoree/releases/tag/v0.3.0

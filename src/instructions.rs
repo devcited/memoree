@@ -17,8 +17,9 @@ use crate::protocol::{
     FeedbackExportInput, FeedbackGetInput, FeedbackListInput, FeedbackRecordInput, Operation,
     PROTOCOL_VERSION, ProbeInput, ProbeResult, ProjectionDropInput, ProjectionListInput,
     ProjectionPutInput, RecallInput, RecallResult, RelationListInput, RelationListResult,
-    RelationPutInput, Request, Response, SearchInput, SearchResult, SourceCheckpointInput,
-    SourceGetInput, SourceIngestInput, SourceRegisterInput, SourceWithdrawInput,
+    RelationPutInput, Request, Response, RetrieveInput, RetrieveResult, SearchInput, SearchResult,
+    SourceCheckpointInput, SourceGetInput, SourceIngestInput, SourceRegisterInput,
+    SourceWithdrawInput,
 };
 use crate::store::{
     ArtifactHistoryPage, ArtifactRecord, BackupReport, ClaimHistoryPage, ClaimRecord,
@@ -28,7 +29,7 @@ use crate::store::{
 };
 
 pub const PRODUCT_NAME: &str = "memoree";
-pub const INSTRUCTION_SET_VERSION: u32 = 12;
+pub const INSTRUCTION_SET_VERSION: u32 = 13;
 
 /// Structured form of the normative model instructions.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -105,6 +106,9 @@ pub struct CapabilitiesDocument {
     pub max_recall_evidence_excerpts_per_claim: usize,
     pub max_probe_items: usize,
     pub max_probe_title_bytes: usize,
+    pub max_retrieve_leads: usize,
+    pub max_retrieve_references: usize,
+    pub max_retrieve_evidence_bytes: usize,
     pub max_citation_bytes: usize,
     pub max_citation_fetch_bytes: usize,
     pub max_history_items: usize,
@@ -235,8 +239,8 @@ pub fn instruction_document() -> InstructionDocument {
         workflow: vec![
             "Pin the target repository; run ambient calls there and verify its resolved context.",
             "Inspect capabilities and generated schemas instead of guessing an operation shape.",
-            "Use memory.recall at ambient scope for the normal knowledge check; inspect evidence and conflicts.",
-            "After weak recall, reformulate once, probe once, fetch up to three leads iteratively within 9 refs/12 KiB, then require same-scope qualified recall complete against the original.",
+            "Use memory.retrieve at ambient scope for one qualified-or-recovery packet; current source remains authoritative for mutable state.",
+            "Use memory.recall, memory.probe, and citation.get separately only for fallback or diagnostics.",
             "Use search for ranked raw matches or history beyond recall.",
             "Build a bounded context bundle when material will be placed in an LLM prompt.",
             "Use citation.get for a bounded immutable artifact byte range; use artifact.get only for deliberate whole-revision inspection.",
@@ -283,9 +287,14 @@ pub fn instruction_document() -> InstructionDocument {
                 text: "Use memory.recall normally. presence covers qualified results only, not truth; inspect evidence, conflicts, and truncation. Recall returns no candidate content by default. An unqualified_candidate is a cited lead, not fact: it cannot affect presence or context.build. Similarity and returned order are routing aids, not confidence; the local reranker exposes no score.",
             },
             InstructionRule {
+                id: "one-call-retrieval",
+                level: RuleLevel::Must,
+                text: "Prefer memory.retrieve. Only deterministic authority qualifies presence; exact recovery bytes remain unqualified. For mutable state, inspect the current source and treat memory as dated evidence.",
+            },
+            InstructionRule {
                 id: "explicit-probe-recovery",
                 level: RuleLevel::Must,
-                text: "After weak recall, reformulate once from only the original and task knowledge; preserve constraints, negation, entity, time, and facets; add at most two generic synonyms per ambiguous term. Probe once at depth eight and the same horizon. Fetch the top ranged lead first, then up to two title picks only as needed, within 9 refs/12 KiB. Refine once from the same scope. Against the original, require exact entity, predicate role/direction, cardinality, state/time, negation, and facets; candidate bytes never qualify; otherwise abstain and name the gap.",
+                text: "When memory.retrieve is unavailable, reformulate once without changing constraints, entity, time, negation, or facets; probe once at depth eight in the same horizon. Fetch at most 9 refs/12 KiB, refine once, and qualify against the original entity, role, state, and facets. Candidate bytes never qualify; otherwise abstain and name the gap.",
             },
             InstructionRule {
                 id: "citation-fetch-boundary",
@@ -511,6 +520,7 @@ pub fn capabilities() -> CapabilitiesDocument {
                     | Operation::Search
                     | Operation::MemoryRecall
                     | Operation::MemoryProbe
+                    | Operation::MemoryRetrieve
                     | Operation::ContextBuild
             ),
         })
@@ -546,6 +556,9 @@ pub fn capabilities() -> CapabilitiesDocument {
             crate::protocol::MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM,
         max_probe_items: crate::protocol::MAX_PROBE_ITEMS,
         max_probe_title_bytes: crate::protocol::MAX_PROBE_TITLE_BYTES,
+        max_retrieve_leads: crate::protocol::MAX_RETRIEVE_LEADS,
+        max_retrieve_references: crate::protocol::MAX_RETRIEVE_REFERENCES,
+        max_retrieve_evidence_bytes: crate::protocol::MAX_RETRIEVE_EVIDENCE_BYTES,
         max_citation_bytes: crate::protocol::MAX_CITATION_BYTES,
         max_citation_fetch_bytes: crate::protocol::MAX_CITATION_FETCH_BYTES,
         max_history_items: crate::protocol::MAX_HISTORY_ITEMS,
@@ -642,6 +655,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
         ("search", schema_for!(SearchInput)),
         ("memory.recall", schema_for!(RecallInput)),
         ("memory.probe", schema_for!(ProbeInput)),
+        ("memory.retrieve", schema_for!(RetrieveInput)),
         ("context.build", schema_for!(ContextBuildInput)),
         ("doctor", empty()),
         ("verify", empty()),
@@ -712,6 +726,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
             ("search", schema_for!(SearchResult)),
             ("memory.recall", schema_for!(RecallResult)),
             ("memory.probe", schema_for!(ProbeResult)),
+            ("memory.retrieve", schema_for!(RetrieveResult)),
             ("context.build", schema_for!(ContextBundle)),
             ("doctor", schema_for!(DoctorResult)),
             ("verify", schema_for!(VerifyReport)),
@@ -721,7 +736,7 @@ pub fn protocol_schema_bundle() -> ProtocolSchemaBundle {
     }
 }
 
-fn all_operations() -> [Operation; 37] {
+fn all_operations() -> [Operation; 38] {
     [
         Operation::ContextResolve,
         Operation::Capabilities,
@@ -756,6 +771,7 @@ fn all_operations() -> [Operation; 37] {
         Operation::Search,
         Operation::MemoryRecall,
         Operation::MemoryProbe,
+        Operation::MemoryRetrieve,
         Operation::ContextBuild,
         Operation::Doctor,
         Operation::Verify,

@@ -117,6 +117,78 @@ fn invoke_call(cwd: &Path, home: &Path, request: &Value) -> (Output, Value) {
     (output, envelope)
 }
 
+#[test]
+fn project_map_cli_returns_one_bounded_verified_packet() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("repo");
+    let home = root.path().join("home");
+    fs::create_dir_all(&cwd).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "Test"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&cwd)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let (status, initialized) = invoke_local(&cwd, &home, &["init", "--name", "map-e2e"]);
+    assert!(status.status.success(), "{initialized}");
+    fs::write(
+        cwd.join("lib.rs"),
+        "pub fn dependency() {}\npub fn entrypoint() { dependency(); }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let (status, indexed) = invoke_local(&cwd, &home, &["project", "index"]);
+    assert!(status.status.success(), "{indexed}");
+    assert_eq!(indexed["schema_version"], 3);
+    assert!(indexed["symbol_count"].as_u64().unwrap() >= 3);
+
+    let (status, mapped) = invoke_local(
+        &cwd,
+        &home,
+        &[
+            "project",
+            "map",
+            "what calls dependency",
+            "--max-bytes",
+            "4096",
+        ],
+    );
+    assert!(status.status.success(), "{mapped}");
+    let result = &mapped;
+    assert_eq!(result["presence"], "symbols");
+    assert_eq!(result["query_mode"], "callers");
+    assert!(result["content_is_untrusted"].as_bool().unwrap());
+    assert!(serde_json::to_vec(result).unwrap().len() <= 4096);
+    let lead = result["leads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lead| lead["name"] == "dependency")
+        .expect("dependency lead");
+    let citation = lead["citation"].as_str().unwrap();
+    let (status, fetched) = invoke_local(&cwd, &home, &["project", "get", citation]);
+    assert!(status.status.success(), "{fetched}");
+    assert!(fetched["content"].as_str().unwrap().contains("dependency"));
+}
+
 struct LocalDaemonGuard {
     cwd: PathBuf,
     home: PathBuf,
@@ -313,6 +385,139 @@ fn recall_returns_claims_with_exact_refs_and_honest_empty_states() {
                 start + quote.len()
             ))
     );
+}
+
+#[test]
+fn opt_in_metrics_observe_real_retrieval_and_run_randomized_pairs() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("client");
+    let home = root.path().join("home");
+    fs::create_dir_all(&cwd).unwrap();
+    let _guard = LocalDaemonGuard {
+        cwd: cwd.clone(),
+        home: home.clone(),
+    };
+    let (status, initialized) = invoke_local(&cwd, &home, &["init", "--name", "metrics-e2e"]);
+    assert!(status.status.success(), "{initialized}");
+
+    let (status, disabled) = invoke_local(&cwd, &home, &["metrics", "status"]);
+    assert!(status.status.success(), "{disabled}");
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["database_exists"], false);
+
+    let (status, configured) = invoke_local(
+        &cwd,
+        &home,
+        &[
+            "metrics",
+            "configure",
+            "--enabled",
+            "true",
+            "--retention-days",
+            "7",
+            "--max-database-bytes",
+            "1048576",
+        ],
+    );
+    assert!(status.status.success(), "{configured}");
+    assert_eq!(configured["query_recorded"], false);
+    assert_eq!(configured["content_recorded"], false);
+
+    let (status, retrieved) = invoke_local(
+        &cwd,
+        &home,
+        &["retrieve", "a", "deliberately", "absent", "memory"],
+    );
+    assert!(status.status.success(), "{retrieved}");
+    assert_eq!(retrieved["result"]["presence"], "none");
+    assert!(retrieved["result"].get("profile").is_none());
+
+    let (status, report) = invoke_local(&cwd, &home, &["metrics", "report", "--days", "1"]);
+    assert!(status.status.success(), "{report}");
+    assert_eq!(report["operations"][0]["operation"], "memory.retrieve");
+    assert_eq!(report["operations"][0]["outcomes"]["abstained"], 1);
+
+    let (status, feedback) = invoke_call(
+        &cwd,
+        &home,
+        &serde_json::json!({
+            "v": 1,
+            "request_id": "req_metrics_feedback",
+            "idempotency_key": "metrics-feedback-e2e",
+            "op": "feedback.record",
+            "input": {
+                "query": "the query must not enter metrics",
+                "outcome": "useful"
+            }
+        }),
+    );
+    assert!(status.status.success(), "{feedback}");
+    let (status, report) = invoke_local(&cwd, &home, &["metrics", "report", "--days", "1"]);
+    assert!(status.status.success(), "{report}");
+    let feedback_metrics = report["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["operation"] == "feedback.record")
+        .unwrap();
+    assert_eq!(feedback_metrics["outcomes"]["feedback_useful"], 1);
+    assert_eq!(feedback_metrics["feedback_useful_rate"], 1.0);
+
+    let (status, experiment) =
+        invoke_local(&cwd, &home, &["experiment", "begin", "--primary", "tokens"]);
+    assert!(status.status.success(), "{experiment}");
+    let experiment_id = experiment["experiment_id"].as_str().unwrap();
+    let (status, pair) = invoke_local(
+        &cwd,
+        &home,
+        &["experiment", "pair", "--experiment", experiment_id],
+    );
+    assert!(status.status.success(), "{pair}");
+    let pair_id = pair["pair_id"].as_str().unwrap();
+    let first = pair["first_arm"].as_str().unwrap();
+    let second = pair["second_arm"].as_str().unwrap();
+    for arm in [first, second] {
+        let tokens = if arm == "memory" { "80" } else { "100" };
+        let (status, observation) = invoke_local(
+            &cwd,
+            &home,
+            &[
+                "experiment",
+                "record",
+                "--pair",
+                pair_id,
+                "--arm",
+                arm,
+                "--tokens",
+                tokens,
+                "--elapsed-ms",
+                "1000",
+                "--tool-calls",
+                "2",
+                "--completed",
+                "--completeness",
+                "5",
+            ],
+        );
+        assert!(status.status.success(), "{observation}");
+    }
+    let (status, experiment_report) = invoke_local(
+        &cwd,
+        &home,
+        &["experiment", "report", experiment_id, "--pairs"],
+    );
+    assert!(status.status.success(), "{experiment_report}");
+    assert_eq!(experiment_report["complete_pairs"], 1);
+    assert_eq!(experiment_report["tokens"]["favors_memory"], 1);
+    assert_eq!(experiment_report["tokens"]["median_percent_delta"], -20.0);
+
+    let (status, doctor) = invoke_local(&cwd, &home, &["metrics", "doctor"]);
+    assert!(status.status.success(), "{doctor}");
+    assert_eq!(doctor["status"], "ok");
+    assert_eq!(doctor["pragmas_ok"], true);
+    assert_eq!(doctor["closed_schema_ok"], true);
+    assert_eq!(doctor["categorical_allowlists_ok"], true);
+    assert_eq!(doctor["outside_project_tree"], true);
 }
 
 #[test]

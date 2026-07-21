@@ -4,6 +4,9 @@ set -eu
 repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_dir"
 
+package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+release_tag="v$package_version"
+
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64 | Darwin:aarch64) target="aarch64-apple-darwin" ;;
   Darwin:x86_64 | Darwin:amd64) target="x86_64-apple-darwin" ;;
@@ -36,19 +39,19 @@ trap cleanup EXIT HUP INT TERM
 
 cargo build --locked --bins
 package_dir="$test_root/memoree-$target"
-mkdir -p "$package_dir" "$server_root/releases/download/v0.5.0" \
+mkdir -p "$package_dir" "$server_root/releases/download/$release_tag" \
   "$install_dir" "$memoree_home" "$project_dir" \
   "$user_root/.codex" "$user_root/.claude"
 install -m 755 target/debug/memoree "$package_dir/memoree"
 install -m 755 target/debug/memoree-eval "$package_dir/memoree-eval"
-archive="$server_root/releases/download/v0.5.0/memoree-$target.tar.gz"
+archive="$server_root/releases/download/$release_tag/memoree-$target.tar.gz"
 tar -czf "$archive" -C "$test_root" "memoree-$target"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$archive" > "$archive.sha256"
 else
   shasum -a 256 "$archive" > "$archive.sha256"
 fi
-install -m 644 site/public/releases/latest.txt "$server_root/releases/latest.txt"
+printf '%s\n' "$release_tag" > "$server_root/releases/latest.txt"
 
 openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
   -keyout "$test_root/key.pem" -out "$test_root/cert.pem" \
@@ -98,11 +101,11 @@ CURL_CA_BUNDLE="$test_root/cert.pem" \
   CLAUDE_CONFIG_DIR="$user_root/.claude" \
   sh site/public/install.sh >/dev/null
 
-"$install_dir/memoree" --version | grep -F '0.5.0' >/dev/null
+"$install_dir/memoree" --version | grep -F "$package_version" >/dev/null
 HOME="$user_root" MEMOREE_HOME="$memoree_home" \
   "$install_dir/memoree" update status | grep -F '"managed_install":true' >/dev/null
 HOME="$user_root" MEMOREE_HOME="$memoree_home" \
-  "$install_dir/memoree" doctor | grep -F '"binary_version":"0.5.0"' >/dev/null
+  "$install_dir/memoree" doctor | grep -F "\"binary_version\":\"$package_version\"" >/dev/null
 (
   cd "$project_dir"
   HOME="$user_root" MEMOREE_HOME="$memoree_home" \
@@ -111,5 +114,8 @@ HOME="$user_root" MEMOREE_HOME="$memoree_home" \
 )
 test -f "$user_root/.codex/skills/use-memoree/SKILL.md"
 test -f "$user_root/.claude/skills/use-memoree/SKILL.md"
+grep -F 'memoree retrieve' "$user_root/.codex/skills/use-memoree/SKILL.md" >/dev/null
+cmp "$user_root/.codex/skills/use-memoree/SKILL.md" \
+  "$user_root/.claude/skills/use-memoree/SKILL.md"
 find "$memoree_home/data/migration-backups" -mindepth 1 -maxdepth 1 -type d \
   | grep . >/dev/null

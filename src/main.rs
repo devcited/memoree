@@ -19,20 +19,25 @@ use memoree::{
         CompilerProvider, CompilerRegistry, SelectionOrigin, interactive_selection_available,
     },
     context::{
-        AppPaths, ContextResolver, MARKER_FILE, MEMOREE_CONTEXT_ENV, encode_memory_context,
-        init_marker, task_context,
+        AppPaths, AutoReindexMode, ContextResolver, MARKER_FILE, MEMOREE_CONTEXT_ENV,
+        encode_memory_context, init_marker, task_context,
     },
     error::{MemoryError, Result},
-    eval::run_retrieval_eval_with_models,
+    eval::{EvalOptions, run_retrieval_eval_with_options},
+    metrics::{
+        ExperimentArm, ExperimentObservationInput, ExperimentPrimaryMetric, MetricEvent,
+        MetricsStore, safe_runtime_state,
+    },
+    project_index::{ProjectIndex, ProjectWatchObservation},
     protocol::{
         AmbientContext, ArtifactContent, ArtifactForgetInput, ArtifactGetInput,
         ArtifactHistoryInput, ArtifactPutInput, ArtifactReviseInput, BackupCreateInput,
         CitationGetInput, ClaimAssertInput, ClaimGetInput, ClaimHistoryInput, ClaimRetractInput,
         ClaimReviseInput, ClaimType, ConflictListInput, ContextBuildInput, ContextSource,
-        DoctorResult, EntityType, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES,
+        DoctorResult, EntityType, ErrorCode, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES,
         MAX_ENCODED_CONTENT_BYTES, Operation, ProbeInput, RecallInput, RecencyBiasInput,
         RelationDirection, RelationListInput, RelationPutInput, RelationType, Request, Response,
-        SearchInput, Warning,
+        RetrieveInput, RetrieveResult, SearchInput, Warning,
     },
     remember::{
         REMEMBER_SCHEMA_VERSION, ValidatedClaim, ValidatedCompilation, deterministic_title,
@@ -136,6 +141,26 @@ enum Commands {
         #[command(subcommand)]
         command: SemanticCommands,
     },
+    /// Build and query the disposable Git-aware project source index.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+    /// Run optional content-free performance profiling.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+    /// Configure and inspect opt-in project-local operational metrics.
+    Metrics {
+        #[command(subcommand)]
+        command: MetricsCommands,
+    },
+    /// Run explicit randomized paired task experiments.
+    Experiment {
+        #[command(subcommand)]
+        command: ExperimentCommands,
+    },
     /// Run a child process with an inherited task context.
     Session {
         #[command(subcommand)]
@@ -174,6 +199,8 @@ enum Commands {
     Recall(RecallArgs),
     /// Explicitly inspect compact unqualified retrieval leads after weak recall.
     Probe(ProbeArgs),
+    /// Retrieve qualified memory or a bounded exact unqualified evidence packet in one call.
+    Retrieve(RetrieveArgs),
     /// Print vendor-neutral, versioned instructions for language models.
     Instructions(InstructionsArgs),
     /// Print the protocol JSON Schema bundle.
@@ -232,6 +259,27 @@ struct EvalArgs {
     /// Verified local ordering-only reranker directory; no downloads or qualification.
     #[arg(long, value_name = "DIRECTORY")]
     reranker_model: Option<PathBuf>,
+    /// Evaluate only cases covered by probe-recovery.json.
+    #[arg(long)]
+    recovery_only: bool,
+    /// Evaluate one stable case identifier.
+    #[arg(long, value_name = "CASE_ID")]
+    case: Option<String>,
+    /// Maximum wall time for one case.
+    #[arg(long, default_value_t = 60_000)]
+    case_timeout_ms: u64,
+    /// Maximum wall time for the selected suite.
+    #[arg(long, default_value_t = 600_000)]
+    suite_timeout_ms: u64,
+    /// Deterministic worker count; v0.6 requires one.
+    #[arg(long, default_value_t = 1)]
+    jobs: usize,
+    /// Load installed models once before timed cases.
+    #[arg(long)]
+    prewarm_models: bool,
+    /// Write content-free stage timings to a separate JSON file.
+    #[arg(long, value_name = "PATH")]
+    timings_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -386,6 +434,205 @@ enum CompilerCommands {
 enum CompilerProviderArg {
     Codex,
     Claude,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCommands {
+    /// Incrementally build a bounded disposable index of Git-visible text files.
+    Index,
+    /// Inspect freshness, budgets, and automatic reindex configuration.
+    Status,
+    /// Search indexed source and return exact hash-pinned citations.
+    Search {
+        #[arg(required = true)]
+        query: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Do not perform configured on-search freshness reconciliation.
+        #[arg(long)]
+        no_auto_reindex: bool,
+    },
+    /// Build one bounded structural code map with verified current-source evidence.
+    Map {
+        #[arg(required = true)]
+        query: Vec<String>,
+        #[arg(long, default_value_t = memoree::project_index::DEFAULT_PROJECT_MAP_BYTES)]
+        max_bytes: usize,
+        /// Do not perform configured on-search freshness reconciliation.
+        #[arg(long)]
+        no_auto_reindex: bool,
+    },
+    /// Fetch bounded bytes from one exact project citation.
+    Get {
+        citation: String,
+        #[arg(long, default_value_t = 4096)]
+        max_bytes: usize,
+    },
+    /// Set per-project automatic reindex behavior in .memoree.toml.
+    Configure {
+        #[arg(long, value_enum)]
+        auto_reindex: AutoReindexArg,
+        #[arg(long)]
+        include_untracked: Option<bool>,
+    },
+    /// Run the explicit foreground adaptive watcher (requires watch mode).
+    Watch {
+        #[arg(long, default_value_t = 2_000)]
+        poll_ms: u64,
+        #[arg(long, default_value_t = 30_000)]
+        max_poll_ms: u64,
+        #[arg(long, default_value_t = 1_500)]
+        debounce_ms: u64,
+        /// Bound polling for automation/testing; omitted means until interrupted.
+        #[arg(long, hide = true)]
+        max_polls: Option<usize>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommands {
+    /// Measure the compact retrieval pipeline without retaining query or content.
+    Retrieve(ProfileRetrieveArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsCommands {
+    /// Inspect project metrics configuration and retained row counts.
+    Status,
+    /// Opt in or out and set bounded local retention, size, and sampling.
+    Configure {
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        retention_days: Option<u32>,
+        #[arg(long)]
+        max_database_bytes: Option<u64>,
+        #[arg(long)]
+        sample_rate: Option<f64>,
+    },
+    /// Summarize real operational events without query or content fields.
+    Report {
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+    /// Verify integrity, privacy schema, permissions, retention, and size caps.
+    Doctor,
+    /// Export the closed metrics schema as JSONL to a new private file.
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+    /// Delete the disposable metrics database and all experiment observations.
+    Clear {
+        /// Confirm destructive deletion.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExperimentCommands {
+    /// Begin an experiment with a declared primary metric.
+    Begin {
+        #[arg(long, value_enum, default_value_t = ExperimentPrimaryMetricArg::Tokens)]
+        primary: ExperimentPrimaryMetricArg,
+    },
+    /// Generate an opaque pair identifier and randomized arm order.
+    Pair {
+        #[arg(long)]
+        experiment: String,
+    },
+    /// Record one immutable arm observation; task text is never accepted.
+    Record {
+        #[arg(long)]
+        pair: String,
+        #[arg(long, value_enum)]
+        arm: ExperimentArmArg,
+        #[arg(long)]
+        tokens: u64,
+        #[arg(long)]
+        elapsed_ms: u64,
+        #[arg(long)]
+        tool_calls: u64,
+        #[arg(long)]
+        completed: bool,
+        #[arg(long)]
+        completeness: Option<u8>,
+    },
+    /// Compare complete randomized pairs; passive traces are never treated as controls.
+    Report {
+        experiment: String,
+        /// Include opaque per-pair deltas, recommended for fewer than 30 pairs.
+        #[arg(long)]
+        pairs: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExperimentPrimaryMetricArg {
+    Tokens,
+    Elapsed,
+}
+
+impl From<ExperimentPrimaryMetricArg> for ExperimentPrimaryMetric {
+    fn from(value: ExperimentPrimaryMetricArg) -> Self {
+        match value {
+            ExperimentPrimaryMetricArg::Tokens => Self::Tokens,
+            ExperimentPrimaryMetricArg::Elapsed => Self::Elapsed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExperimentArmArg {
+    Memory,
+    Baseline,
+}
+
+impl From<ExperimentArmArg> for ExperimentArm {
+    fn from(value: ExperimentArmArg) -> Self {
+        match value {
+            ExperimentArmArg::Memory => Self::Memory,
+            ExperimentArmArg::Baseline => Self::Baseline,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct ProfileRetrieveArgs {
+    #[arg(required = true)]
+    query: Vec<String>,
+    #[arg(long)]
+    reformulation: Option<String>,
+    #[arg(long, value_enum, default_value_t = HorizonArg::Ambient)]
+    horizon: HorizonArg,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+    #[arg(long, default_value_t = 1)]
+    warmups: usize,
+    #[arg(long)]
+    no_recency: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AutoReindexArg {
+    Off,
+    OnSearch,
+    Watch,
+}
+
+impl From<AutoReindexArg> for AutoReindexMode {
+    fn from(value: AutoReindexArg) -> Self {
+        match value {
+            AutoReindexArg::Off => Self::Off,
+            AutoReindexArg::OnSearch => Self::OnSearch,
+            AutoReindexArg::Watch => Self::Watch,
+        }
+    }
 }
 
 impl From<CompilerProviderArg> for CompilerProvider {
@@ -741,6 +988,36 @@ struct ProbeArgs {
 }
 
 #[derive(Debug, Args)]
+struct RetrieveArgs {
+    #[arg(required = true)]
+    query: Vec<String>,
+    /// One caller-audited meaning-preserving reformulation for recovery only.
+    #[arg(long)]
+    reformulation: Option<String>,
+    #[arg(long, value_enum, default_value_t = HorizonArg::Ambient)]
+    horizon: HorizonArg,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long, default_value_t = 5)]
+    max_claims: usize,
+    #[arg(long, default_value_t = 3)]
+    max_artifact_refs: usize,
+    #[arg(long, default_value_t = 320)]
+    max_excerpt_bytes: usize,
+    #[arg(long, default_value_t = 8)]
+    max_recovery_leads: usize,
+    #[arg(long, default_value_t = 12_288)]
+    max_recovery_bytes: usize,
+    #[arg(long)]
+    min_commit_seq: Option<i64>,
+    #[arg(long)]
+    no_recency: bool,
+    /// Include content-free stage durations and counts.
+    #[arg(long)]
+    profile: bool,
+}
+
+#[derive(Debug, Args)]
 struct InstructionsArgs {
     #[arg(long, default_value = "markdown")]
     format: String,
@@ -913,6 +1190,38 @@ struct UpgradeApplyReport {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct RetrievalProfileReport {
+    schema_version: u32,
+    profiler: &'static str,
+    query_recorded: bool,
+    content_recorded: bool,
+    warmups: usize,
+    iterations: usize,
+    total_ms: ProfileDistribution,
+    recall_ms: ProfileDistribution,
+    probe_ms: ProfileDistribution,
+    citation_fetch_ms: ProfileDistribution,
+    model_load_ms: ProfileDistribution,
+    inference_ms: ProfileDistribution,
+    response_bytes: ProfileDistribution,
+    semantic_states: BTreeMap<String, usize>,
+    reranker_states: BTreeMap<String, usize>,
+    breaker_open_count: usize,
+    qualified_claims_max: usize,
+    qualified_artifacts_max: usize,
+    recovery_references_max: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileDistribution {
+    min: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+    mean: f64,
+}
+
 const UPGRADE_POST_COMMIT_EXIT_CODE: i32 = 20;
 
 #[tokio::main]
@@ -1023,13 +1332,263 @@ async fn run(cli: Cli) -> Result<i32> {
         Commands::Skills { command } => skills_command(command, &paths, cli.pretty),
         Commands::Compiler { command } => compiler_command(command, &paths, cli.pretty).await,
         Commands::Semantic { command } => semantic_command(command, &paths, cli.pretty).await,
+        Commands::Project { command } => {
+            let cwd = env::current_dir()?;
+            let mut project = ProjectIndex::discover(&cwd, &paths.data_dir)?;
+            let metrics = MetricsStore::discover_enabled(&cwd, &paths.data_dir)
+                .ok()
+                .flatten();
+            match command {
+                ProjectCommands::Index => {
+                    let started = Instant::now();
+                    let report = match project.index() {
+                        Ok(report) => report,
+                        Err(error) => {
+                            record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.index",
+                                    elapsed_ms(started),
+                                    error_code_for_memory_error(&error),
+                                ),
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let mut event = MetricEvent::new("project.index", "ok", elapsed_ms(started));
+                    event.indexed_files = Some(report.indexed_files as u64);
+                    event.indexed_bytes = Some(report.indexed_bytes);
+                    event.changed_files = Some(report.changed_files as u64);
+                    event.changed_bytes = Some(report.changed_bytes);
+                    record_metric_best_effort(metrics.as_ref(), &event);
+                    print_json(&report, cli.pretty);
+                }
+                ProjectCommands::Status => print_json(&project.status()?, cli.pretty),
+                ProjectCommands::Search {
+                    query,
+                    limit,
+                    no_auto_reindex,
+                } => {
+                    let started = Instant::now();
+                    let report = match project.search(&query.join(" "), limit, !no_auto_reindex) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.search",
+                                    elapsed_ms(started),
+                                    error_code_for_memory_error(&error),
+                                ),
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let mut event = MetricEvent::new(
+                        "project.search",
+                        if report.hits.is_empty() {
+                            "empty"
+                        } else {
+                            "hits"
+                        },
+                        elapsed_ms(started),
+                    );
+                    event.result_count = Some(report.hits.len() as u64);
+                    event.response_bytes = serialized_size(&report);
+                    event.stale = Some(report.stale);
+                    event.reindex_attempted = Some(report.reindex_attempted);
+                    record_metric_best_effort(metrics.as_ref(), &event);
+                    print_json(&report, cli.pretty);
+                }
+                ProjectCommands::Map {
+                    query,
+                    max_bytes,
+                    no_auto_reindex,
+                } => {
+                    let started = Instant::now();
+                    let report = match project.map(&query.join(" "), max_bytes, !no_auto_reindex) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.map",
+                                    elapsed_ms(started),
+                                    error_code_for_memory_error(&error),
+                                ),
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let mut event = MetricEvent::new(
+                        "project.map",
+                        match report.presence.as_str() {
+                            "symbols" => "hits",
+                            "text_only" => "fallback",
+                            _ => "empty",
+                        },
+                        elapsed_ms(started),
+                    );
+                    event.result_count = Some(report.leads.len() as u64);
+                    event.response_bytes = serialized_size(&report);
+                    event.project_edges = Some(
+                        report
+                            .leads
+                            .iter()
+                            .map(|lead| lead.edges.len() as u64)
+                            .sum(),
+                    );
+                    event.project_edge_truncations = Some(
+                        report
+                            .leads
+                            .iter()
+                            .filter(|lead| lead.edges_truncated)
+                            .count() as u64,
+                    );
+                    event.project_mentions = Some(report.lexical_residue.len() as u64);
+                    event.project_mentions_truncated = Some(report.mentions_truncated);
+                    event.stale = Some(report.stale);
+                    event.reindex_attempted = Some(report.reindex_attempted);
+                    record_metric_best_effort(metrics.as_ref(), &event);
+                    print_json(&report, cli.pretty);
+                }
+                ProjectCommands::Get {
+                    citation,
+                    max_bytes,
+                } => {
+                    let started = Instant::now();
+                    let report = match project.get(&citation, max_bytes) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.get",
+                                    elapsed_ms(started),
+                                    error_code_for_memory_error(&error),
+                                ),
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let mut event = MetricEvent::new("project.get", "ok", elapsed_ms(started));
+                    event.response_bytes = Some(report.content.len() as u64);
+                    event.result_count = Some(1);
+                    record_metric_best_effort(metrics.as_ref(), &event);
+                    print_json(&report, cli.pretty);
+                }
+                ProjectCommands::Configure {
+                    auto_reindex,
+                    include_untracked,
+                } => print_json(
+                    &project.configure(auto_reindex.into(), include_untracked)?,
+                    cli.pretty,
+                ),
+                ProjectCommands::Watch {
+                    poll_ms,
+                    max_poll_ms,
+                    debounce_ms,
+                    max_polls,
+                } => {
+                    let started = Instant::now();
+                    let report = match project.watch_observed(
+                        poll_ms,
+                        max_poll_ms,
+                        debounce_ms,
+                        max_polls,
+                        |observation| match observation {
+                            ProjectWatchObservation::Reindexed {
+                                report,
+                                duration_ms,
+                            } => {
+                                let mut event =
+                                    MetricEvent::new("project.index", "ok", duration_ms);
+                                event.indexed_files = Some(report.indexed_files as u64);
+                                event.indexed_bytes = Some(report.indexed_bytes);
+                                event.changed_files = Some(report.changed_files as u64);
+                                event.changed_bytes = Some(report.changed_bytes);
+                                record_metric_best_effort(metrics.as_ref(), &event);
+                            }
+                            ProjectWatchObservation::ReindexFailed {
+                                error_code,
+                                duration_ms,
+                            } => record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.index",
+                                    duration_ms,
+                                    error_category_for_code(error_code),
+                                ),
+                            ),
+                            ProjectWatchObservation::SnapshotFailed {
+                                error_code,
+                                duration_ms,
+                            } => record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.watch",
+                                    duration_ms,
+                                    error_category_for_code(error_code),
+                                ),
+                            ),
+                        },
+                    ) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            record_metric_best_effort(
+                                metrics.as_ref(),
+                                &MetricEvent::error(
+                                    "project.watch",
+                                    elapsed_ms(started),
+                                    error_code_for_memory_error(&error),
+                                ),
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let mut event = MetricEvent::new("project.watch", "ok", elapsed_ms(started));
+                    event.result_count = Some(report.reindexes as u64);
+                    record_metric_best_effort(metrics.as_ref(), &event);
+                    print_json(&report, cli.pretty);
+                }
+            }
+            Ok(0)
+        }
+        Commands::Profile { command } => {
+            profile_command(
+                command,
+                cli.endpoint.as_deref(),
+                cli.no_autostart,
+                &paths,
+                cli.pretty,
+            )
+            .await
+        }
+        Commands::Metrics { command } => metrics_command(command, &paths, cli.pretty),
+        Commands::Experiment { command } => experiment_command(command, &paths, cli.pretty),
         Commands::Eval(args) => {
-            let report = run_retrieval_eval_with_models(
+            let report = run_retrieval_eval_with_options(
                 &args.corpus,
                 args.semantic_model.as_deref(),
                 args.reranker_model.as_deref(),
+                EvalOptions {
+                    recovery_only: args.recovery_only,
+                    case_id: args.case,
+                    case_timeout_ms: args.case_timeout_ms,
+                    suite_timeout_ms: args.suite_timeout_ms,
+                    jobs: args.jobs,
+                    prewarm_models: args.prewarm_models,
+                },
             )
             .await?;
+            if let Some(path) = args.timings_json {
+                let bytes = if cli.pretty {
+                    serde_json::to_vec_pretty(&report.timings)?
+                } else {
+                    serde_json::to_vec(&report.timings)?
+                };
+                fs::write(path, bytes)?;
+            }
             print_json(&report, cli.pretty);
             Ok(i32::from(!report.passed))
         }
@@ -1057,8 +1616,25 @@ async fn run(cli: Cli) -> Result<i32> {
             command: SessionCommands::Exec(args),
         } => session_exec(args, cli.endpoint.as_deref(), cli.no_autostart, &paths),
         command => {
+            let metrics = MetricsStore::discover_enabled(&env::current_dir()?, &paths.data_dir)
+                .ok()
+                .flatten();
             let mut prepared = prepare_command(command)?;
+            let metric_operation = metric_operation_for_protocol(prepared.request.op);
+            let profile_requested = prepared
+                .request
+                .input
+                .get("profile")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if metrics.is_some()
+                && matches!(prepared.request.op, Operation::MemoryRetrieve)
+                && let Some(input) = prepared.request.input.as_object_mut()
+            {
+                input.insert("profile".into(), Value::Bool(true));
+            }
             let request_id = prepared.request.request_id.clone();
+            let metric_started = Instant::now();
             let response = async {
                 attach_ambient_context(&mut prepared.request)?;
                 if prepared.auto_idempotency
@@ -1085,11 +1661,451 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             .await
             .unwrap_or_else(|error| Response::failure(request_id, &error));
+            if let (Some(metrics), Some(operation)) = (metrics.as_ref(), metric_operation) {
+                let event = metric_event_from_response(
+                    operation,
+                    elapsed_ms(metric_started),
+                    &response,
+                    profile_requested,
+                );
+                record_metric_best_effort(Some(metrics), &event);
+            }
+            let mut response = response;
+            if !profile_requested
+                && matches!(prepared.request.op, Operation::MemoryRetrieve)
+                && let Some(result) = response.result.as_mut().and_then(Value::as_object_mut)
+            {
+                result.remove("profile");
+            }
             let code = response_exit_code(&response);
             print_json(&response, cli.pretty);
             Ok(code)
         }
     }
+}
+
+async fn profile_command(
+    command: ProfileCommands,
+    endpoint_override: Option<&str>,
+    no_autostart: bool,
+    paths: &AppPaths,
+    pretty: bool,
+) -> Result<i32> {
+    match command {
+        ProfileCommands::Retrieve(args) => {
+            if args.iterations == 0 || args.iterations > 100 || args.warmups > 20 {
+                return Err(MemoryError::InvalidRequest(
+                    "profiling requires 1..=100 iterations and at most 20 warmups".into(),
+                ));
+            }
+            let query = args.query.join(" ");
+            let endpoint = resolve_endpoint(endpoint_override, paths)?;
+            let mut total_ms = Vec::new();
+            let mut recall_ms = Vec::new();
+            let mut probe_ms = Vec::new();
+            let mut citation_fetch_ms = Vec::new();
+            let mut model_load_ms = Vec::new();
+            let mut inference_ms = Vec::new();
+            let mut response_bytes = Vec::new();
+            let mut semantic_states = BTreeMap::new();
+            let mut reranker_states = BTreeMap::new();
+            let mut breaker_open_count = 0usize;
+            let mut qualified_claims_max = 0usize;
+            let mut qualified_artifacts_max = 0usize;
+            let mut recovery_references_max = 0usize;
+            for iteration in 0..args.warmups + args.iterations {
+                let mut request = Request::new(
+                    Operation::MemoryRetrieve,
+                    RetrieveInput {
+                        query: query.clone(),
+                        reformulation: args.reformulation.clone(),
+                        horizon: args.horizon.into(),
+                        reason: args.reason.clone(),
+                        max_claims: 5,
+                        max_artifact_refs: 3,
+                        max_excerpt_bytes: 320,
+                        max_recovery_leads: 8,
+                        max_recovery_bytes: 12 * 1024,
+                        min_commit_seq: None,
+                        recency: RecencyBiasInput {
+                            enabled: !args.no_recency,
+                        },
+                        profile: true,
+                    },
+                )?;
+                attach_ambient_context(&mut request)?;
+                let response = dispatch(
+                    &endpoint,
+                    &request,
+                    !no_autostart && endpoint_override.is_none(),
+                    paths,
+                )
+                .await?;
+                if !response.ok {
+                    let message = response
+                        .error
+                        .map(|error| error.message)
+                        .unwrap_or_else(|| "retrieval profiler request failed".into());
+                    return Err(MemoryError::InvalidRequest(message));
+                }
+                let value = response.result.ok_or_else(|| {
+                    MemoryError::Integrity("profile response had no result".into())
+                })?;
+                let serialized_bytes = serde_json::to_vec(&value)?.len() as f64;
+                let result: RetrieveResult = serde_json::from_value(value)?;
+                let profile = result.profile.ok_or_else(|| {
+                    MemoryError::Integrity("profile response omitted content-free timings".into())
+                })?;
+                if iteration < args.warmups {
+                    continue;
+                }
+                total_ms.push(profile.total_ms);
+                recall_ms.push(profile.recall_ms);
+                probe_ms.push(profile.probe_ms);
+                citation_fetch_ms.push(profile.citation_fetch_ms);
+                model_load_ms.extend(profile.model_load_ms);
+                inference_ms.extend(profile.inference_ms);
+                response_bytes.push(serialized_bytes);
+                *semantic_states.entry(profile.semantic_state).or_insert(0) += 1;
+                *reranker_states.entry(profile.reranker_state).or_insert(0) += 1;
+                breaker_open_count += usize::from(profile.breaker_open);
+                qualified_claims_max = qualified_claims_max.max(profile.qualified_claim_count);
+                qualified_artifacts_max =
+                    qualified_artifacts_max.max(profile.qualified_artifact_count);
+                recovery_references_max =
+                    recovery_references_max.max(profile.recovery_reference_count);
+            }
+            let report = RetrievalProfileReport {
+                schema_version: 2,
+                profiler: "content_free_retrieval_profile_v2",
+                query_recorded: false,
+                content_recorded: false,
+                warmups: args.warmups,
+                iterations: args.iterations,
+                total_ms: profile_distribution(total_ms),
+                recall_ms: profile_distribution(recall_ms),
+                probe_ms: profile_distribution(probe_ms),
+                citation_fetch_ms: profile_distribution(citation_fetch_ms),
+                model_load_ms: profile_distribution(model_load_ms),
+                inference_ms: profile_distribution(inference_ms),
+                response_bytes: profile_distribution(response_bytes),
+                semantic_states,
+                reranker_states,
+                breaker_open_count,
+                qualified_claims_max,
+                qualified_artifacts_max,
+                recovery_references_max,
+            };
+            print_json(&report, pretty);
+            Ok(0)
+        }
+    }
+}
+
+fn metrics_command(command: MetricsCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
+    let cwd = env::current_dir()?;
+    let mut metrics = MetricsStore::discover(&cwd, &paths.data_dir)?;
+    match command {
+        MetricsCommands::Status => print_json(&metrics.status()?, pretty),
+        MetricsCommands::Configure {
+            enabled,
+            retention_days,
+            max_database_bytes,
+            sample_rate,
+        } => {
+            if enabled.is_none()
+                && retention_days.is_none()
+                && max_database_bytes.is_none()
+                && sample_rate.is_none()
+            {
+                return Err(MemoryError::InvalidRequest(
+                    "metrics configure requires at least one setting".into(),
+                ));
+            }
+            print_json(
+                &metrics.configure(enabled, retention_days, max_database_bytes, sample_rate)?,
+                pretty,
+            );
+        }
+        MetricsCommands::Report { days } => print_json(&metrics.report(days)?, pretty),
+        MetricsCommands::Doctor => print_json(&metrics.doctor()?, pretty),
+        MetricsCommands::Export { output, days } => {
+            let output = if output.is_absolute() {
+                output
+            } else {
+                cwd.join(output)
+            };
+            print_json(&metrics.export_jsonl(&output, days)?, pretty);
+        }
+        MetricsCommands::Clear { yes } => {
+            let cleared = metrics.clear(yes)?;
+            print_json(
+                &json!({
+                    "schema_version": 1,
+                    "cleared": cleared,
+                    "logical_recovery_supported": false,
+                    "metrics_enabled": metrics.config().enabled,
+                }),
+                pretty,
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn experiment_command(command: ExperimentCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
+    let metrics = MetricsStore::discover(&env::current_dir()?, &paths.data_dir)?;
+    match command {
+        ExperimentCommands::Begin { primary } => {
+            print_json(&metrics.begin_experiment(primary.into())?, pretty)
+        }
+        ExperimentCommands::Pair { experiment } => {
+            print_json(&metrics.create_pair(&experiment)?, pretty)
+        }
+        ExperimentCommands::Record {
+            pair,
+            arm,
+            tokens,
+            elapsed_ms,
+            tool_calls,
+            completed,
+            completeness,
+        } => print_json(
+            &metrics.record_observation(&ExperimentObservationInput {
+                pair_id: pair,
+                arm: arm.into(),
+                tokens,
+                elapsed_ms,
+                tool_calls,
+                completed,
+                completeness,
+            })?,
+            pretty,
+        ),
+        ExperimentCommands::Report { experiment, pairs } => {
+            print_json(&metrics.experiment_report(&experiment, pairs)?, pretty)
+        }
+    }
+    Ok(0)
+}
+
+fn profile_distribution(mut values: Vec<f64>) -> ProfileDistribution {
+    values.sort_by(f64::total_cmp);
+    if values.is_empty() {
+        return ProfileDistribution {
+            min: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+            max: 0.0,
+            mean: 0.0,
+        };
+    }
+    let percentile = |percentile: f64| {
+        let rank = (percentile * values.len() as f64).ceil() as usize;
+        values[rank.saturating_sub(1).min(values.len() - 1)]
+    };
+    ProfileDistribution {
+        min: values.first().copied().unwrap_or(0.0),
+        p50: percentile(0.50),
+        p95: percentile(0.95),
+        max: values.last().copied().unwrap_or(0.0),
+        mean: values.iter().sum::<f64>() / values.len() as f64,
+    }
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn serialized_size(value: &impl Serialize) -> Option<u64> {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+}
+
+fn record_metric_best_effort(metrics: Option<&MetricsStore>, event: &MetricEvent) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| metrics.record_event(event))) {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) if metrics_database_busy(&error) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "could not record optional project metric");
+        }
+        Err(_) => {
+            tracing::warn!("optional project metrics panicked; the primary operation continued");
+        }
+    }
+}
+
+fn metrics_database_busy(error: &MemoryError) -> bool {
+    matches!(
+        error,
+        MemoryError::Database(rusqlite::Error::SqliteFailure(sqlite, _))
+            if matches!(
+                sqlite.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+fn metric_operation_for_protocol(operation: Operation) -> Option<&'static str> {
+    match operation {
+        Operation::MemoryRetrieve => Some("memory.retrieve"),
+        Operation::MemoryRecall => Some("memory.recall"),
+        Operation::MemoryProbe => Some("memory.probe"),
+        Operation::Search => Some("memory.search"),
+        Operation::ContextBuild => Some("context.build"),
+        Operation::FeedbackRecord => Some("feedback.record"),
+        _ => None,
+    }
+}
+
+fn metric_event_from_response(
+    operation: &'static str,
+    duration_ms: f64,
+    response: &Response,
+    profile_requested: bool,
+) -> MetricEvent {
+    if !response.ok {
+        let category = response
+            .error
+            .as_ref()
+            .map(|error| error_category_for_code(error.code))
+            .unwrap_or("internal_error");
+        return MetricEvent::error(operation, duration_ms, category);
+    }
+    let Some(result) = response.result.as_ref() else {
+        return MetricEvent::new(operation, "ok", duration_ms);
+    };
+    let outcome = match operation {
+        "memory.retrieve" => match json_str(result, "/presence") {
+            Some("claims") => "qualified",
+            Some("artifacts_only") => "artifacts_only",
+            _ if json_u64(result, "/recovery/returned_references").unwrap_or(0) > 0 => "recovered",
+            _ => "abstained",
+        },
+        "memory.recall" => match json_str(result, "/presence") {
+            Some("claims") => "qualified",
+            Some("artifacts_only") => "artifacts_only",
+            _ => "abstained",
+        },
+        "memory.probe" => {
+            if json_array_len(result, "/leads") > 0 {
+                "hits"
+            } else {
+                "empty"
+            }
+        }
+        "memory.search" => {
+            if json_array_len(result, "/hits") > 0 {
+                "hits"
+            } else {
+                "empty"
+            }
+        }
+        "feedback.record" => match json_str(result, "/outcome") {
+            Some("useful") => "feedback_useful",
+            Some("miss") => "feedback_miss",
+            Some("incorrect") => "feedback_incorrect",
+            Some("stale") => "feedback_stale",
+            _ => "ok",
+        },
+        _ => "ok",
+    };
+    let mut event = MetricEvent::new(operation, outcome, duration_ms);
+    event.response_bytes = if operation == "memory.retrieve" && !profile_requested {
+        let mut visible = result.clone();
+        if let Some(object) = visible.as_object_mut() {
+            object.remove("profile");
+        }
+        serialized_size(&visible)
+    } else {
+        serialized_size(result)
+    };
+    event.qualified_claims = json_u64(result, "/profile/qualified_claim_count")
+        .or_else(|| u64::try_from(json_array_len(result, "/claims")).ok());
+    event.qualified_artifacts = json_u64(result, "/profile/qualified_artifact_count")
+        .or_else(|| u64::try_from(json_array_len(result, "/artifact_refs")).ok());
+    event.recovery_references = json_u64(result, "/profile/recovery_reference_count")
+        .or_else(|| json_u64(result, "/recovery/returned_references"));
+    event.result_count = match operation {
+        "memory.probe" => u64::try_from(json_array_len(result, "/leads")).ok(),
+        "memory.search" => u64::try_from(json_array_len(result, "/hits")).ok(),
+        _ => None,
+    };
+    event.recall_ms = json_f64(result, "/profile/recall_ms");
+    event.probe_ms = json_f64(result, "/profile/probe_ms");
+    event.citation_fetch_ms = json_f64(result, "/profile/citation_fetch_ms");
+    event.model_load_ms = json_f64(result, "/profile/model_load_ms")
+        .or_else(|| json_f64(result, "/reranker_claims/model_load_latency_ms"))
+        .or_else(|| json_f64(result, "/reranker/model_load_latency_ms"));
+    event.inference_ms = json_f64(result, "/profile/inference_ms")
+        .or_else(|| json_f64(result, "/reranker_claims/inference_latency_ms"))
+        .or_else(|| json_f64(result, "/reranker/inference_latency_ms"));
+    let semantic = json_str(result, "/profile/semantic_state")
+        .or_else(|| json_str(result, "/semantic_claims/state"))
+        .or_else(|| json_str(result, "/semantic/state"))
+        .unwrap_or("unknown");
+    let reranker = json_str(result, "/profile/reranker_state")
+        .or_else(|| json_str(result, "/reranker_claims/state"))
+        .or_else(|| json_str(result, "/reranker/state"))
+        .unwrap_or("unknown");
+    event.semantic_state = safe_runtime_state(semantic).into();
+    event.reranker_state = safe_runtime_state(reranker).into();
+    event.breaker_open = result
+        .pointer("/profile/breaker_open")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || matches!(
+            json_str(result, "/reranker_claims/breaker/state")
+                .or_else(|| json_str(result, "/reranker/breaker/state")),
+            Some("open")
+        );
+    event
+}
+
+fn json_str<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
+    value.pointer(pointer).and_then(Value::as_str)
+}
+
+fn json_f64(value: &Value, pointer: &str) -> Option<f64> {
+    value.pointer(pointer).and_then(Value::as_f64)
+}
+
+fn json_u64(value: &Value, pointer: &str) -> Option<u64> {
+    value.pointer(pointer).and_then(Value::as_u64)
+}
+
+fn json_array_len(value: &Value, pointer: &str) -> usize {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+fn error_category_for_code(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::NoAmbientContext | ErrorCode::ConfigError => "config_error",
+        ErrorCode::InvalidRequest => "invalid_request",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::CitationError => "citation_error",
+        ErrorCode::RevisionConflict | ErrorCode::IdempotencyConflict => "conflict",
+        ErrorCode::IndexNotReady => "index_not_ready",
+        ErrorCode::ScopeViolation => "scope_violation",
+        ErrorCode::ContentTooLarge => "content_too_large",
+        ErrorCode::IntegrityError => "integrity_error",
+        ErrorCode::UnsupportedVersion => "unsupported_version",
+        ErrorCode::TransportError => "transport_error",
+        ErrorCode::ReasonerError => "reasoner_error",
+        ErrorCode::InternalError => "internal_error",
+    }
+}
+
+fn error_code_for_memory_error(error: &MemoryError) -> &'static str {
+    error_category_for_code(error.code())
 }
 
 fn prepare_command(command: Commands) -> Result<PreparedRequest> {
@@ -1374,6 +2390,25 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
                 },
             },
         )?,
+        Commands::Retrieve(args) => Request::new(
+            Operation::MemoryRetrieve,
+            RetrieveInput {
+                query: args.query.join(" "),
+                reformulation: args.reformulation,
+                horizon: args.horizon.into(),
+                reason: args.reason,
+                max_claims: args.max_claims,
+                max_artifact_refs: args.max_artifact_refs,
+                max_excerpt_bytes: args.max_excerpt_bytes,
+                max_recovery_leads: args.max_recovery_leads,
+                max_recovery_bytes: args.max_recovery_bytes,
+                min_commit_seq: args.min_commit_seq,
+                recency: RecencyBiasInput {
+                    enabled: !args.no_recency,
+                },
+                profile: args.profile,
+            },
+        )?,
         Commands::Instructions(args) => {
             Request::new(Operation::Instructions, json!({"format": args.format}))?
         }
@@ -1407,6 +2442,10 @@ fn prepare_command(command: Commands) -> Result<PreparedRequest> {
         | Commands::Skills { .. }
         | Commands::Compiler { .. }
         | Commands::Semantic { .. }
+        | Commands::Project { .. }
+        | Commands::Profile { .. }
+        | Commands::Metrics { .. }
+        | Commands::Experiment { .. }
         | Commands::Eval(_)
         | Commands::Context {
             command: ContextCommands::Show | ContextCommands::Explain,
@@ -3179,6 +4218,43 @@ fn print_json(value: &impl Serialize, pretty: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retrieval_profiler_distribution_is_stable_and_content_free() {
+        let distribution = profile_distribution(vec![40.0, 10.0, 30.0, 20.0]);
+        assert_eq!(distribution.min, 10.0);
+        assert_eq!(distribution.p50, 20.0);
+        assert_eq!(distribution.p95, 40.0);
+        assert_eq!(distribution.max, 40.0);
+        assert_eq!(distribution.mean, 25.0);
+
+        let report = RetrievalProfileReport {
+            schema_version: 2,
+            profiler: "content_free_retrieval_profile_v2",
+            query_recorded: false,
+            content_recorded: false,
+            warmups: 1,
+            iterations: 4,
+            total_ms: distribution,
+            recall_ms: profile_distribution(vec![]),
+            probe_ms: profile_distribution(vec![]),
+            citation_fetch_ms: profile_distribution(vec![]),
+            model_load_ms: profile_distribution(vec![]),
+            inference_ms: profile_distribution(vec![]),
+            response_bytes: profile_distribution(vec![]),
+            semantic_states: BTreeMap::new(),
+            reranker_states: BTreeMap::new(),
+            breaker_open_count: 0,
+            qualified_claims_max: 0,
+            qualified_artifacts_max: 0,
+            recovery_references_max: 0,
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["query_recorded"], false);
+        assert_eq!(value["content_recorded"], false);
+        assert!(value.get("query").is_none());
+        assert!(value.get("content").is_none());
+    }
 
     #[test]
     fn evidence_parser_preserves_exact_byte_spans() {

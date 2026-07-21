@@ -16,6 +16,8 @@ The project is intentionally not an agent framework and does not require MCP or 
 - **Derived retrieval remains cited.** Adapter- or model-produced summaries, aliases, and questions can add candidate recall only when every projection maps to exact immutable source spans. They never qualify presence or enter a context bundle by themselves.
 - **Correctness is part of the protocol.** Mutations are idempotent, revisions use optimistic concurrency, dependent reads can carry a commit sequence, and citations remain revision-stable.
 - **Recall is claim-first and honest.** `memory.recall` answers “do we know anything about this?” with current or disputed claims, exact evidence spans, open conflicts, and separate artifact references. Plausible near-matches appear only in bounded `unqualified_candidate` arrays: they carry citations and ranking diagnostics but never change `presence`, become facts, or enter model context automatically.
+- **Recovery fits in one call.** `memory.retrieve` preserves those qualification rules while returning one compact qualified-or-recovery packet. Automatic recovery bytes come only from exact evidence attached to candidate claims, remain explicitly unqualified, and are capped at 12 KiB.
+- **Current source stays authoritative.** Agents use repository tools for current code. An explicit experimental Git-aware index can produce bounded hash-pinned working-tree citations without turning repository bytes into durable memory.
 - **Session continuity is quarantined.** `memoree checkpoint` stages one bounded, agent-authored note per session outside the database and every retrieval surface. `memoree pending preview|apply` reuses the explicit remember flow; no transcript hook or background process can silently create memory.
 - **Model context is bounded.** `context.build` returns provenance-rich excerpts within a byte budget, keeps source lines in labelled blockquotes, reports heuristic prompt-injection signals, and always marks retrieved content as untrusted.
 - **Freshness is bounded.** Search keeps the lexical top-K candidate set, then applies a deterministic, type-aware recency bonus that can promote a current item by at most two positions. Recency never broadens scope, hides contradictions, or makes historical/future content current.
@@ -130,8 +132,13 @@ memoree pending preview CHECKPOINT_ID
 memoree artifact put ./decision.md --kind decision --title "Storage decision"
 memoree claim assert observation "Checkout terms are draft." --valid-until 2026-08-01T00:00:00Z --evidence ARTIFACT_ID@REVISION_ID#START-END
 memoree recall "what do we know about storage?"
+memoree retrieve "why was the storage boundary chosen?"
 memoree probe "what did we decide about the storage boundary?"
 memoree citation get 'memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END'
+memoree profile retrieve "why was the storage boundary chosen?" --iterations 10
+memoree metrics configure --enabled true
+memoree metrics report --days 7
+memoree experiment begin --primary tokens
 memoree search "why was the storage design chosen?"
 memoree context build "storage constraints" --max-bytes 4096
 memoree relation list artifact:ARTIFACT_ID --direction outgoing
@@ -144,7 +151,11 @@ The final command materializes text or binary content atomically and reports the
 
 Recall is the normal agent-facing lookup. It keeps claims and raw source matches in separate arrays, attaches immutable evidence citations such as `memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END`, marks conflicted claims as `disputed`, and reports only the horizon it actually searched. `artifacts_only` means useful source material matched but no current claim did; `none` means no match at that horizon, not permission to broaden automatically.
 
-Recall returns qualified claims and artifact references only by default. If scoped, lifecycle-filtered unqualified leads exist, its small `candidates_hint` can direct an agent to one explicit `memoree probe` call. After one meaning-preserving implementation-language reformulation, probe returns at most eight untrusted titles plus provenance-labeled exact immutable source arrays; it never affects `presence` or `context.build`. From the pinned target repository, fetch the highest-ranked ranged lead first, then up to two title-selected leads only as needed, bounded to nine refs/12 KiB. Use decisive source terms for one same-scope qualified recall judged against every entity, predicate role, state, and facet in the original question. Candidate/fetched bytes never qualify an answer. If support is partial, conflicted, role-mismatched, or absent, abstain.
+`memory.retrieve` is the preferred agent path in 0.6. It returns qualified recall directly or, only when presence is `none`, performs one same-horizon candidate probe and fetches a bounded exact-evidence packet. Recovery remains `unqualified_evidence`: the consumer must check it against the original question and abstain on partial, conflicted, role-mismatched, or absent support. `memory.recall`, `memory.probe`, and `citation.get` remain available separately for capability fallback and deliberate diagnostics.
+
+Current-code navigation remains the job of repository tools. Version 0.6 also includes an **experimental, human-opt-in** Tree-sitter/FTS project index with hash-verified excerpts, explicit ambiguity and blind spots, bounded responses, transactional incremental rebuilds, and a guarded foreground watcher. It is off by default and is not routed by the canonical agent skill: matched agent evaluations found that agents re-verified its packets, making the feature slower and more token-expensive for narrow tasks, while complex tasks lost completeness. See [Project source indexing](docs/project-index.md) for the command surface, exact evidence, and promotion gate.
+
+Project-local operational metrics are also explicit and disabled by default. When enabled, real retrieval and project-index commands append only numeric and closed categorical fields to a separate bounded SQLite database outside the repository and authority store. Queries, content, citations, prompts, file paths, model names, task labels, and raw errors have no storage column. `memoree metrics report|doctor|export|clear` exposes the lifecycle. Passive traces diagnose latency and retrieval behavior but cannot prove token savings. `memoree experiment begin|pair|record|report` provides randomized, opaque, matched task pairs for explicit token/time comparisons. See [Project metrics and experiments](docs/metrics.md).
 
 `citation get` accepts only immutable artifact citations. A ranged UTF-8 citation returns escaped untrusted text and a citation naming exactly the returned bytes; spans over 8 KiB are safely narrowed. Revision-only citations return machine-readable metadata with `range_required` instead of dumping a misleading prefix, while binary content is refused. Whole-revision `artifact get` remains a deliberate inspection path.
 
@@ -160,6 +171,8 @@ memoree semantic reranker-status
 ```
 
 Dense similarity cannot qualify an answer. The contextual dense projection embeds bounded artifact metadata with exact passage bytes and claim type/component with the exact statement; it remains disposable and rebuilds automatically when its projection policy changes. Exact-tier ordering is model-independent. The release-pinned TinyBERT cross-encoder returns only a stable claim-candidate permutation over a diversified slate: top eight deterministic-fusion positions union top eight dense positions, deduplicated and backfilled to sixteen inside each qualification tier. No logit is serialized or persisted, qualification tiers cannot be crossed, and artifacts/mixed searches remain disabled. At daemon startup, ten fixed warm samples set an inference-only breaker budget to twice the upper median, clamped to 75–150 ms. Five consecutive overruns open the breaker; it probes after 16 deterministic fallbacks and requires two healthy probes to close.
+
+Query analysis also reports conservative intent and script profiles (Latin, Cyrillic, Arabic, CJK, mixed, other, or unknown). These fields describe routing context only. They do not establish multilingual semantic quality, translate text, or alter qualification, scope, lifecycle, citations, or model authority.
 
 Recall, search, and context construction apply the bounded recency policy by default. The `memoree recall`, `memoree search`, and `memoree context build` wrappers accept `--no-recency` for one retrieval; raw `memoree call` clients can send `"recency":{"enabled":false}` on `memory.recall`, `search`, or `context.build`.
 

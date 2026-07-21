@@ -1,5 +1,8 @@
 //! Protocol operation dispatcher.
 
+use std::time::Instant;
+
+use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -19,14 +22,17 @@ use crate::{
         MAX_PROBE_ITEMS, MAX_PROBE_SOURCES_PER_LEAD, MAX_PROBE_TITLE_BYTES, MAX_QUERY_BYTES,
         MAX_RECALL_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_ARTIFACT_REFS, MAX_RECALL_CANDIDATE_CLAIMS,
         MAX_RECALL_CLAIMS, MAX_RECALL_EVIDENCE_EXCERPTS_PER_CLAIM, MAX_RECALL_EXCERPT_BYTES,
-        MAX_REQUEST_ID_BYTES, Operation, PROTOCOL_VERSION, ProbeInput, ProbeLead,
+        MAX_REQUEST_ID_BYTES, MAX_RETRIEVE_EVIDENCE_BYTES, MAX_RETRIEVE_LEADS,
+        MAX_RETRIEVE_REFERENCES, Operation, PROTOCOL_VERSION, ProbeInput, ProbeLead,
         ProbeLocatorOrigin, ProbeResult, ProbeSourceLocator, ProjectionDropInput,
         ProjectionListInput, ProjectionPutInput, RecallArtifactReference,
         RecallCandidateArtifactReference, RecallCandidateClaim, RecallClaim, RecallClaimStatus,
         RecallEvidenceReference, RecallInput, RecallPresence, RecallResult, RelationListInput,
-        RelationPutInput, Request, ResolvedContext, Response, SearchHit, SearchInput, SearchResult,
-        SourceCheckpointInput, SourceGetInput, SourceIngestInput, SourceRegisterInput,
-        SourceWithdrawInput, Warning,
+        RelationPutInput, Request, ResolvedContext, Response, RetrieveAuthority, RetrieveInput,
+        RetrieveQualifiedArtifact, RetrieveQualifiedClaim, RetrieveRecovery,
+        RetrieveRecoveryEvidence, RetrieveResult, RetrieveTimingProfile, SearchHit, SearchInput,
+        SearchResult, SourceCheckpointInput, SourceGetInput, SourceIngestInput,
+        SourceRegisterInput, SourceWithdrawInput, Warning,
     },
     store::Store,
 };
@@ -386,6 +392,12 @@ impl MemoryService {
                 let result = build_probe(&self.store, ambient, &input)?;
                 Handled::read(result, context)
             }
+            Operation::MemoryRetrieve => {
+                let input: RetrieveInput = input(request)?;
+                let ambient = ambient(&context)?;
+                let result = build_retrieve(&self.store, ambient, &input)?;
+                Handled::read(result, context)
+            }
             Operation::ContextBuild => {
                 let input: ContextBuildInput = input(request)?;
                 let ambient = ambient(&context)?;
@@ -518,6 +530,7 @@ fn request_horizon(request: &Request) -> Result<Horizon> {
         Operation::Search => Ok(input::<SearchInput>(request)?.horizon),
         Operation::MemoryRecall => Ok(input::<RecallInput>(request)?.horizon),
         Operation::MemoryProbe => Ok(input::<ProbeInput>(request)?.horizon),
+        Operation::MemoryRetrieve => Ok(input::<RetrieveInput>(request)?.horizon),
         Operation::ContextBuild => Ok(input::<ContextBuildInput>(request)?.search.horizon),
         Operation::RelationList => Ok(input::<RelationListInput>(request)?.horizon),
         Operation::ConflictList => Ok(input::<ConflictListInput>(request)?.horizon),
@@ -530,6 +543,9 @@ fn broaden_reason(request: &Request) -> Result<String> {
         Operation::Search => Ok(input::<SearchInput>(request)?.reason.unwrap_or_default()),
         Operation::MemoryRecall => Ok(input::<RecallInput>(request)?.reason.unwrap_or_default()),
         Operation::MemoryProbe => Ok(input::<ProbeInput>(request)?.reason.unwrap_or_default()),
+        Operation::MemoryRetrieve => {
+            Ok(input::<RetrieveInput>(request)?.reason.unwrap_or_default())
+        }
         Operation::ContextBuild => Ok(input::<ContextBuildInput>(request)?
             .search
             .reason
@@ -1132,6 +1148,225 @@ fn build_probe(store: &Store, ambient: &AmbientContext, input: &ProbeInput) -> R
         leads,
         available_count,
         truncated,
+    })
+}
+
+fn build_retrieve(
+    store: &Store,
+    ambient: &AmbientContext,
+    input: &RetrieveInput,
+) -> Result<RetrieveResult> {
+    if input.max_recovery_leads == 0 || input.max_recovery_leads > MAX_RETRIEVE_LEADS {
+        return Err(MemoryError::InvalidRequest(format!(
+            "max_recovery_leads must be between 1 and {MAX_RETRIEVE_LEADS}"
+        )));
+    }
+    if input.max_recovery_bytes == 0 || input.max_recovery_bytes > MAX_RETRIEVE_EVIDENCE_BYTES {
+        return Err(MemoryError::InvalidRequest(format!(
+            "max_recovery_bytes must be between 1 and {MAX_RETRIEVE_EVIDENCE_BYTES}"
+        )));
+    }
+    if input.reformulation.as_deref().is_some_and(|query| {
+        query.trim().is_empty() || query.len() > MAX_QUERY_BYTES || query == input.query
+    }) {
+        return Err(MemoryError::InvalidRequest(format!(
+            "reformulation must differ from query and contain 1..={MAX_QUERY_BYTES} bytes"
+        )));
+    }
+
+    let total_started = Instant::now();
+    let recall_started = Instant::now();
+    let recall = build_recall(
+        store,
+        ambient,
+        &RecallInput {
+            query: input.query.clone(),
+            horizon: input.horizon,
+            reason: input.reason.clone(),
+            max_claims: input.max_claims,
+            max_artifact_refs: input.max_artifact_refs,
+            max_excerpt_bytes: input.max_excerpt_bytes,
+            max_candidate_claims: 0,
+            max_candidate_artifact_refs: 0,
+            min_commit_seq: input.min_commit_seq,
+            recency: input.recency.clone(),
+        },
+    )?;
+    let recall_ms = recall_started.elapsed().as_secs_f64() * 1_000.0;
+    let mut probe_ms = 0.0;
+    let mut citation_fetch_ms = 0.0;
+    let mut recovery = None;
+
+    if matches!(recall.presence, RecallPresence::None)
+        && !matches!(
+            recall.query_analysis.retrieval_profile.intent_hint,
+            crate::protocol::RetrievalIntentHint::CurrentSource
+        )
+    {
+        let routed_query = input
+            .reformulation
+            .as_deref()
+            .unwrap_or(input.query.as_str());
+        let probe_started = Instant::now();
+        let probe = build_probe(
+            store,
+            ambient,
+            &ProbeInput {
+                query: routed_query.into(),
+                original_query: input.reformulation.as_ref().map(|_| input.query.clone()),
+                horizon: input.horizon,
+                reason: input.reason.clone(),
+                max_leads: input.max_recovery_leads,
+                min_commit_seq: input.min_commit_seq,
+                recency: input.recency.clone(),
+            },
+        )?;
+        probe_ms = probe_started.elapsed().as_secs_f64() * 1_000.0;
+        let fetch_started = Instant::now();
+        let mut evidence = Vec::new();
+        let mut returned_content_bytes = 0usize;
+        let mut considered_references = 0usize;
+        'leads: for lead in &probe.leads {
+            for source in &lead.sources {
+                considered_references += 1;
+                if !matches!(
+                    source.locator_origin,
+                    ProbeLocatorOrigin::ClaimExact | ProbeLocatorOrigin::SemanticResolved
+                ) {
+                    continue;
+                }
+                if evidence.len() >= MAX_RETRIEVE_REFERENCES
+                    || returned_content_bytes >= input.max_recovery_bytes
+                {
+                    break 'leads;
+                }
+                let remaining = input.max_recovery_bytes - returned_content_bytes;
+                let max_bytes = remaining.min(1536).min(MAX_CITATION_FETCH_BYTES);
+                let fetched = match build_citation_get(
+                    store,
+                    &CitationGetInput {
+                        citation: source.citation.clone(),
+                        max_bytes,
+                    },
+                ) {
+                    Ok(fetched) => fetched,
+                    // Revision-only probe locators are deliberately not
+                    // fetchable and therefore cannot enter this packet.
+                    Err(_) => continue,
+                };
+                returned_content_bytes += fetched.byte_count;
+                evidence.push(RetrieveRecoveryEvidence {
+                    retrieval_tier: "unqualified_evidence".into(),
+                    title: lead.title.clone(),
+                    citation: fetched.citation,
+                    content: fetched.content,
+                    media_type: fetched.media_type,
+                    truncated: fetched.truncated,
+                });
+                // Preserve lead diversity: one exact source per ranked lead
+                // before spending a second reference on the same lead.
+                break;
+            }
+        }
+        citation_fetch_ms = fetch_started.elapsed().as_secs_f64() * 1_000.0;
+        if probe.available_count > 0 {
+            recovery = Some(RetrieveRecovery {
+                retrieval_tier: "unqualified_evidence".into(),
+                original_query_preserved: true,
+                reformulation_applied: probe.reformulation_applied,
+                available_leads: probe.available_count,
+                returned_references: evidence.len(),
+                returned_content_bytes,
+                references_truncated: probe.truncated
+                    || considered_references > evidence.len()
+                    || evidence.len() >= MAX_RETRIEVE_REFERENCES,
+                evidence,
+                warning: "Recovery bytes come only from exact evidence attached to candidate claims. They remain unqualified routing evidence, not an answer. Check relevance against the original question; current repository/source state overrides historical memory.".into(),
+            });
+        }
+    }
+
+    let qualified_claim_count = recall.claims.len();
+    let qualified_artifact_count = recall.artifact_refs.len();
+    let recovery_reference_count = recovery
+        .as_ref()
+        .map(|recovery| recovery.returned_references)
+        .unwrap_or(0);
+    let semantic_state = recall.semantic_claims.state.clone();
+    let reranker_state = recall.reranker_claims.state.clone();
+    let model_load_ms = [
+        recall.reranker_claims.model_load_latency_ms,
+        recall.reranker_artifacts.model_load_latency_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(f64::total_cmp);
+    let inference_ms = [
+        recall.reranker_claims.inference_latency_ms,
+        recall.reranker_artifacts.inference_latency_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(f64::total_cmp);
+    let breaker_open = recall.reranker_claims.breaker.state == "open"
+        || recall.reranker_artifacts.breaker.state == "open";
+    let profile = input.profile.then(|| RetrieveTimingProfile {
+        policy_version: "content_free_retrieval_profile_v2".into(),
+        total_ms: total_started.elapsed().as_secs_f64() * 1_000.0,
+        recall_ms,
+        probe_ms,
+        citation_fetch_ms,
+        qualified_claim_count,
+        qualified_artifact_count,
+        recovery_reference_count,
+        semantic_state,
+        reranker_state,
+        model_load_ms,
+        inference_ms,
+        breaker_open,
+    });
+    Ok(RetrieveResult {
+        content_is_untrusted: true,
+        presence: recall.presence,
+        searched_horizon: input.horizon,
+        query_analysis: recall.query_analysis,
+        authority: RetrieveAuthority {
+            memory_snapshot_commit_seq: store.last_commit_seq()?,
+            retrieved_at: Utc::now(),
+            qualification_policy: "deterministic_authority_only_v1".into(),
+            recovery_policy: "unqualified_exact_evidence_v1".into(),
+            current_source_rule: "For questions about current code or mutable external state, inspect the authoritative repository/source; memory is historical evidence and never overrides it.".into(),
+        },
+        claims: recall
+            .claims
+            .into_iter()
+            .map(|claim| RetrieveQualifiedClaim {
+                claim_id: claim.claim_id,
+                revision_id: claim.revision_id,
+                claim_type: claim.claim_type,
+                status: claim.status,
+                statement: claim.statement,
+                citation: claim.citation,
+                evidence: claim.evidence,
+                conflict_relation_ids: claim.conflict_relation_ids,
+            })
+            .collect(),
+        conflicts: recall.conflicts,
+        artifact_refs: recall
+            .artifact_refs
+            .into_iter()
+            .map(|artifact| RetrieveQualifiedArtifact {
+                artifact_id: artifact.artifact_id,
+                revision_id: artifact.revision_id,
+                title: artifact.title,
+                citation: artifact.citation,
+                excerpt: artifact.excerpt,
+                excerpt_truncated: artifact.excerpt_truncated,
+                risk_signals: artifact.risk_signals,
+            })
+            .collect(),
+        recovery,
+        profile,
     })
 }
 
@@ -3199,6 +3434,206 @@ mod tests {
             .expect("underqualified injection artifact remains an explicitly flagged candidate");
         assert_eq!(returned.retrieval_tier, "unqualified_candidate");
         assert!(!returned.risk_signals.is_empty());
+    }
+
+    #[test]
+    fn retrieve_returns_exact_bounded_recovery_without_changing_presence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let marker = "RECOVERY_PACKET_619 preserves exact historical evidence";
+        let artifact = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "audit".into(),
+                    title: "Prior retrieval audit".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(marker.into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("retrieve-recovery-artifact"),
+                "retrieve-recovery-artifact",
+            )
+            .unwrap()
+            .value;
+        store
+            .claim_assert(
+                &ambient,
+                &ClaimAssertInput {
+                    claim_type: crate::protocol::ClaimType::Fact,
+                    statement: marker.into(),
+                    confidence: None,
+                    evidence: vec![EvidenceLocator {
+                        artifact_id: artifact.artifact_id,
+                        revision_id: artifact.revision_id,
+                        start_byte: Some(0),
+                        end_byte: Some(marker.len() as u64),
+                    }],
+                    valid_from: None,
+                    valid_until: None,
+                    actor: None,
+                },
+                Some("retrieve-recovery-claim"),
+                "retrieve-recovery-claim",
+            )
+            .unwrap();
+
+        let result = build_retrieve(
+            &store,
+            &ambient,
+            &RetrieveInput {
+                query: "RECOVERY_PACKET_619 unrelated gamma delta epsilon zeta".into(),
+                reformulation: None,
+                horizon: Horizon::Ambient,
+                reason: None,
+                max_claims: 5,
+                max_artifact_refs: 3,
+                max_excerpt_bytes: 320,
+                max_recovery_leads: 3,
+                max_recovery_bytes: MAX_RETRIEVE_EVIDENCE_BYTES,
+                min_commit_seq: None,
+                recency: crate::protocol::RecencyBiasInput::default(),
+                profile: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.presence, RecallPresence::None);
+        assert!(result.claims.is_empty());
+        assert!(result.artifact_refs.is_empty());
+        let recovery = result
+            .recovery
+            .expect("candidate evidence is returned in one call");
+        assert_eq!(recovery.retrieval_tier, "unqualified_evidence");
+        assert!(recovery.returned_references <= MAX_RETRIEVE_REFERENCES);
+        assert!(recovery.returned_content_bytes <= MAX_RETRIEVE_EVIDENCE_BYTES);
+        assert!(
+            recovery
+                .evidence
+                .iter()
+                .any(|evidence| evidence.content.contains("RECOVERY_PACKET_619"))
+        );
+        assert!(
+            recovery
+                .evidence
+                .iter()
+                .all(|evidence| evidence.citation.contains('#'))
+        );
+        assert!(result.profile.is_some());
+        assert_eq!(
+            result.query_analysis.retrieval_profile.semantic_role,
+            "candidate_and_ordering_only"
+        );
+    }
+
+    #[test]
+    fn retrieve_does_not_auto_fetch_dated_claims_for_current_source_intent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let source = "Billing destination is legacy-clearing.";
+        let artifact = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "decision".into(),
+                    title: "Old payment route".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(source.into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("current-intent-artifact"),
+                "current-intent-artifact",
+            )
+            .unwrap()
+            .value;
+        store
+            .claim_assert(
+                &ambient,
+                &ClaimAssertInput {
+                    claim_type: crate::protocol::ClaimType::Decision,
+                    statement: source.into(),
+                    confidence: None,
+                    evidence: vec![EvidenceLocator {
+                        artifact_id: artifact.artifact_id,
+                        revision_id: artifact.revision_id,
+                        start_byte: Some(0),
+                        end_byte: Some(source.len() as u64),
+                    }],
+                    valid_from: None,
+                    valid_until: None,
+                    actor: None,
+                },
+                Some("current-intent-claim"),
+                "current-intent-claim",
+            )
+            .unwrap();
+
+        let result = build_retrieve(
+            &store,
+            &ambient,
+            &RetrieveInput {
+                query: "Where do successful billing events go after the migration?".into(),
+                reformulation: None,
+                horizon: Horizon::Ambient,
+                reason: None,
+                max_claims: 5,
+                max_artifact_refs: 3,
+                max_excerpt_bytes: 320,
+                max_recovery_leads: 3,
+                max_recovery_bytes: MAX_RETRIEVE_EVIDENCE_BYTES,
+                min_commit_seq: None,
+                recency: crate::protocol::RecencyBiasInput::default(),
+                profile: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.presence, RecallPresence::None);
+        assert!(matches!(
+            result.query_analysis.retrieval_profile.intent_hint,
+            crate::protocol::RetrievalIntentHint::CurrentSource
+        ));
+        assert!(result.recovery.is_none());
+        assert_eq!(result.profile.unwrap().recovery_reference_count, 0);
+
+        let qualified = build_retrieve(
+            &store,
+            &ambient,
+            &RetrieveInput {
+                query: "What is currently the billing destination legacy-clearing?".into(),
+                reformulation: None,
+                horizon: Horizon::Ambient,
+                reason: None,
+                max_claims: 5,
+                max_artifact_refs: 3,
+                max_excerpt_bytes: 320,
+                max_recovery_leads: 3,
+                max_recovery_bytes: MAX_RETRIEVE_EVIDENCE_BYTES,
+                min_commit_seq: None,
+                recency: crate::protocol::RecencyBiasInput::default(),
+                profile: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(qualified.presence, RecallPresence::Claims);
+        assert_eq!(qualified.claims.len(), 1);
+        assert!(qualified.recovery.is_none());
     }
 
     #[tokio::test]

@@ -12,7 +12,9 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use ulid::Ulid;
 
 use crate::{
@@ -35,6 +37,8 @@ const SETTINGS_FILE: &str = "config.toml";
 const SOCKET_FILE: &str = "memoree.sock";
 const SETTINGS_SCHEMA: u32 = 1;
 const MARKER_SCHEMA: u32 = 1;
+const LOCAL_PROJECT_SETTINGS_SCHEMA: u32 = 1;
+const LOCAL_PROJECT_SETTINGS_DIRECTORY: &str = "project-settings";
 
 /// Platform-appropriate paths used by the local daemon and CLI.
 ///
@@ -188,7 +192,7 @@ fn validate_settings(settings: &Settings, path: &Path) -> Result<()> {
 
 /// On-disk project marker. Its IDs are generated once and remain stable even
 /// if the directory is moved or renamed.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Marker {
     #[serde(default = "marker_schema")]
@@ -198,10 +202,242 @@ pub struct Marker {
     pub name: String,
     #[serde(default)]
     pub pins: Vec<String>,
+    // Accepted only to keep unreleased beta markers readable. Feature consent
+    // is resolved exclusively from owner-private local project settings.
+    #[serde(default, skip_serializing)]
+    pub project_index: ProjectIndexConfig,
+    // See `project_index`: shared marker contents never enable local metrics.
+    #[serde(default, skip_serializing)]
+    pub metrics: MetricsConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReindexMode {
+    #[default]
+    Off,
+    OnSearch,
+    Watch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectIndexConfig {
+    #[serde(default)]
+    pub auto_reindex: AutoReindexMode,
+    #[serde(default)]
+    pub include_untracked: bool,
+    #[serde(default = "default_project_max_files")]
+    pub max_files: usize,
+    #[serde(default = "default_project_max_total_bytes")]
+    pub max_total_bytes: u64,
+    #[serde(default = "default_project_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_project_max_changed_bytes")]
+    pub max_changed_bytes: u64,
+}
+
+impl Default for ProjectIndexConfig {
+    fn default() -> Self {
+        Self {
+            auto_reindex: AutoReindexMode::Off,
+            include_untracked: false,
+            max_files: default_project_max_files(),
+            max_total_bytes: default_project_max_total_bytes(),
+            max_file_bytes: default_project_max_file_bytes(),
+            max_changed_bytes: default_project_max_changed_bytes(),
+        }
+    }
+}
+
+impl ProjectIndexConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_retention_days")]
+    pub retention_days: u32,
+    #[serde(default = "default_metrics_max_database_bytes")]
+    pub max_database_bytes: u64,
+    #[serde(default = "default_metrics_sample_rate")]
+    pub sample_rate: f64,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_days: default_metrics_retention_days(),
+            max_database_bytes: default_metrics_max_database_bytes(),
+            sample_rate: default_metrics_sample_rate(),
+        }
+    }
+}
+
+impl MetricsConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+const fn default_metrics_retention_days() -> u32 {
+    14
+}
+
+const fn default_metrics_max_database_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+const fn default_metrics_sample_rate() -> f64 {
+    1.0
+}
+
+const fn default_project_max_files() -> usize {
+    50_000
+}
+
+const fn default_project_max_total_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+const fn default_project_max_file_bytes() -> u64 {
+    512 * 1024
+}
+
+const fn default_project_max_changed_bytes() -> u64 {
+    32 * 1024 * 1024
 }
 
 const fn marker_schema() -> u32 {
     MARKER_SCHEMA
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalProjectSettings {
+    #[serde(default = "local_project_settings_schema")]
+    pub schema: u32,
+    #[serde(default)]
+    pub project_index: ProjectIndexConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+}
+
+impl LocalProjectSettings {
+    pub(crate) fn from_marker(marker: &Marker) -> Self {
+        Self {
+            schema: LOCAL_PROJECT_SETTINGS_SCHEMA,
+            project_index: marker.project_index.clone(),
+            metrics: marker.metrics.clone(),
+        }
+    }
+}
+
+const fn local_project_settings_schema() -> u32 {
+    LOCAL_PROJECT_SETTINGS_SCHEMA
+}
+
+pub(crate) fn local_project_settings_path(data_dir: &Path, project_id: &str) -> PathBuf {
+    let key = blake3::hash(project_id.as_bytes()).to_hex().to_string();
+    data_dir
+        .join(LOCAL_PROJECT_SETTINGS_DIRECTORY)
+        .join(format!("{}.toml", &key[..32]))
+}
+
+pub(crate) fn load_local_project_settings(
+    data_dir: &Path,
+    project_id: &str,
+) -> Result<Option<LocalProjectSettings>> {
+    let path = local_project_settings_path(data_dir, project_id);
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: LocalProjectSettings = toml::from_str(&source).map_err(|error| {
+        MemoryError::Config(format!(
+            "could not parse local project settings {}: {error}",
+            path.display()
+        ))
+    })?;
+    validate_local_project_settings(&settings, &path)?;
+    Ok(Some(settings))
+}
+
+pub(crate) fn update_local_project_settings(
+    data_dir: &Path,
+    project_id: &str,
+    initial: &LocalProjectSettings,
+    update: impl FnOnce(&mut LocalProjectSettings) -> Result<()>,
+) -> Result<LocalProjectSettings> {
+    let path = local_project_settings_path(data_dir, project_id);
+    let directory = path
+        .parent()
+        .ok_or_else(|| MemoryError::Config("local project settings path has no parent".into()))?;
+    create_private_directory(directory)?;
+    let lock_path = directory.join(format!(
+        "{}.lock",
+        path.file_stem().unwrap_or_default().to_string_lossy()
+    ));
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        &lock_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
+    FileExt::lock_exclusive(&lock)?;
+    let mut settings =
+        load_local_project_settings(data_dir, project_id)?.unwrap_or_else(|| initial.clone());
+    update(&mut settings)?;
+    validate_local_project_settings(&settings, &path)?;
+    let mut serialized = toml::to_string_pretty(&settings).map_err(|error| {
+        MemoryError::Config(format!(
+            "could not serialize local project settings: {error}"
+        ))
+    })?;
+    serialized.push('\n');
+    let mut temporary = NamedTempFile::new_in(directory)?;
+    temporary.write_all(serialized.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .map_err(|error| MemoryError::Io(error.error))?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    if let Ok(directory_file) = fs::File::open(directory) {
+        let _ = directory_file.sync_all();
+    }
+    Ok(settings)
+}
+
+fn validate_local_project_settings(settings: &LocalProjectSettings, path: &Path) -> Result<()> {
+    if settings.schema != LOCAL_PROJECT_SETTINGS_SCHEMA {
+        return Err(MemoryError::Config(format!(
+            "unsupported local project settings schema {} in {}; expected {LOCAL_PROJECT_SETTINGS_SCHEMA}",
+            settings.schema,
+            path.display()
+        )));
+    }
+    validate_project_index_config(&settings.project_index, path)?;
+    validate_metrics_config(&settings.metrics, path)
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
 }
 
 impl Marker {
@@ -247,6 +483,8 @@ pub fn init_marker(
         project_id: format!("prj_{}", Ulid::r#gen()),
         name,
         pins: Vec::new(),
+        project_index: ProjectIndexConfig::default(),
+        metrics: MetricsConfig::default(),
     };
     let mut serialized = toml::to_string_pretty(&marker).map_err(|error| {
         MemoryError::Config(format!("could not serialize project marker: {error}"))
@@ -305,7 +543,43 @@ fn validate_marker(marker: &Marker, path: &Path) -> Result<()> {
     validate_required("marker.workspace_id", &marker.workspace_id)?;
     validate_required("marker.project_id", &marker.project_id)?;
     validate_required("marker.name", &marker.name)?;
-    validate_pins(&marker.pins)
+    validate_pins(&marker.pins)?;
+    validate_project_index_config(&marker.project_index, path)?;
+    validate_metrics_config(&marker.metrics, path)
+}
+
+fn validate_project_index_config(index: &ProjectIndexConfig, path: &Path) -> Result<()> {
+    if index.max_files == 0
+        || index.max_files > 200_000
+        || index.max_file_bytes == 0
+        || index.max_total_bytes == 0
+        || index.max_changed_bytes == 0
+        || index.max_file_bytes > index.max_total_bytes
+        || index.max_changed_bytes > index.max_total_bytes
+        || index.max_total_bytes > 2 * 1024 * 1024 * 1024
+    {
+        return Err(MemoryError::Config(format!(
+            "project_index budgets are invalid in {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_metrics_config(metrics: &MetricsConfig, path: &Path) -> Result<()> {
+    if metrics.retention_days == 0
+        || metrics.retention_days > 365
+        || metrics.max_database_bytes < 1024 * 1024
+        || metrics.max_database_bytes > 1024 * 1024 * 1024
+        || !metrics.sample_rate.is_finite()
+        || !(0.0..=1.0).contains(&metrics.sample_rate)
+    {
+        return Err(MemoryError::Config(format!(
+            "metrics settings are invalid in {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_context(context: &AmbientContext) -> Result<()> {
@@ -550,6 +824,7 @@ fn resolution_precedence() -> Vec<ContextSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{metrics::MetricsStore, project_index::ProjectIndex};
     use tempfile::TempDir;
 
     fn sample_context() -> AmbientContext {
@@ -751,5 +1026,77 @@ pins = ["memoree://artifact/art_pin@rev_one"]
         )
         .unwrap();
         assert!(matches!(read_marker(marker), Err(MemoryError::Config(_))));
+    }
+
+    #[test]
+    fn existing_marker_without_metrics_remains_disabled_and_valid() {
+        let temp = TempDir::new().unwrap();
+        let marker = temp.path().join(MARKER_FILE);
+        fs::write(
+            &marker,
+            "schema = 1\nworkspace_id = \"wsp_old\"\nproject_id = \"prj_old\"\nname = \"old\"\npins = []\n",
+        )
+        .unwrap();
+        let marker = read_marker(marker).unwrap();
+        assert_eq!(marker.metrics, MetricsConfig::default());
+        assert!(!marker.metrics.enabled);
+    }
+
+    #[test]
+    fn shared_beta_sections_never_enable_local_features() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let data = temp.path().join("data");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join(MARKER_FILE),
+            "schema = 1\nworkspace_id = \"wsp_beta\"\nproject_id = \"prj_beta\"\nname = \"beta\"\npins = []\n\n[project_index]\nauto_reindex = \"watch\"\ninclude_untracked = true\n\n[metrics]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let project_index = ProjectIndex::discover(&project, &data).unwrap();
+        let metrics = MetricsStore::discover(&project, &data).unwrap();
+        assert_eq!(project_index.config(), &ProjectIndexConfig::default());
+        assert_eq!(metrics.config(), &MetricsConfig::default());
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn local_project_settings_are_private_atomic_and_never_rewrite_the_marker() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let marker = init_marker(temp.path(), "local-settings", None).unwrap();
+        let marker_path = temp.path().join(MARKER_FILE);
+        let marker_before = fs::read(&marker_path).unwrap();
+        assert!(!String::from_utf8_lossy(&marker_before).contains("project_index"));
+        assert!(!String::from_utf8_lossy(&marker_before).contains("metrics"));
+
+        let initial = LocalProjectSettings::from_marker(&marker);
+        let settings =
+            update_local_project_settings(&data, &marker.project_id, &initial, |settings| {
+                settings.project_index.auto_reindex = AutoReindexMode::OnSearch;
+                settings.metrics.enabled = true;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            settings.project_index.auto_reindex,
+            AutoReindexMode::OnSearch
+        );
+        assert!(settings.metrics.enabled);
+        assert_eq!(fs::read(marker_path).unwrap(), marker_before);
+        assert_eq!(
+            load_local_project_settings(&data, &marker.project_id)
+                .unwrap()
+                .unwrap(),
+            settings
+        );
+        let path = local_project_settings_path(&data, &marker.project_id);
+        assert_ne!(path, temp.path().join(MARKER_FILE));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o077, 0);
+        }
     }
 }

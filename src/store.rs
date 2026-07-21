@@ -37,11 +37,11 @@ use crate::protocol::{
     MAX_PROJECTION_SPANS, MAX_PROJECTION_TEXT_BYTES, MAX_QUERY_BYTES, MAX_RECALL_EXCERPT_BYTES,
     MAX_RELATION_LIST_ITEMS, MAX_SEARCH_ITEMS, MAX_SOURCE_CURSOR_BYTES, MAX_TITLE_BYTES,
     ProjectionDropInput, ProjectionListInput, ProjectionPutInput, ProjectionRetrievalStatus,
-    ProjectionSpan, QueryAnalysis, RecencyDecayClass, RecencyTimestampBasis, RelationListInput,
-    RelationListItem, RelationListResult, RelationPutInput, RelationType, RerankerRetrievalStatus,
-    SearchHit, SearchInput, SearchRanking, SearchResult, SemanticRetrievalStatus,
-    SourceCheckpointInput, SourceGetInput, SourceHealth, SourceIngestInput, SourceRegisterInput,
-    SourceWithdrawInput,
+    ProjectionSpan, QueryAnalysis, QueryScriptProfile, RecencyDecayClass, RecencyTimestampBasis,
+    RelationListInput, RelationListItem, RelationListResult, RelationPutInput, RelationType,
+    RerankerRetrievalStatus, RetrievalIntentHint, RetrievalProfile, SearchHit, SearchInput,
+    SearchRanking, SearchResult, SemanticRetrievalStatus, SourceCheckpointInput, SourceGetInput,
+    SourceHealth, SourceIngestInput, SourceRegisterInput, SourceWithdrawInput,
 };
 use crate::semantic::{
     EligibleSemanticRevision, RERANKER_ORDERING_CANDIDATE_LIMIT, RERANKER_POLICY_VERSION,
@@ -3857,6 +3857,8 @@ impl Store {
             embedded_vector_count: rebuild.embedded_vector_count,
             deleted_vector_count: rebuild.deleted_vector_count,
             indexed_commit_seq,
+            model_load_latency_ms: rebuild.model_load_latency_ms,
+            embedding_generation_ms: rebuild.embedding_generation_ms,
         })
     }
 
@@ -3890,6 +3892,8 @@ impl Store {
             embedded_vector_count: rebuild.embedded_vector_count,
             deleted_vector_count: rebuild.deleted_vector_count,
             indexed_commit_seq,
+            model_load_latency_ms: rebuild.model_load_latency_ms,
+            embedding_generation_ms: rebuild.embedding_generation_ms,
         })
     }
 
@@ -3921,6 +3925,8 @@ impl Store {
             embedded_vector_count: rebuild.embedded_vector_count,
             deleted_vector_count: rebuild.deleted_vector_count,
             indexed_commit_seq,
+            model_load_latency_ms: rebuild.model_load_latency_ms,
+            embedding_generation_ms: rebuild.embedding_generation_ms,
         })
     }
 
@@ -8161,7 +8167,112 @@ impl AnalyzedQuery {
                 .collect(),
             dropped_stopwords: self.dropped_stopwords.clone(),
             required_matches: self.required_matches,
+            retrieval_profile: retrieval_profile(&self.normalized_query),
         }
+    }
+}
+
+fn retrieval_profile(query: &str) -> RetrievalProfile {
+    let normalized = query.to_lowercase();
+    let identifier_like_units = normalized
+        .split_whitespace()
+        .filter(|unit| {
+            unit.contains('_')
+                || unit.chars().any(|character| character.is_ascii_digit())
+                    && unit.chars().any(|character| character.is_alphabetic())
+                || unit.contains("::")
+                || unit.contains('/')
+        })
+        .count();
+    let contains_any = |phrases: &[&str]| phrases.iter().any(|phrase| normalized.contains(phrase));
+    let intent_hint = if contains_any(&[
+        "previous",
+        "previously",
+        "prior",
+        "earlier",
+        "history",
+        "historical",
+        "decided",
+        "decision",
+        "learned",
+        "audit",
+        "remember",
+    ]) {
+        RetrievalIntentHint::HistoricalMemory
+    } else if contains_any(&[
+        "current code",
+        "current implementation",
+        "currently",
+        "source code",
+        "where is",
+        "defined in",
+        "this version",
+        "after the migration",
+        "after migration",
+        "right now",
+        "latest state",
+    ]) {
+        RetrievalIntentHint::CurrentSource
+    } else if identifier_like_units > 0 {
+        RetrievalIntentHint::IdentifierLookup
+    } else {
+        RetrievalIntentHint::Ambiguous
+    };
+    let authority_hint = match intent_hint {
+        RetrievalIntentHint::HistoricalMemory => "memory_for_history_repository_for_current_source",
+        RetrievalIntentHint::CurrentSource => "repository_authoritative",
+        RetrievalIntentHint::IdentifierLookup => "repository_first_for_live_identifiers",
+        RetrievalIntentHint::Ambiguous => "compare_memory_with_current_authoritative_source",
+    };
+    RetrievalProfile {
+        policy_version: "conservative_query_profile_v1".into(),
+        intent_hint,
+        script_profile: query_script_profile(query),
+        identifier_like_units,
+        semantic_role: "candidate_and_ordering_only".into(),
+        authority_hint: authority_hint.into(),
+    }
+}
+
+fn query_script_profile(query: &str) -> QueryScriptProfile {
+    let mut scripts = BTreeSet::new();
+    for character in query.chars().filter(|character| character.is_alphabetic()) {
+        let code = character as u32;
+        let script = if code <= 0x024f || (0x1e00..=0x1eff).contains(&code) {
+            QueryScriptProfile::Latin
+        } else if (0x0400..=0x052f).contains(&code) {
+            QueryScriptProfile::Cyrillic
+        } else if (0x0600..=0x06ff).contains(&code)
+            || (0x0750..=0x077f).contains(&code)
+            || (0x08a0..=0x08ff).contains(&code)
+        {
+            QueryScriptProfile::Arabic
+        } else if (0x3040..=0x30ff).contains(&code)
+            || (0x3400..=0x9fff).contains(&code)
+            || (0xac00..=0xd7af).contains(&code)
+        {
+            QueryScriptProfile::Cjk
+        } else {
+            QueryScriptProfile::Other
+        };
+        scripts.insert(script as u8);
+    }
+    if scripts.is_empty() {
+        return QueryScriptProfile::Unknown;
+    }
+    if scripts.len() > 1 {
+        return QueryScriptProfile::Mixed;
+    }
+    match *scripts
+        .iter()
+        .next()
+        .unwrap_or(&(QueryScriptProfile::Other as u8))
+    {
+        value if value == QueryScriptProfile::Latin as u8 => QueryScriptProfile::Latin,
+        value if value == QueryScriptProfile::Cyrillic as u8 => QueryScriptProfile::Cyrillic,
+        value if value == QueryScriptProfile::Arabic as u8 => QueryScriptProfile::Arabic,
+        value if value == QueryScriptProfile::Cjk as u8 => QueryScriptProfile::Cjk,
+        _ => QueryScriptProfile::Other,
     }
 }
 
@@ -10715,6 +10826,57 @@ mod tests {
         let stopwords = analyze_query("what is the").unwrap();
         assert_eq!(stopwords.units.len(), 3);
         assert!(stopwords.dropped_stopwords.is_empty());
+
+        let historical = analyze_query("What did we previously decide?")
+            .unwrap()
+            .public();
+        assert!(matches!(
+            historical.retrieval_profile.intent_hint,
+            RetrievalIntentHint::HistoricalMemory
+        ));
+        assert!(matches!(
+            historical.retrieval_profile.script_profile,
+            QueryScriptProfile::Latin
+        ));
+
+        let arabic = analyze_query("ما القرار السابق للنشر؟").unwrap().public();
+        assert!(matches!(
+            arabic.retrieval_profile.script_profile,
+            QueryScriptProfile::Arabic
+        ));
+        assert_eq!(
+            arabic.retrieval_profile.semantic_role,
+            "candidate_and_ordering_only"
+        );
+
+        let mixed = analyze_query("предыдущее решение release")
+            .unwrap()
+            .public();
+        assert!(matches!(
+            mixed.retrieval_profile.script_profile,
+            QueryScriptProfile::Mixed
+        ));
+
+        let post_migration = analyze_query("Where do events go after the migration?")
+            .unwrap()
+            .public();
+        assert!(matches!(
+            post_migration.retrieval_profile.intent_hint,
+            RetrievalIntentHint::CurrentSource
+        ));
+        assert_eq!(
+            post_migration.retrieval_profile.authority_hint,
+            "repository_authoritative"
+        );
+
+        let historical_after_migration =
+            analyze_query("What was previously decided after the migration?")
+                .unwrap()
+                .public();
+        assert!(matches!(
+            historical_after_migration.retrieval_profile.intent_hint,
+            RetrievalIntentHint::HistoricalMemory
+        ));
     }
 
     #[test]

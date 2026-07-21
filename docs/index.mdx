@@ -23,8 +23,8 @@ hero:
   </a>
   <a className="memoree-doc-card" href="/docs/protocol/">
     <span>02 / RECALL</span>
-    <strong>Recall claims with references</strong>
-    <p>Receive qualified claims with exact evidence plus separately labelled, cited leads when a near-match needs corroboration.</p>
+    <strong>Retrieve one bounded packet</strong>
+    <p>Receive qualified claims or exact, cited recovery evidence without changing honest absence semantics.</p>
   </a>
   <a className="memoree-doc-card" href="/docs/model-integration/">
     <span>03 / CONTEXT</span>
@@ -43,18 +43,18 @@ hero:
 ```sh
 cd /path/to/project
 memoree init --name my-project
-memoree recall "what do we know about the deployment decision?"
-memoree probe "what did we decide about deployment ownership?"
-memoree citation get 'memoree://artifact/ARTIFACT@REVISION#START-END'
+memoree retrieve "what do we know about the deployment decision?"
 memoree context build "deployment constraints" --max-bytes 4096
 memoree remember --apply "Production deploys require a clean migration check."
 ```
 
-Normal retrieval stays within ambient project/task context. Pin the target repository and run every ambient command there; a `none` result means no qualified match at that horizon, not permission to widen the search. After weak recall, make one meaning-preserving implementation-language reformulation and run one depth-eight probe with `--original-query`. Fetch the highest-ranked ranged lead first and up to two title-selected leads only as needed, bounded to nine refs/12 KiB, then require a same-scope qualified recall whose entity, role, state, and facet coverage is judged against the original question. Broaden to workspace or personal scope only for a separate request with a reason.
+Normal retrieval stays within ambient project/task context. Pin the target repository and run every ambient command there; a `none` result means no qualified match at that horizon, not permission to widen the search. Recovery bytes are exact and cited but remain unqualified. Use repository tools for current code; repository state overrides dated memory. Broaden to workspace or personal scope only for a separate request with a reason. The project index is an explicit experimental evaluation surface, not part of the canonical agent route.
 
 ## Understand the boundaries
 
 - [Architecture](/docs/architecture/) explains local storage, immutable revisions, scope, and why indexes remain disposable.
 - [Context and configuration](/docs/configuration/) defines markers, task-local sessions, personal fallback, and application paths.
+- [Project source indexing](/docs/project-index/) documents the experimental bounded structural map, its negative downstream result, and guarded reindexing.
+- [Project metrics and experiments](/docs/metrics/) explains opt-in real-operation traces and honest randomized token/time comparisons.
 - [Quality gates](/docs/quality/) records the claims the project is willing to make and the evidence required before making stronger ones.
 - [Retrieval evaluation](/docs/evaluation/) separates deterministic correctness checks from downstream model quality.

@@ -934,6 +934,106 @@
       "title": "RecallInput",
       "type": "object"
     },
+    "memory.retrieve": {
+      "$defs": {
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "RecencyBiasInput": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/Horizon",
+          "default": "ambient"
+        },
+        "max_artifact_refs": {
+          "default": 3,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_claims": {
+          "default": 5,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_excerpt_bytes": {
+          "default": 320,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recovery_bytes": {
+          "default": 12288,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_recovery_leads": {
+          "default": 8,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "profile": {
+          "default": false,
+          "description": "Include stage durations and counts. Profiling never records content.",
+          "type": "boolean"
+        },
+        "query": {
+          "description": "The user's original question. Qualification always uses this text.",
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recency": {
+          "$ref": "#/$defs/RecencyBiasInput",
+          "default": {
+            "enabled": true
+          }
+        },
+        "reformulation": {
+          "description": "At most one caller-audited meaning-preserving reformulation used only\nfor unqualified recovery routing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "RetrieveInput",
+      "type": "object"
+    },
     "projection.drop": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1617,6 +1717,7 @@
           "search",
           "memory.recall",
           "memory.probe",
+          "memory.retrieve",
           "context.build",
           "doctor",
           "verify",
@@ -2853,6 +2954,7 @@
             "search",
             "memory.recall",
             "memory.probe",
+            "memory.retrieve",
             "context.build",
             "doctor",
             "verify",
@@ -3098,6 +3200,21 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_retrieve_evidence_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_retrieve_leads": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_retrieve_references": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_search_items": {
           "format": "uint",
           "minimum": 0,
@@ -3178,6 +3295,9 @@
         "max_recall_evidence_excerpts_per_claim",
         "max_probe_items",
         "max_probe_title_bytes",
+        "max_retrieve_leads",
+        "max_retrieve_references",
+        "max_retrieve_evidence_bytes",
         "max_citation_bytes",
         "max_citation_fetch_bytes",
         "max_history_items",
@@ -5935,6 +6055,18 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "retrieval_profile": {
+              "$ref": "#/$defs/RetrievalProfile",
+              "default": {
+                "authority_hint": "",
+                "identifier_like_units": 0,
+                "intent_hint": "ambiguous",
+                "policy_version": "",
+                "script_profile": "unknown",
+                "semantic_role": ""
+              },
+              "description": "Conservative, non-authoritative routing metadata. It never changes\nscope, qualification, lifecycle, citations, or recall presence."
             }
           },
           "required": [
@@ -5943,6 +6075,18 @@
             "required_matches"
           ],
           "type": "object"
+        },
+        "QueryScriptProfile": {
+          "enum": [
+            "latin",
+            "cyrillic",
+            "arabic",
+            "cjk",
+            "mixed",
+            "other",
+            "unknown"
+          ],
+          "type": "string"
         },
         "RecallArtifactReference": {
           "properties": {
@@ -6350,6 +6494,49 @@
           ],
           "type": "object"
         },
+        "RetrievalIntentHint": {
+          "enum": [
+            "historical_memory",
+            "current_source",
+            "identifier_lookup",
+            "ambiguous"
+          ],
+          "type": "string"
+        },
+        "RetrievalProfile": {
+          "properties": {
+            "authority_hint": {
+              "type": "string"
+            },
+            "identifier_like_units": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "intent_hint": {
+              "$ref": "#/$defs/RetrievalIntentHint",
+              "default": "ambiguous"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "script_profile": {
+              "$ref": "#/$defs/QueryScriptProfile",
+              "default": "unknown"
+            },
+            "semantic_role": {
+              "description": "The installed semantic model may recover multilingual candidates, but\nmodel output remains candidate/ordering-only for every language.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy_version",
+            "identifier_like_units",
+            "semantic_role",
+            "authority_hint"
+          ],
+          "type": "object"
+        },
         "SemanticRetrievalStatus": {
           "properties": {
             "coverage": {
@@ -6552,6 +6739,564 @@
         "artifact_refs_truncated"
       ],
       "title": "RecallResult",
+      "type": "object"
+    },
+    "memory.retrieve": {
+      "$defs": {
+        "ClaimType": {
+          "enum": [
+            "fact",
+            "decision",
+            "constraint",
+            "preference",
+            "procedure",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "ConflictSummary": {
+          "properties": {
+            "left_id": {
+              "type": "string"
+            },
+            "relation_id": {
+              "type": "string"
+            },
+            "right_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "left_id",
+            "right_id",
+            "relation_id"
+          ],
+          "type": "object"
+        },
+        "Horizon": {
+          "enum": [
+            "ambient",
+            "workspace",
+            "personal"
+          ],
+          "type": "string"
+        },
+        "QueryAnalysis": {
+          "properties": {
+            "content_units": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dropped_stopwords": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "normalized_query": {
+              "type": "string"
+            },
+            "phrase_groups": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "required_matches": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "retrieval_profile": {
+              "$ref": "#/$defs/RetrievalProfile",
+              "default": {
+                "authority_hint": "",
+                "identifier_like_units": 0,
+                "intent_hint": "ambiguous",
+                "policy_version": "",
+                "script_profile": "unknown",
+                "semantic_role": ""
+              },
+              "description": "Conservative, non-authoritative routing metadata. It never changes\nscope, qualification, lifecycle, citations, or recall presence."
+            }
+          },
+          "required": [
+            "policy_version",
+            "normalized_query",
+            "required_matches"
+          ],
+          "type": "object"
+        },
+        "QueryScriptProfile": {
+          "enum": [
+            "latin",
+            "cyrillic",
+            "arabic",
+            "cjk",
+            "mixed",
+            "other",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "RecallClaimStatus": {
+          "enum": [
+            "current",
+            "disputed"
+          ],
+          "type": "string"
+        },
+        "RecallEvidenceReference": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "end_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "start_byte": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "citation",
+            "title",
+            "media_type",
+            "excerpt_truncated"
+          ],
+          "type": "object"
+        },
+        "RecallPresence": {
+          "enum": [
+            "claims",
+            "artifacts_only",
+            "none"
+          ],
+          "type": "string"
+        },
+        "RetrievalIntentHint": {
+          "enum": [
+            "historical_memory",
+            "current_source",
+            "identifier_lookup",
+            "ambiguous"
+          ],
+          "type": "string"
+        },
+        "RetrievalProfile": {
+          "properties": {
+            "authority_hint": {
+              "type": "string"
+            },
+            "identifier_like_units": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "intent_hint": {
+              "$ref": "#/$defs/RetrievalIntentHint",
+              "default": "ambiguous"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "script_profile": {
+              "$ref": "#/$defs/QueryScriptProfile",
+              "default": "unknown"
+            },
+            "semantic_role": {
+              "description": "The installed semantic model may recover multilingual candidates, but\nmodel output remains candidate/ordering-only for every language.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy_version",
+            "identifier_like_units",
+            "semantic_role",
+            "authority_hint"
+          ],
+          "type": "object"
+        },
+        "RetrieveAuthority": {
+          "properties": {
+            "current_source_rule": {
+              "type": "string"
+            },
+            "memory_snapshot_commit_seq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "qualification_policy": {
+              "type": "string"
+            },
+            "recovery_policy": {
+              "type": "string"
+            },
+            "retrieved_at": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_snapshot_commit_seq",
+            "retrieved_at",
+            "qualification_policy",
+            "recovery_policy",
+            "current_source_rule"
+          ],
+          "type": "object"
+        },
+        "RetrieveQualifiedArtifact": {
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "excerpt": {
+              "type": "string"
+            },
+            "excerpt_truncated": {
+              "type": "boolean"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "risk_signals": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "revision_id",
+            "title",
+            "citation",
+            "excerpt",
+            "excerpt_truncated"
+          ],
+          "type": "object"
+        },
+        "RetrieveQualifiedClaim": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "$ref": "#/$defs/ClaimType"
+            },
+            "conflict_relation_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "evidence": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RecallEvidenceReference"
+              },
+              "type": "array"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "statement": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/RecallClaimStatus"
+            }
+          },
+          "required": [
+            "claim_id",
+            "revision_id",
+            "claim_type",
+            "status",
+            "statement",
+            "citation"
+          ],
+          "type": "object"
+        },
+        "RetrieveRecovery": {
+          "properties": {
+            "available_leads": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/RetrieveRecoveryEvidence"
+              },
+              "type": "array"
+            },
+            "original_query_preserved": {
+              "type": "boolean"
+            },
+            "references_truncated": {
+              "type": "boolean"
+            },
+            "reformulation_applied": {
+              "type": "boolean"
+            },
+            "retrieval_tier": {
+              "type": "string"
+            },
+            "returned_content_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "returned_references": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "warning": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "retrieval_tier",
+            "original_query_preserved",
+            "reformulation_applied",
+            "available_leads",
+            "returned_references",
+            "returned_content_bytes",
+            "references_truncated",
+            "evidence",
+            "warning"
+          ],
+          "type": "object"
+        },
+        "RetrieveRecoveryEvidence": {
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "retrieval_tier": {
+              "description": "Always `unqualified_evidence`; these bytes can route reasoning but can\nneither qualify presence nor enter context.build automatically.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "retrieval_tier",
+            "title",
+            "citation",
+            "content",
+            "media_type",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "RetrieveTimingProfile": {
+          "properties": {
+            "breaker_open": {
+              "default": false,
+              "type": "boolean"
+            },
+            "citation_fetch_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "inference_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "model_load_ms": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "probe_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "qualified_artifact_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "qualified_claim_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recall_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "recovery_reference_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reranker_state": {
+              "default": "",
+              "type": "string"
+            },
+            "semantic_state": {
+              "default": "",
+              "type": "string"
+            },
+            "total_ms": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "policy_version",
+            "total_ms",
+            "recall_ms",
+            "probe_ms",
+            "citation_fetch_ms",
+            "qualified_claim_count",
+            "qualified_artifact_count",
+            "recovery_reference_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/RetrieveQualifiedArtifact"
+          },
+          "type": "array"
+        },
+        "authority": {
+          "$ref": "#/$defs/RetrieveAuthority"
+        },
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/RetrieveQualifiedClaim"
+          },
+          "type": "array"
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/ConflictSummary"
+          },
+          "type": "array"
+        },
+        "content_is_untrusted": {
+          "type": "boolean"
+        },
+        "presence": {
+          "$ref": "#/$defs/RecallPresence"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrieveTimingProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query_analysis": {
+          "$ref": "#/$defs/QueryAnalysis"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrieveRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "searched_horizon": {
+          "$ref": "#/$defs/Horizon"
+        }
+      },
+      "required": [
+        "content_is_untrusted",
+        "presence",
+        "searched_horizon",
+        "query_analysis",
+        "authority",
+        "claims",
+        "conflicts",
+        "artifact_refs"
+      ],
+      "title": "RetrieveResult",
       "type": "object"
     },
     "projection.drop": {
@@ -7371,6 +8116,18 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "retrieval_profile": {
+              "$ref": "#/$defs/RetrievalProfile",
+              "default": {
+                "authority_hint": "",
+                "identifier_like_units": 0,
+                "intent_hint": "ambiguous",
+                "policy_version": "",
+                "script_profile": "unknown",
+                "semantic_role": ""
+              },
+              "description": "Conservative, non-authoritative routing metadata. It never changes\nscope, qualification, lifecycle, citations, or recall presence."
             }
           },
           "required": [
@@ -7379,6 +8136,18 @@
             "required_matches"
           ],
           "type": "object"
+        },
+        "QueryScriptProfile": {
+          "enum": [
+            "latin",
+            "cyrillic",
+            "arabic",
+            "cjk",
+            "mixed",
+            "other",
+            "unknown"
+          ],
+          "type": "string"
         },
         "RecencyDecayClass": {
           "enum": [
@@ -7522,6 +8291,49 @@
             "candidate_limit",
             "candidate_limit_reached",
             "breaker"
+          ],
+          "type": "object"
+        },
+        "RetrievalIntentHint": {
+          "enum": [
+            "historical_memory",
+            "current_source",
+            "identifier_lookup",
+            "ambiguous"
+          ],
+          "type": "string"
+        },
+        "RetrievalProfile": {
+          "properties": {
+            "authority_hint": {
+              "type": "string"
+            },
+            "identifier_like_units": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "intent_hint": {
+              "$ref": "#/$defs/RetrievalIntentHint",
+              "default": "ambiguous"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "script_profile": {
+              "$ref": "#/$defs/QueryScriptProfile",
+              "default": "unknown"
+            },
+            "semantic_role": {
+              "description": "The installed semantic model may recover multilingual candidates, but\nmodel output remains candidate/ordering-only for every language.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy_version",
+            "identifier_like_units",
+            "semantic_role",
+            "authority_hint"
           ],
           "type": "object"
         },

@@ -16,9 +16,11 @@ Initialize a project:
 
 The normal agent lookup is:
 
-    memoree recall "what do we know about the storage decision?"
+    memoree retrieve "what do we know about the storage decision?"
 
-Recall returns `presence=claims`, `presence=artifacts_only`, or `presence=none`. Claims include current/disputed state and exact evidence locators such as `memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END`. Pin the target repository and run every ambient command there. Candidate content is off by default. After weak recall, create one meaning-preserving implementation-language reformulation from the original question and task knowledge only, then run one `memoree probe --original-query ...` call. Probe returns at most eight untrusted titles and provenance-labeled exact source arrays. Fetch the highest-ranked ranged lead first, then up to two title-selected leads only as needed, within nine refs/12 KiB. Require an independently qualified same-scope recall with exact entity, predicate-role, state, and facet coverage against the original question. Candidate/fetched bytes never affect presence or enter context bundles. An empty qualified result is not permission to search more broadly.
+Retrieve returns `presence=claims`, `presence=artifacts_only`, or `presence=none`. Claims include current/disputed state and exact evidence locators such as `memoree://artifact/ARTIFACT_ID@REVISION_ID#START-END`. After qualified absence it may return at most nine references/12 KiB of exact claim-attached recovery evidence. Those bytes remain `unqualified_evidence`: they cannot change presence or enter context bundles, and an empty result is not permission to broaden scope. `memory.recall`, `memory.probe`, and `citation.get` remain available for fallback and diagnostics.
+
+Use repository search, file reads, and Git for current code. Current repository bytes override dated memory for implementation state. The separate Git-aware native Tree-sitter/FTS index remains an explicit experimental evaluation surface; it is off by default and absent from the canonical agent route because matched tasks found additive token/latency cost and complex-task completeness losses.
 
 `citation get` validates immutable UTF-8 byte ranges and returns structured untrusted text with a citation naming exactly the returned bytes. It safely narrows spans over 8 KiB and refuses revision-only prefixes or binary content. It verifies location, not relevance or answer qualification.
 
@@ -30,6 +32,8 @@ Use `memoree context build "topic" --max-bytes 4096` for a bounded cited packet.
 - JSON Schema bundle: https://memoree.dev/schema/v1.json
 - Protocol guide: https://memoree.dev/docs/protocol/
 - Context and configuration: https://memoree.dev/docs/configuration/
+- Project source indexing: https://memoree.dev/docs/project-index/
+- Project metrics and experiments: https://memoree.dev/docs/metrics/
 - Model integration: https://memoree.dev/docs/model-integration/
 - Session checkpoints: https://memoree.dev/docs/checkpoints/
 - Architecture: https://memoree.dev/docs/architecture/
@@ -39,6 +43,8 @@ Use `memoree context build "topic" --max-bytes 4096` for a bounded cited packet.
 
 ## Trust boundary
 
-The default endpoint is a private owner-only Unix socket. Loopback TCP is host-local, not user-private. Normal daemon and retrieval operations have no telemetry or hosted-memory dependency. Installer-managed v0.4+ copies may perform a bounded signed-release check on eligible interactive starts at most every six hours; non-interactive agent calls never prompt or check. The explicit `memoree remember` wrapper may invoke a locally authenticated Codex or Claude CLI; the daemon itself has no model provider or credential loader.
+The default endpoint is a private owner-only Unix socket. Loopback TCP is host-local, not user-private. Normal daemon and retrieval operations have no remote telemetry or hosted-memory dependency. Opt-in project metrics stay in a separate bounded local database whose closed schema excludes queries, content, citations, paths, prompts, model names, and task labels. Passive traces diagnose operation behavior only; explicit randomized matched pairs are required for token/time comparisons. Installer-managed v0.4+ copies may perform a bounded signed-release check on eligible interactive starts at most every six hours; non-interactive agent calls never prompt or check. The explicit `memoree remember` wrapper may invoke a locally authenticated Codex or Claude CLI; the daemon itself has no model provider or credential loader.
 
 Out-of-process adapters may use `source.register`, `source.ingest`, `source.checkpoint`, and `source.withdraw`; credentials remain outside Memoree, and withdrawal does not promise physical erasure. `projection.put` requires exact immutable raw spans and creates candidate-only retrieval leads. `feedback.record` stores a keyed query fingerprint by default; raw query retention and `feedback.export` are explicit evaluation choices and never alter live ranking automatically.
+
+The controlled 0.5 audit did not prove token, speed, or downstream quality improvement at equal completeness. The 0.6 experimental project map also failed its downstream promotion gate. Treat such claims as unavailable until the documented pre-registered real-task A/B gate passes.

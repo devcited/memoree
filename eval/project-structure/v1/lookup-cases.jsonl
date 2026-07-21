@@ -1,0 +1,30 @@
+{"case_id":"lookup-project-map-definition","query":"Where is ProjectIndex::map defined, and what is its exact signature?"}
+{"case_id":"lookup-budget-callers","query":"Which symbols directly call enforce_project_map_budget?"}
+{"case_id":"lookup-map-budget-relation","query":"Does ProjectIndex::map directly call enforce_project_map_budget, and at which call sites?"}
+{"case_id":"lookup-source-withdraw-definition","query":"Where is MemoryStore::source_withdraw defined, and what does it return?"}
+{"case_id":"lookup-backup-create-callers","query":"Which production symbols directly call Store::backup_create?"}
+{"case_id":"lookup-auto-update-relation","query":"Does maybe_auto_update directly call apply_available_update? Cite the call site."}
+{"case_id":"lookup-compiler-configure-definition","query":"Where is CompilerRegistry::configure defined, and what is its signature?"}
+{"case_id":"lookup-sync-skills-callers","query":"Which production symbols directly call sync_skills?"}
+{"case_id":"lookup-metric-record-relation","query":"Does record_metric_best_effort directly call MetricsStore::record_event? Cite the call site."}
+{"case_id":"lookup-semantic-search-definition","query":"Where is the repository's semantic search method defined, and which type owns it?"}
+{"case_id":"lookup-claim-revise-callers","query":"Which production symbols directly call Store::claim_revise?"}
+{"case_id":"lookup-relation-put-definition","query":"Where is Store::relation_put defined, and what is its signature?"}
+{"case_id":"lookup-check-update-callers","query":"Which symbols directly call check_for_update?"}
+{"case_id":"lookup-record-observation-caller","query":"Which production symbol directly calls MetricsStore::record_observation?"}
+{"case_id":"lookup-project-get-relation","query":"Does ProjectIndex::search directly call ProjectIndex::get?"}
+{"case_id":"lookup-reranker-order-caller","query":"Which function directly calls the reranker order method?"}
+{"case_id":"lookup-remember-compiler-relation","query":"Does remember_command directly call CompilerRegistry::compile? Cite the call site."}
+{"case_id":"lookup-semantic-rebuild-callers","query":"Which production symbols directly call Store::semantic_rebuild?"}
+{"case_id":"lookup-artifact-revise-definition","query":"Where is Store::artifact_revise defined, and what is its signature?"}
+{"case_id":"lookup-dispatch-callers","query":"Which symbols directly call dispatch in src/main.rs?"}
+{"case_id":"lookup-feedback-record-callers","query":"Which production symbols directly call Store::feedback_record?"}
+{"case_id":"lookup-source-ingest-definition","query":"Where is Store::source_ingest defined, and what is its signature?"}
+{"case_id":"lookup-cas-put-callers","query":"Which production symbols directly call Cas::put?"}
+{"case_id":"lookup-checkpoint-list-definition","query":"Where is CheckpointStore::list defined, and what is its signature?"}
+{"case_id":"lookup-profile-command-callers","query":"Which symbol directly calls profile_command?"}
+{"case_id":"lookup-project-watch-relation","query":"Does ProjectIndex::watch directly call ProjectIndex::watch_observed?"}
+{"case_id":"lookup-validate-compilation-callers","query":"Which symbols directly call validate_compilation?"}
+{"case_id":"lookup-update-signature-relation","query":"Does fetch_available_update directly call verify_release_signature? Cite the call site."}
+{"case_id":"lookup-context-resolve-callers","query":"Which production symbols directly call AmbientResolver::resolve?"}
+{"case_id":"lookup-store-verify-definition","query":"Where is Store::verify defined, and what is its exact signature?"}

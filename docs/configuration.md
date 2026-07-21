@@ -23,6 +23,44 @@ The resolver walks from the current directory toward the filesystem root and sel
 
 Pins are explicit artifact references inherited by that context. They do not grant an implicit search of a wider horizon.
 
+## Project source index
+
+The separate disposable working-tree index has owner-local settings:
+
+```toml
+schema = 1
+
+[project_index]
+auto_reindex = "off"
+include_untracked = false
+max_files = 50000
+max_total_bytes = 268435456
+max_file_bytes = 524288
+max_changed_bytes = 33554432
+```
+
+These values are stored atomically in an owner-private, project-ID-keyed file below Memoree's application data directory—not in `.memoree.toml` or the repository. This keeps the shared marker readable by older Memoree clients and makes every collaborator opt in separately. Unreleased beta marker sections are accepted for parsing but never activate the index or metrics; only the private file is authoritative. Do not edit the private file; use `memoree project configure --auto-reindex off|on-search|watch` and inspect it with `memoree project status`.
+
+The project index is experimental and absent from the canonical agent route. `off` requires deliberate `memoree project index`; `project map` returns `not_ready` without creating an index. Opt-in `on_search` checks a cheap Git snapshot and reconciles a stale index only when `memoree project map` or `project search` is used; `watch` permits the explicit foreground adaptive watcher. The watcher is never started by the daemon or installer and retains the prior projection after transient Git-snapshot or reindex failure.
+
+File, total-byte, per-file, and changed-byte limits prevent an unexpected repository scan from expanding without bound. Reindexing is single-worker and transactional; change-budget failure keeps the prior index. See [Project source indexing](project-index.md) for filters, citations, and watcher behavior.
+
+## Project metrics
+
+Real-operation metrics are disabled by default and must be enabled separately by each project user:
+
+```toml
+schema = 1
+
+[metrics]
+enabled = true
+retention_days = 14
+max_database_bytes = 10485760
+sample_rate = 1.0
+```
+
+This configuration shares the same owner-private project-ID-keyed local settings file as the index and never rewrites `.memoree.toml`. Use `memoree metrics configure` rather than editing it. Retention must be 1–365 days, the cap 1 MiB–1 GiB, and sampling 0.0–1.0. The database is a separate disposable, owner-private store below the application data directory. It never enters the repository, memory authority database, backups, project index, or network. Its closed schema has no query, content, citation, prompt, path, free-text label, or raw-error fields. See [Project metrics and experiments](metrics.md).
+
 ## Process-local task context
 
 Use the session launcher for a task-specific agent process:

@@ -34,6 +34,9 @@ pub const MAX_PROBE_ITEMS: usize = 8;
 pub const MAX_PROBE_TITLE_BYTES: usize = 48;
 pub const MAX_PROBE_SOURCES_PER_LEAD: usize = 3;
 pub const MAX_PROBE_EVIDENCE_BYTES_PER_LEAD: usize = 4 * 1024;
+pub const MAX_RETRIEVE_LEADS: usize = 8;
+pub const MAX_RETRIEVE_REFERENCES: usize = 9;
+pub const MAX_RETRIEVE_EVIDENCE_BYTES: usize = 12 * 1024;
 pub const MAX_CITATION_BYTES: usize = 1024;
 pub const MAX_CITATION_FETCH_BYTES: usize = 8 * 1024;
 pub const MAX_HISTORY_ITEMS: usize = 100;
@@ -157,6 +160,8 @@ pub enum Operation {
     MemoryRecall,
     #[serde(rename = "memory.probe")]
     MemoryProbe,
+    #[serde(rename = "memory.retrieve")]
+    MemoryRetrieve,
     #[serde(rename = "context.build")]
     ContextBuild,
     #[serde(rename = "doctor")]
@@ -223,6 +228,7 @@ impl Operation {
                 | Self::Search
                 | Self::MemoryRecall
                 | Self::MemoryProbe
+                | Self::MemoryRetrieve
                 | Self::ContextBuild
         )
     }
@@ -1050,6 +1056,46 @@ pub struct ProbeInput {
     pub recency: RecencyBiasInput,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetrieveInput {
+    /// The user's original question. Qualification always uses this text.
+    pub query: String,
+    /// At most one caller-audited meaning-preserving reformulation used only
+    /// for unqualified recovery routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reformulation: Option<String>,
+    #[serde(default)]
+    pub horizon: Horizon,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default = "default_recall_claims")]
+    pub max_claims: usize,
+    #[serde(default = "default_recall_artifact_refs")]
+    pub max_artifact_refs: usize,
+    #[serde(default = "default_recall_excerpt_bytes")]
+    pub max_excerpt_bytes: usize,
+    #[serde(default = "default_retrieve_leads")]
+    pub max_recovery_leads: usize,
+    #[serde(default = "default_retrieve_evidence_bytes")]
+    pub max_recovery_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_commit_seq: Option<i64>,
+    #[serde(default)]
+    pub recency: RecencyBiasInput,
+    /// Include stage durations and counts. Profiling never records content.
+    #[serde(default)]
+    pub profile: bool,
+}
+
+fn default_retrieve_leads() -> usize {
+    MAX_RETRIEVE_LEADS
+}
+
+fn default_retrieve_evidence_bytes() -> usize {
+    MAX_RETRIEVE_EVIDENCE_BYTES
+}
+
 fn default_probe_items() -> usize {
     8
 }
@@ -1135,6 +1181,47 @@ pub struct QueryAnalysis {
     #[serde(default)]
     pub dropped_stopwords: Vec<String>,
     pub required_matches: usize,
+    /// Conservative, non-authoritative routing metadata. It never changes
+    /// scope, qualification, lifecycle, citations, or recall presence.
+    #[serde(default)]
+    pub retrieval_profile: RetrievalProfile,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RetrievalProfile {
+    pub policy_version: String,
+    #[serde(default)]
+    pub intent_hint: RetrievalIntentHint,
+    #[serde(default)]
+    pub script_profile: QueryScriptProfile,
+    pub identifier_like_units: usize,
+    /// The installed semantic model may recover multilingual candidates, but
+    /// model output remains candidate/ordering-only for every language.
+    pub semantic_role: String,
+    pub authority_hint: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalIntentHint {
+    HistoricalMemory,
+    CurrentSource,
+    IdentifierLookup,
+    #[default]
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryScriptProfile {
+    Latin,
+    Cyrillic,
+    Arabic,
+    Cjk,
+    Mixed,
+    Other,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -1455,6 +1542,104 @@ pub struct ProbeResult {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveQualifiedClaim {
+    pub claim_id: String,
+    pub revision_id: String,
+    pub claim_type: ClaimType,
+    pub status: RecallClaimStatus,
+    pub statement: String,
+    pub citation: String,
+    #[serde(default)]
+    pub evidence: Vec<RecallEvidenceReference>,
+    #[serde(default)]
+    pub conflict_relation_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveQualifiedArtifact {
+    pub artifact_id: String,
+    pub revision_id: String,
+    pub title: String,
+    pub citation: String,
+    pub excerpt: String,
+    pub excerpt_truncated: bool,
+    #[serde(default)]
+    pub risk_signals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveRecoveryEvidence {
+    /// Always `unqualified_evidence`; these bytes can route reasoning but can
+    /// neither qualify presence nor enter context.build automatically.
+    pub retrieval_tier: String,
+    pub title: String,
+    pub citation: String,
+    pub content: String,
+    pub media_type: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveRecovery {
+    pub retrieval_tier: String,
+    pub original_query_preserved: bool,
+    pub reformulation_applied: bool,
+    pub available_leads: usize,
+    pub returned_references: usize,
+    pub returned_content_bytes: usize,
+    pub references_truncated: bool,
+    pub evidence: Vec<RetrieveRecoveryEvidence>,
+    pub warning: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveAuthority {
+    pub memory_snapshot_commit_seq: i64,
+    pub retrieved_at: DateTime<Utc>,
+    pub qualification_policy: String,
+    pub recovery_policy: String,
+    pub current_source_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveTimingProfile {
+    pub policy_version: String,
+    pub total_ms: f64,
+    pub recall_ms: f64,
+    pub probe_ms: f64,
+    pub citation_fetch_ms: f64,
+    pub qualified_claim_count: usize,
+    pub qualified_artifact_count: usize,
+    pub recovery_reference_count: usize,
+    #[serde(default)]
+    pub semantic_state: String,
+    #[serde(default)]
+    pub reranker_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_load_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_ms: Option<f64>,
+    #[serde(default)]
+    pub breaker_open: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveResult {
+    pub content_is_untrusted: bool,
+    pub presence: RecallPresence,
+    pub searched_horizon: Horizon,
+    pub query_analysis: QueryAnalysis,
+    pub authority: RetrieveAuthority,
+    pub claims: Vec<RetrieveQualifiedClaim>,
+    pub conflicts: Vec<ConflictSummary>,
+    pub artifact_refs: Vec<RetrieveQualifiedArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RetrieveRecovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<RetrieveTimingProfile>,
+}
+
 /// Exact untrusted bytes fetched by immutable citation. This envelope is
 /// deliberately distinct from qualified recall results: existence at a
 /// source location does not establish relevance or answer qualification.
@@ -1685,6 +1870,23 @@ mod tests {
             "trust_candidates": true
         });
         assert!(serde_json::from_value::<ProbeInput>(unknown).is_err());
+    }
+
+    #[test]
+    fn retrieve_defaults_to_one_bounded_candidate_only_recovery() {
+        let input: RetrieveInput = serde_json::from_value(serde_json::json!({
+            "query": "what did we previously decide"
+        }))
+        .unwrap();
+        assert_eq!(input.max_recovery_leads, MAX_RETRIEVE_LEADS);
+        assert_eq!(input.max_recovery_bytes, MAX_RETRIEVE_EVIDENCE_BYTES);
+        assert!(!input.profile);
+        assert!(!Operation::MemoryRetrieve.is_mutating());
+        assert!(Operation::MemoryRetrieve.needs_context());
+        assert_eq!(
+            serde_json::to_value(Operation::MemoryRetrieve).unwrap(),
+            "memory.retrieve"
+        );
     }
 
     #[test]
