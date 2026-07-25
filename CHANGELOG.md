@@ -4,7 +4,7 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
-## [0.7.0] - unreleased
+## [0.7.0] - 2026-07-25
 
 ### Changed
 
