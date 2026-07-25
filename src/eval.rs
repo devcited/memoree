@@ -3325,75 +3325,8 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 fn conservative_serialized_bytes<T: Serialize>(value: &T) -> Result<usize> {
     let mut value = serde_json::to_value(value)?;
     canonicalize_wire_timestamps(&mut value);
-    canonicalize_wire_diagnostics(&mut value);
     let actual = serde_json::to_vec(&value)?.len();
     Ok(actual.div_ceil(EVAL_WIRE_BUDGET_BLOCK_BYTES) * EVAL_WIRE_BUDGET_BLOCK_BYTES)
-}
-
-/// Retrieval-status blocks report how a query ran: model state, breaker
-/// counters, scored-candidate counts, latencies. Their values move with
-/// machine load, so on a busy runner the same corpus can serialize a few bytes
-/// differently between two runs and cross a rounding block — reported as
-/// evaluation drift that no caller would ever observe in an answer.
-///
-/// Diagnostics are therefore accounted at a fixed conservative width. Answer
-/// content — claims, citations, excerpts, presence — is never touched.
-fn canonicalize_wire_diagnostics(value: &mut Value) {
-    const DIAGNOSTIC_BLOCKS: [&str; 7] = [
-        "semantic",
-        "semantic_claims",
-        "semantic_artifacts",
-        "reranker",
-        "reranker_claims",
-        "reranker_artifacts",
-        "projection",
-    ];
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                if DIAGNOSTIC_BLOCKS.contains(&key.as_str()) && value.is_object() {
-                    widen_diagnostic_values(value);
-                } else {
-                    canonicalize_wire_diagnostics(value);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                canonicalize_wire_diagnostics(value);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Replace every scalar inside a diagnostic block with a fixed-width stand-in
-/// at least as wide as the original, so the block's serialized size is stable
-/// and never understated.
-fn widen_diagnostic_values(value: &mut Value) {
-    const DIAGNOSTIC_NUMBER: &str = "999999999999";
-    const DIAGNOSTIC_TEXT_WIDTH: usize = 192;
-    match value {
-        Value::Object(object) => {
-            for (_, value) in object {
-                widen_diagnostic_values(value);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                widen_diagnostic_values(value);
-            }
-        }
-        Value::Number(number) => {
-            let width = number.to_string().len().max(DIAGNOSTIC_NUMBER.len());
-            *value = Value::String("9".repeat(width));
-        }
-        Value::String(text) => {
-            let width = text.len().max(DIAGNOSTIC_TEXT_WIDTH);
-            *value = Value::String("x".repeat(width));
-        }
-        _ => {}
-    }
 }
 
 fn canonicalize_wire_timestamps(value: &mut Value) {
