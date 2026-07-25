@@ -3331,6 +3331,13 @@ fn conservative_serialized_bytes<T: Serialize>(value: &T) -> Result<usize> {
 
 fn canonicalize_wire_timestamps(value: &mut Value) {
     const MAX_UTC_RFC3339: &str = "9999-12-31T23:59:59.999999999Z";
+    // Scores that decay with age are computed from the clock, so normalizing
+    // timestamps without normalizing what the clock produces leaves the same
+    // volatility one level down: a freshly seeded corpus evaluated a second
+    // later serializes a different bonus, and enough of those cross a rounding
+    // block. These are ranking signals, never answer content.
+    const CLOCK_DERIVED_SCORES: [&str; 2] = ["recency_bonus", "score"];
+    const CLOCK_DERIVED_WIDTH: usize = 20;
     match value {
         Value::Object(object) => {
             for (key, value) in object {
@@ -3341,6 +3348,11 @@ fn canonicalize_wire_timestamps(value: &mut Value) {
                     && DateTime::parse_from_rfc3339(serialized).is_ok()
                 {
                     *value = Value::String(MAX_UTC_RFC3339.into());
+                } else if CLOCK_DERIVED_SCORES.contains(&key.as_str())
+                    && let Some(number) = value.as_f64()
+                {
+                    let width = number.to_string().len().max(CLOCK_DERIVED_WIDTH);
+                    *value = Value::String("9".repeat(width));
                 } else {
                     canonicalize_wire_timestamps(value);
                 }
