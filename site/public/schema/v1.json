@@ -2086,10 +2086,24 @@
         "media_type": {
           "type": "string"
         },
+        "physically_erased": {
+          "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provenance": {
           "additionalProperties": true,
           "default": {},
           "type": "object"
+        },
+        "retention_notice": {
+          "description": "Present on a forget result. States plainly what forgetting did not do.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision_commit_seq": {
           "format": "int64",
@@ -2257,10 +2271,24 @@
         "media_type": {
           "type": "string"
         },
+        "physically_erased": {
+          "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provenance": {
           "additionalProperties": true,
           "default": {},
           "type": "object"
+        },
+        "retention_notice": {
+          "description": "Present on a forget result. States plainly what forgetting did not do.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision_commit_seq": {
           "format": "int64",
@@ -2425,10 +2453,24 @@
             "media_type": {
               "type": "string"
             },
+            "physically_erased": {
+              "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "provenance": {
               "additionalProperties": true,
               "default": {},
               "type": "object"
+            },
+            "retention_notice": {
+              "description": "Present on a forget result. States plainly what forgetting did not do.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision_commit_seq": {
               "format": "int64",
@@ -2627,10 +2669,24 @@
         "media_type": {
           "type": "string"
         },
+        "physically_erased": {
+          "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provenance": {
           "additionalProperties": true,
           "default": {},
           "type": "object"
+        },
+        "retention_notice": {
+          "description": "Present on a forget result. States plainly what forgetting did not do.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision_commit_seq": {
           "format": "int64",
@@ -2805,10 +2861,24 @@
         "media_type": {
           "type": "string"
         },
+        "physically_erased": {
+          "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provenance": {
           "additionalProperties": true,
           "default": {},
           "type": "object"
+        },
+        "retention_notice": {
+          "description": "Present on a forget result. States plainly what forgetting did not do.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision_commit_seq": {
           "format": "int64",
@@ -6099,6 +6169,13 @@
             "excerpt": {
               "type": "string"
             },
+            "excerpt_citation": {
+              "description": "Citation for exactly the bytes in `excerpt` when the excerpt is a\nwindow inside the cited span. `citation` keeps naming the whole matched\nspan so recall and search stay comparable.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "excerpt_truncated": {
               "type": "boolean"
             },
@@ -6152,6 +6229,13 @@
             },
             "excerpt": {
               "type": "string"
+            },
+            "excerpt_citation": {
+              "description": "Citation for exactly the bytes in `excerpt` when the excerpt is a\nwindow inside the cited span. `citation` keeps naming the whole matched\nspan so recall and search stay comparable.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "excerpt_truncated": {
               "type": "boolean"
@@ -6987,6 +7071,46 @@
           ],
           "type": "object"
         },
+        "RetrieveNextAction": {
+          "description": "The deterministic next step for a caller that received no qualified memory.\nIt never contains an answer: it reports which parts of the question memory\ncould not match, and how to ask again.",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "stored_vocabulary": {
+              "description": "Distinct terms taken from the unqualified leads, offered as the\nvocabulary a second query should use. They are routing hints from\nuntrusted stored content, not facts.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "unmatched_units": {
+              "description": "Content units of the question that matched nothing in this scope.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "policy_version",
+            "reason",
+            "action",
+            "detail",
+            "unmatched_units",
+            "stored_vocabulary"
+          ],
+          "type": "object"
+        },
         "RetrieveQualifiedArtifact": {
           "properties": {
             "artifact_id": {
@@ -6997,6 +7121,13 @@
             },
             "excerpt": {
               "type": "string"
+            },
+            "excerpt_citation": {
+              "description": "Citation for exactly the bytes in `excerpt` when the excerpt is a\nwindow inside the cited span. `citation` keeps naming the whole matched\nspan so recall and search stay comparable.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "excerpt_truncated": {
               "type": "boolean"
@@ -7072,6 +7203,13 @@
         },
         "RetrieveRecovery": {
           "properties": {
+            "anchor_routed_references": {
+              "default": 0,
+              "description": "Spans reached through a claim's write-time routing anchors rather than\nthrough the asker's own words. The bytes are still authoritative source;\nonly the routing came from inference.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "available_leads": {
               "format": "uint",
               "minimum": 0,
@@ -7092,6 +7230,11 @@
             "reformulation_applied": {
               "type": "boolean"
             },
+            "relevance_policy": {
+              "default": "",
+              "description": "Rule that admitted each returned span. Recovery bytes with no lexical\nrelation to the routed question are withheld: an unrelated fragment\ncannot route reasoning and can actively mislead.",
+              "type": "string"
+            },
             "retrieval_tier": {
               "type": "string"
             },
@@ -7101,6 +7244,13 @@
               "type": "integer"
             },
             "returned_references": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "suppressed_references": {
+              "default": 0,
+              "description": "Exact spans that were fetchable but withheld by `relevance_policy`.",
               "format": "uint",
               "minimum": 0,
               "type": "integer"
@@ -7247,6 +7397,11 @@
           },
           "type": "array"
         },
+        "claims_truncated": {
+          "default": false,
+          "description": "More claims qualified than `max_claims` returned. Without this signal a\ncaller cannot tell a complete answer from a truncated one when many\nclaims mention the same entity.",
+          "type": "boolean"
+        },
         "conflicts": {
           "items": {
             "$ref": "#/$defs/ConflictSummary"
@@ -7255,6 +7410,16 @@
         },
         "content_is_untrusted": {
           "type": "boolean"
+        },
+        "next_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrieveNextAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "presence": {
           "$ref": "#/$defs/RecallPresence"
@@ -9070,10 +9235,24 @@
             "media_type": {
               "type": "string"
             },
+            "physically_erased": {
+              "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "provenance": {
               "additionalProperties": true,
               "default": {},
               "type": "object"
+            },
+            "retention_notice": {
+              "description": "Present on a forget result. States plainly what forgetting did not do.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision_commit_seq": {
               "format": "int64",
@@ -9532,10 +9711,24 @@
             "media_type": {
               "type": "string"
             },
+            "physically_erased": {
+              "description": "Present on a forget result. Always `false` in every version to date:\nno operation removes stored bytes.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "provenance": {
               "additionalProperties": true,
               "default": {},
               "type": "object"
+            },
+            "retention_notice": {
+              "description": "Present on a forget result. States plainly what forgetting did not do.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision_commit_seq": {
               "format": "int64",
