@@ -8412,6 +8412,11 @@ fn finalize_trigram_qualification_and_fusion(candidates: &mut [SearchCandidate])
                     .unwrap_or(Ordering::Equal)
             })
             .then_with(|| right.commit_seq.cmp(&left.commit_seq))
+            // Break the final tie on content, not on the generated id. Entity
+            // ids carry a random component, so an id tiebreak makes the order
+            // of equally-ranked results differ between two stores holding the
+            // same memory — retrieval should be reproducible.
+            .then_with(|| left.hit.excerpt.cmp(&right.hit.excerpt))
             .then_with(|| left.hit.entity_id.cmp(&right.hit.entity_id))
     });
 }
