@@ -37,11 +37,12 @@ use crate::protocol::{
     MAX_PROJECTION_SPANS, MAX_PROJECTION_TEXT_BYTES, MAX_QUERY_BYTES, MAX_RECALL_EXCERPT_BYTES,
     MAX_RELATION_LIST_ITEMS, MAX_SEARCH_ITEMS, MAX_SOURCE_CURSOR_BYTES, MAX_TITLE_BYTES,
     ProjectionDropInput, ProjectionListInput, ProjectionPutInput, ProjectionRetrievalStatus,
-    ProjectionSpan, QueryAnalysis, QueryScriptProfile, RecencyDecayClass, RecencyTimestampBasis,
-    RelationListInput, RelationListItem, RelationListResult, RelationPutInput, RelationType,
-    RerankerRetrievalStatus, RetrievalIntentHint, RetrievalProfile, SearchHit, SearchInput,
-    SearchRanking, SearchResult, SemanticRetrievalStatus, SourceCheckpointInput, SourceGetInput,
-    SourceHealth, SourceIngestInput, SourceRegisterInput, SourceWithdrawInput,
+    ProjectionSpan, QueryAnalysis, QueryScriptProfile, RETRIEVAL_ANCHOR_KIND, RecencyDecayClass,
+    RecencyTimestampBasis, RelationListInput, RelationListItem, RelationListResult,
+    RelationPutInput, RelationType, RerankerRetrievalStatus, RetrievalIntentHint, RetrievalProfile,
+    SearchHit, SearchInput, SearchRanking, SearchResult, SemanticRetrievalStatus,
+    SourceCheckpointInput, SourceGetInput, SourceHealth, SourceIngestInput, SourceRegisterInput,
+    SourceWithdrawInput,
 };
 use crate::semantic::{
     EligibleSemanticRevision, RERANKER_ORDERING_CANDIDATE_LIMIT, RERANKER_POLICY_VERSION,
@@ -61,10 +62,21 @@ const MAX_RELATION_LIST_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONFLICT_LIST_ENCODED_BYTES: usize = 12 * 1024 * 1024;
 const RECENCY_POLICY_VERSION: &str = "bounded_recency_v1";
 const RECENCY_MAX_PROMOTION: usize = 2;
-const LEXICAL_POLICY_VERSION: &str = "lexical_qualification_v1";
+const LEXICAL_POLICY_VERSION: &str = "lexical_qualification_v2";
+/// Said at the moment a caller asks for removal, because that is when the
+/// belief forms.
+pub const RETENTION_NOTICE: &str = "Retrieval is disabled for this artifact. Its bytes are retained on disk: no Memoree version implements selective physical erasure. Original content may remain in the SQLite database, FTS indexes, WAL, content-addressed blobs, pre-migration snapshots, and backups. To remove content physically, destroy the whole store and every copy of it. Rotate any credential that was stored.";
+/// Upper bound on the surface forms one content unit may expand into. The cap
+/// keeps a folded unit's FTS expression small and predictable; it never changes
+/// how many units a candidate must match.
+const MAX_INFLECTION_VARIANTS: usize = 6;
+/// Tokens shorter than this are never folded. Short words produce far more
+/// spurious surface collisions than useful inflections.
+const MIN_INFLECTION_TOKEN_LEN: usize = 3;
 const TRIGRAM_POLICY_VERSION: &str = "trigram_typo_v1";
 const FUSION_POLICY_VERSION: &str = "tiered_rrf_v2";
 const PROJECTION_POLICY_VERSION: &str = "cited_projection_candidate_v1";
+const ANCHOR_POLICY_VERSION: &str = "write_time_anchor_candidate_v1";
 const RRF_K: f64 = 60.0;
 const ARTIFACT_CHUNKER_VERSION: i64 = 1;
 const ARTIFACT_CHUNK_TARGET_BYTES: usize = 2 * 1024;
@@ -522,6 +534,13 @@ pub struct ArtifactRecord {
     pub blob_hash: String,
     pub size_bytes: u64,
     pub status: String,
+    /// Present on a forget result. Always `false` in every version to date:
+    /// no operation removes stored bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physically_erased: Option<bool>,
+    /// Present on a forget result. States plainly what forgetting did not do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_notice: Option<String>,
     pub context: AmbientContext,
     #[serde(default)]
     pub provenance: BTreeMap<String, Value>,
@@ -1393,6 +1412,8 @@ impl Store {
             blob_hash: blob.hash,
             size_bytes: blob.size_bytes,
             status: "active".into(),
+            physically_erased: None,
+            retention_notice: None,
             context: context.clone(),
             provenance,
             actor: input.actor.clone(),
@@ -1781,6 +1802,47 @@ impl Store {
             commit_seq,
             created: existing.is_none(),
         })
+    }
+
+    /// Revisions whose compiler-inferred routing anchors touch this question.
+    ///
+    /// Anchors never qualify presence and are never returned as content. They
+    /// answer one question only: "is this revision's cited evidence worth
+    /// routing to, even though the asker used different words?"
+    pub fn anchored_revisions(
+        &self,
+        revision_ids: &[String],
+        query: &str,
+    ) -> Result<BTreeSet<String>> {
+        let mut matched = BTreeSet::new();
+        if revision_ids.is_empty() {
+            return Ok(matched);
+        }
+        let connection = self.connection.lock();
+        let analysis = analyze_query(query)?;
+        let Some(anchor_expression) = rare_anchor_expression(&connection, &analysis)? else {
+            return Ok(matched);
+        };
+        let wanted = revision_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let mut statement = connection.prepare(
+            "SELECT rp.revision_id
+               FROM projection_fts
+               JOIN retrieval_projections rp ON rp.id = projection_fts.projection_id
+               JOIN artifacts a ON a.id = rp.artifact_id
+              WHERE projection_fts MATCH ?1 AND rp.status = 'active' AND rp.kind = ?2
+                AND a.status = 'active' AND a.current_revision_id = rp.revision_id",
+        )?;
+        let rows = statement
+            .query_map(params![anchor_expression, RETRIEVAL_ANCHOR_KIND], |row| {
+                row.get::<_, String>(0)
+            })?;
+        for row in rows {
+            let revision_id = row?;
+            if wanted.contains(&revision_id) {
+                matched.insert(revision_id);
+            }
+        }
+        Ok(matched)
     }
 
     pub fn projection_list(
@@ -2265,6 +2327,8 @@ impl Store {
             blob_hash: blob.hash,
             size_bytes: blob.size_bytes,
             status: "active".into(),
+            physically_erased: None,
+            retention_notice: None,
             context: context.clone(),
             provenance: input.provenance.clone(),
             actor: input.actor.clone(),
@@ -2398,6 +2462,8 @@ impl Store {
             blob_hash: blob.hash,
             size_bytes: blob.size_bytes,
             status: "active".into(),
+            physically_erased: None,
+            retention_notice: None,
             context: head.context,
             provenance: input.provenance.clone(),
             actor: input.actor.clone(),
@@ -2545,6 +2611,11 @@ impl Store {
         let mut record = head.into_record(&self.cas, false)?;
         record.status = "forgotten".into();
         record.forgotten_reason = Some(input.reason.clone());
+        // Forgetting stops retrieval. It does not remove bytes, and a caller
+        // who believes otherwise may skip rotating a leaked credential or
+        // share a store they think is clean.
+        record.physically_erased = Some(false);
+        record.retention_notice = Some(RETENTION_NOTICE.into());
         append_event(
             &transaction,
             commit_seq,
@@ -3603,6 +3674,37 @@ impl Store {
             )?;
             annotate_lexical_matches(&connection, &mut hits, &query_analysis)?;
         }
+        // A question asked in category words reaches nothing lexical, so the
+        // claims whose write-time anchors cover those words are added to the
+        // candidate tier. They are never annotated as qualified.
+        if !matches!(entity_type, Some(EntityType::Artifact)) {
+            let anchored_before = hits.len();
+            append_anchor_candidates(
+                &connection,
+                context,
+                input,
+                &query_analysis,
+                candidate_limit,
+                evaluated_at,
+                &mut hits,
+            )?;
+            if hits.len() > anchored_before {
+                annotate_lexical_matches(&connection, &mut hits, &query_analysis)?;
+                for hit in hits.iter_mut().skip(anchored_before) {
+                    // Lexical annotation cannot see anchor text, so it would
+                    // otherwise re-decide these as ordinary weak candidates.
+                    hit.hit.ranking.qualified = false;
+                    if !hit
+                        .hit
+                        .matched_by
+                        .iter()
+                        .any(|m| m == ANCHOR_POLICY_VERSION)
+                    {
+                        hit.hit.matched_by.push(ANCHOR_POLICY_VERSION.into());
+                    }
+                }
+            }
+        }
         let projection = if matches!(entity_type, Some(EntityType::Claim)) {
             ProjectionRetrievalStatus {
                 state: "not_applicable".into(),
@@ -3730,6 +3832,25 @@ impl Store {
         // evidence-labelled subset without issuing a second search against a
         // potentially newer authority state.
         let candidate_partition_limit = RERANKER_ORDERING_CANDIDATE_LIMIT;
+        // A write-time anchor is a deliberate statement that this source
+        // answers this kind of question, so an anchor-matched candidate leads
+        // the candidate tier. This reorders unqualified routing leads only: it
+        // cannot qualify a claim or change presence.
+        let anchored_candidates = anchor_matched_entity_ids(&connection, &hits, &query_analysis)?;
+        if !anchored_candidates.is_empty() {
+            hits.sort_by_key(|hit| {
+                (
+                    !hit.ranking.qualified,
+                    !anchored_candidates.contains(&hit.entity_id),
+                )
+            });
+            for hit in hits
+                .iter_mut()
+                .filter(|hit| anchored_candidates.contains(&hit.entity_id))
+            {
+                hit.matched_by.push(ANCHOR_POLICY_VERSION.into());
+            }
+        }
         let mut candidate_entity_ids = BTreeSet::new();
         let candidate_hit_count = hits
             .iter()
@@ -5800,6 +5921,8 @@ impl RawArtifact {
             blob_hash: self.blob.hash,
             size_bytes: self.blob.size_bytes,
             status: self.status,
+            physically_erased: None,
+            retention_notice: None,
             context: self.context,
             provenance: serde_json::from_str(&self.provenance_json)?,
             actor: self.actor,
@@ -7781,6 +7904,135 @@ fn append_trigram_candidates(
     Ok(())
 }
 
+/// The anchor match expression for a question, built only from terms that are
+/// rare across stored anchors.
+///
+/// A category word is only useful routing when few claims claim it. Matching a
+/// common word like "customer" would promote every note that mentions
+/// customers, which is noise dressed as intent.
+fn rare_anchor_expression(
+    connection: &Connection,
+    analysis: &AnalyzedQuery,
+) -> Result<Option<String>> {
+    let total: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM retrieval_projections WHERE status = 'active' AND kind = ?1",
+        params![RETRIEVAL_ANCHOR_KIND],
+        |row| row.get(0),
+    )?;
+    if total == 0 {
+        return Ok(None);
+    }
+    // Deliberately strict. An anchor earns a promotion by being close to
+    // unique in this store; a term a dozen claims also chose says nothing
+    // about which one answers the question.
+    let threshold = (total / 50).max(2);
+    let mut rare = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT COUNT(*)
+           FROM projection_fts
+           JOIN retrieval_projections rp ON rp.id = projection_fts.projection_id
+          WHERE projection_fts MATCH ?1 AND rp.status = 'active' AND rp.kind = ?2",
+    )?;
+    for unit in &analysis.units {
+        let frequency: i64 = statement
+            .query_row(params![unit.expression, RETRIEVAL_ANCHOR_KIND], |row| {
+                row.get(0)
+            })?;
+        if frequency > 0 && frequency <= threshold {
+            rare.push(unit.expression.clone());
+        }
+    }
+    if rare.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rare.join(" OR ")))
+}
+
+/// Claims reachable only through their write-time routing anchors.
+///
+/// Anchors are compiler inference, so an anchored claim enters the candidate
+/// tier and nothing more: it is never marked qualified, never changes
+/// `presence`, and what a caller ultimately reads is the claim's own cited
+/// source bytes.
+fn append_anchor_candidates(
+    connection: &Connection,
+    context: &AmbientContext,
+    input: &SearchInput,
+    analysis: &AnalyzedQuery,
+    candidate_limit: i64,
+    evaluated_at: DateTime<Utc>,
+    candidates: &mut Vec<SearchCandidate>,
+) -> Result<()> {
+    let Some(anchor_expression) = rare_anchor_expression(connection, analysis)? else {
+        return Ok(());
+    };
+    let horizon = enum_string(&input.horizon)?;
+    let sql = format!(
+        "SELECT c.id, cr.id, c.claim_type, cr.statement, c.status,
+                c.workspace_id, c.project_id, c.task_id, c.component,
+                cr.evidence_json, cr.confidence, c.valid_from, c.valid_until,
+                c.current_revision_id = cr.id, ?7,
+                CASE
+                  WHEN c.valid_from IS NOT NULL AND c.valid_from > ?7 THEN 'future'
+                  WHEN c.valid_until IS NOT NULL AND c.valid_until <= ?7 THEN 'expired'
+                  ELSE 'current'
+                END,
+                cr.created_at, 0.0, cr.commit_seq,
+                (SELECT rowid FROM claim_fts WHERE revision_id = cr.id LIMIT 1)
+           FROM projection_fts
+           JOIN retrieval_projections rp ON rp.id = projection_fts.projection_id
+           JOIN artifacts a ON a.id = rp.artifact_id
+           JOIN claims c ON c.id = json_extract(rp.metadata_json, '$.claim_id')
+           JOIN claim_revisions cr ON cr.id = c.current_revision_id
+          WHERE projection_fts MATCH ?1
+            AND rp.status = 'active' AND rp.kind = ?2
+            AND a.status = 'active' AND a.current_revision_id = rp.revision_id
+            AND c.status IN ('active', 'conflicted')
+            AND (c.valid_from IS NULL OR c.valid_from <= ?7)
+            AND (c.valid_until IS NULL OR c.valid_until > ?7)
+            AND {}
+          ORDER BY rp.commit_seq DESC
+          LIMIT ?8",
+        horizon_filter_sql("c", false)
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(
+        params![
+            anchor_expression,
+            RETRIEVAL_ANCHOR_KIND,
+            horizon,
+            context.workspace_id,
+            context.project_id,
+            context.task_id,
+            evaluated_at,
+            candidate_limit,
+        ],
+        search_claim_row,
+    )?;
+    for row in rows {
+        let row = row?;
+        let mut candidate = row.into_candidate()?;
+        candidate.lexical_candidate = false;
+        candidate.hit.score = 0.0;
+        candidate.hit.ranking.lexical_score = 0.0;
+        candidate.hit.ranking.qualified = false;
+        candidate.hit.ranking.query_unit_count = analysis.units.len();
+        candidate.hit.ranking.required_matches = analysis.required_matches;
+        candidate.hit.matched_by.push(ANCHOR_POLICY_VERSION.into());
+        candidate.hit.provenance.insert(
+            "retrieval_channel".into(),
+            Value::String(ANCHOR_POLICY_VERSION.into()),
+        );
+        if !candidates
+            .iter()
+            .any(|existing| existing.hit.entity_id == candidate.hit.entity_id)
+        {
+            candidates.push(candidate);
+        }
+    }
+    Ok(())
+}
+
 fn prepare_trigram_candidate(
     candidate: &mut SearchCandidate,
     analysis: &AnalyzedQuery,
@@ -7925,6 +8177,7 @@ fn fuzzy_token_qualification(
     let threshold = if query_words.len() == 1 { 0.80 } else { 0.72 };
     let mut scores = Vec::with_capacity(query_words.len());
     let mut matched = Vec::new();
+    let mut matched_words = BTreeSet::new();
     for query_word in &query_words {
         let best = candidate_words
             .iter()
@@ -7933,15 +8186,53 @@ fn fuzzy_token_qualification(
         scores.push(best);
         if best >= threshold {
             matched.push(query_word.clone());
+            matched_words.insert(query_word.clone());
         }
     }
-    let required = if query_words.len() == 1 {
+    // Typo tolerance must not be a second, weaker gate. A fuzzy match counts
+    // the same content units the lexical gate counts — a multi-word unit only
+    // when every one of its words matched — and has to reach the same
+    // threshold. Otherwise a query's distinguishing term can be absent
+    // entirely while common words carry an unrelated claim into `presence`.
+    let mut matched_units = 0usize;
+    let mut phrase_units = 0usize;
+    let mut matched_phrase_units = 0usize;
+    for unit in &analysis.units {
+        let words = unit
+            .display
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .filter(|word| word.chars().count() >= 3)
+            .collect::<Vec<_>>();
+        if words.is_empty() {
+            continue;
+        }
+        let unit_matched = words.iter().all(|word| matched_words.contains(*word));
+        if unit.phrase {
+            phrase_units += 1;
+            if unit_matched {
+                matched_phrase_units += 1;
+            }
+        }
+        if unit_matched {
+            matched_units += 1;
+        }
+    }
+    let similarity = scores.iter().copied().sum::<f64>() / scores.len() as f64;
+    // Typo tolerance is held to the stricter of its own historical ratio and
+    // the lexical requirement, so widening one gate can never quietly widen
+    // the other.
+    let unit_count = analysis.units.len();
+    let required_units = if unit_count <= 1 {
         1
     } else {
-        (query_words.len() * 3).div_ceil(5)
+        analysis
+            .required_matches
+            .max((unit_count * 3).div_ceil(5))
+            .min(unit_count)
     };
-    let similarity = scores.iter().copied().sum::<f64>() / scores.len() as f64;
-    let qualified = matched.len() >= required;
+    let qualified = matched_units > 0
+        && matched_units >= required_units
+        && matched_phrase_units == phrase_units;
     (similarity, matched, qualified)
 }
 
@@ -9164,13 +9455,181 @@ fn push_unit_from_tokens(tokens: Vec<String>, phrase: bool, units: &mut Vec<Quer
         .map(|token| token.to_lowercase())
         .collect::<Vec<_>>();
     let display = tokens.join(" ");
-    let expression = format!("\"{}\"", display.replace('"', "\"\""));
+    // Quoted phrases and hyphenated identifiers stay exact: folding them would
+    // widen a caller's explicit precision request. Only a single free token is
+    // folded onto its own inflections.
+    let expression = if phrase || tokens.len() != 1 {
+        format!("\"{}\"", display.replace('"', "\"\""))
+    } else {
+        folded_unit_expression(&tokens[0])
+    };
     units.push(QueryUnit {
         display,
         expression,
         phrase,
         component_count: tokens.len(),
     });
+}
+
+/// One content unit's FTS expression, widened to its own inflectional surface
+/// forms. The unit still counts once, so `required_matches` keeps its meaning:
+/// this admits `logs` for `log`, never a second independent term.
+fn folded_unit_expression(token: &str) -> String {
+    let variants = inflection_variants(token);
+    if variants.len() == 1 {
+        return format!("\"{}\"", token.replace('"', "\"\""));
+    }
+    let joined = variants
+        .iter()
+        .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("({joined})")
+}
+
+/// Lowercase alphanumeric/underscore tokens of a text, with query stopwords
+/// removed. Shared with the service layer so recovery relevance and retrieval
+/// qualification tokenize the same way.
+pub(crate) fn content_tokens(value: &str) -> Vec<String> {
+    lexical_tokens(value)
+        .into_iter()
+        .map(|token| token.to_lowercase())
+        .filter(|token| !is_query_stopword(token))
+        .collect()
+}
+
+/// Deterministic, replayable English inflection folding for one lowercase
+/// token. It is intentionally inflectional only: no synonyms, no derivational
+/// morphology, no stemming of the index, and no model. The first element is
+/// always the caller's own token.
+pub(crate) fn inflection_variants(token: &str) -> Vec<String> {
+    let mut variants = vec![token.to_owned()];
+    if token.len() < MIN_INFLECTION_TOKEN_LEN
+        || !token
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        return variants;
+    }
+    let stem = inflection_stem(token);
+    let mut push = |candidate: String| {
+        if candidate.len() >= MIN_INFLECTION_TOKEN_LEN
+            && !variants.iter().any(|existing| existing == &candidate)
+            && variants.len() < MAX_INFLECTION_VARIANTS
+        {
+            variants.push(candidate);
+        }
+    };
+    if stem != token {
+        push(stem.clone());
+    }
+    push(plural_form(&stem));
+    let consonant_stem = stem.strip_suffix('e').map_or(stem.clone(), str::to_owned);
+    let doubled = double_final_consonant(&stem);
+    push(format!(
+        "{}ing",
+        doubled.as_deref().unwrap_or(&consonant_stem)
+    ));
+    if stem.ends_with('e') {
+        push(format!("{stem}d"));
+    } else {
+        push(format!(
+            "{}ed",
+            doubled.as_deref().unwrap_or(consonant_stem.as_str())
+        ));
+    }
+    push(format!("{consonant_stem}er"));
+    variants
+}
+
+/// The shared base of one token's inflections. Only suffixes that English
+/// inflection actually produces are removed.
+fn inflection_stem(token: &str) -> String {
+    if let Some(base) = token.strip_suffix("ies")
+        && base.len() >= 2
+    {
+        return format!("{base}y");
+    }
+    if let Some(base) = token.strip_suffix("es")
+        && base.len() >= 3
+        && ends_with_sibilant(base)
+    {
+        return base.to_owned();
+    }
+    if let Some(base) = token.strip_suffix('s')
+        && base.len() >= 3
+        && !base.ends_with('s')
+        && !base.ends_with('u')
+    {
+        return base.to_owned();
+    }
+    if let Some(base) = token.strip_suffix("ing")
+        && base.len() >= 3
+    {
+        return undouble_final_consonant(base);
+    }
+    if let Some(base) = token.strip_suffix("ed")
+        && base.len() >= 3
+    {
+        return undouble_final_consonant(base);
+    }
+    token.to_owned()
+}
+
+fn plural_form(stem: &str) -> String {
+    if ends_with_sibilant(stem) {
+        format!("{stem}es")
+    } else if let Some(base) = stem.strip_suffix('y') {
+        if base.chars().last().is_some_and(is_consonant) {
+            format!("{base}ies")
+        } else {
+            format!("{stem}s")
+        }
+    } else {
+        format!("{stem}s")
+    }
+}
+
+fn ends_with_sibilant(value: &str) -> bool {
+    value.ends_with('s')
+        || value.ends_with('x')
+        || value.ends_with('z')
+        || value.ends_with("ch")
+        || value.ends_with("sh")
+}
+
+fn is_consonant(character: char) -> bool {
+    character.is_ascii_alphabetic() && !matches!(character, 'a' | 'e' | 'i' | 'o' | 'u')
+}
+
+/// `log` -> `logg`, so that `logging` and `logged` are reachable. Returns
+/// `None` when English would not double the final consonant.
+fn double_final_consonant(stem: &str) -> Option<String> {
+    let mut characters = stem.chars().rev();
+    let last = characters.next()?;
+    let middle = characters.next()?;
+    let first = characters.next();
+    if !is_consonant(last) || matches!(last, 'w' | 'x' | 'y') {
+        return None;
+    }
+    if is_consonant(middle) {
+        return None;
+    }
+    if first.is_some_and(|character| !is_consonant(character)) {
+        return None;
+    }
+    Some(format!("{stem}{last}"))
+}
+
+fn undouble_final_consonant(stem: &str) -> String {
+    let mut characters = stem.chars().rev();
+    let (Some(last), Some(previous)) = (characters.next(), characters.next()) else {
+        return stem.to_owned();
+    };
+    if last == previous && is_consonant(last) {
+        return stem[..stem.len() - last.len_utf8()].to_owned();
+    }
+    stem.to_owned()
 }
 
 fn lexical_tokens(source: &str) -> Vec<String> {
@@ -9258,6 +9717,59 @@ fn ranked_claim_evidence_clauses(statement: &str, user_query: &str) -> Vec<Strin
         clauses.push(bounded_utf8_preview(statement.trim(), 2 * 1024).to_owned());
     }
     clauses
+}
+
+/// Entity ids whose active routing anchors match this question.
+///
+/// An anchor is stored against the artifact revision that holds the claim's
+/// cited bytes, so a claim hit is matched through the anchor's recorded
+/// `claim_id` and an artifact hit through its revision. Anchors are compiler
+/// inference: they may promote a candidate, never qualify one.
+fn anchor_matched_entity_ids(
+    connection: &Connection,
+    hits: &[SearchHit],
+    analysis: &AnalyzedQuery,
+) -> Result<BTreeSet<String>> {
+    if hits.iter().all(|hit| hit.ranking.qualified) {
+        return Ok(BTreeSet::new());
+    }
+    let Some(anchor_expression) = rare_anchor_expression(connection, analysis)? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut matched_claims = BTreeSet::new();
+    let mut matched_revisions = BTreeSet::new();
+    let mut statement = connection.prepare(
+        "SELECT rp.revision_id, json_extract(rp.metadata_json, '$.claim_id')
+           FROM projection_fts
+           JOIN retrieval_projections rp ON rp.id = projection_fts.projection_id
+           JOIN artifacts a ON a.id = rp.artifact_id
+          WHERE projection_fts MATCH ?1 AND rp.status = 'active' AND rp.kind = ?2
+            AND a.status = 'active' AND a.current_revision_id = rp.revision_id",
+    )?;
+    let rows = statement.query_map(
+        params![anchor_expression, RETRIEVAL_ANCHOR_KIND],
+        |row| -> rusqlite::Result<(String, Option<String>)> {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        },
+    )?;
+    for row in rows {
+        let (revision_id, claim_id) = row?;
+        matched_revisions.insert(revision_id);
+        if let Some(claim_id) = claim_id {
+            matched_claims.insert(claim_id);
+        }
+    }
+    if matched_revisions.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(hits
+        .iter()
+        .filter(|hit| !hit.ranking.qualified)
+        .filter(|hit| {
+            matched_claims.contains(&hit.entity_id) || matched_revisions.contains(&hit.revision_id)
+        })
+        .map(|hit| hit.entity_id.clone())
+        .collect())
 }
 
 fn required_lexical_matches(unit_count: usize) -> usize {
@@ -10877,6 +11389,159 @@ mod tests {
             historical_after_migration.retrieval_profile.intent_hint,
             RetrievalIntentHint::HistoricalMemory
         ));
+    }
+
+    #[test]
+    fn anchor_rarity_gate_promotes_only_distinctive_terms() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let context = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        // One distinctive anchor among many sharing a common one.
+        for index in 0..60 {
+            let artifact = store
+                .artifact_put(
+                    &context,
+                    &ArtifactPutInput {
+                        kind: "note".into(),
+                        title: format!("note {index}"),
+                        media_type: "text/plain; charset=utf-8".into(),
+                        content: ArtifactContent::Text(format!("Body number {index}.")),
+                        provenance: Default::default(),
+                        actor: None,
+                    },
+                    Some(&format!("rare-artifact-{index}")),
+                    &format!("rare-artifact-hash-{index}"),
+                )
+                .unwrap()
+                .value;
+            let text = if index == 0 {
+                "distinctiveanchor ; commonanchor".to_owned()
+            } else {
+                "commonanchor".to_owned()
+            };
+            store
+                .projection_put(
+                    &context,
+                    &ProjectionPutInput {
+                        artifact_id: artifact.artifact_id.clone(),
+                        revision_id: artifact.revision_id.clone(),
+                        projection_key: format!("retrieval-anchor:{index}"),
+                        kind: RETRIEVAL_ANCHOR_KIND.into(),
+                        text,
+                        evidence_spans: vec![crate::protocol::ProjectionSpan {
+                            start_byte: 0,
+                            end_byte: 5,
+                        }],
+                        generator: "test".into(),
+                        generator_version: "test".into(),
+                        generator_digest: "digest".into(),
+                        metadata: Default::default(),
+                        actor: None,
+                    },
+                    Some(&format!("rare-projection-{index}")),
+                    &format!("rare-projection-hash-{index}"),
+                )
+                .unwrap();
+        }
+        let connection = store.connection.lock();
+        let rare = analyze_query("distinctiveanchor").unwrap();
+        assert!(
+            rare_anchor_expression(&connection, &rare)
+                .unwrap()
+                .is_some(),
+            "a near-unique anchor must be able to promote"
+        );
+        let common = analyze_query("commonanchor").unwrap();
+        assert!(
+            rare_anchor_expression(&connection, &common)
+                .unwrap()
+                .is_none(),
+            "an anchor most claims share must promote nothing"
+        );
+        let absent = analyze_query("neverstoredanywhere").unwrap();
+        assert!(
+            rare_anchor_expression(&connection, &absent)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn inflection_folding_covers_observed_query_document_mismatches() {
+        // Each pair is a real field-test miss: the stored wording on the left,
+        // the natural query wording on the right.
+        for (stored, queried) in [
+            ("logs", "log"),
+            ("debugging", "debug"),
+            ("autoscaler", "autoscale"),
+            ("rows", "row"),
+            ("retries", "retry"),
+            ("deploys", "deploy"),
+            ("charged", "charge"),
+        ] {
+            let forms = inflection_variants(queried);
+            assert!(
+                forms.iter().any(|form| form == stored),
+                "folding {queried} did not reach {stored}: {forms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inflection_folding_stays_inflectional_and_bounded() {
+        // No derivational morphology, no synonymy, no cross-lemma collisions.
+        for (token, forbidden) in [
+            ("log", "logic"),
+            ("log", "login"),
+            ("deletion", "delete"),
+            ("bus", "bu"),
+            ("class", "clas"),
+        ] {
+            let forms = inflection_variants(token);
+            assert!(
+                !forms.iter().any(|form| form == forbidden),
+                "folding {token} wrongly reached {forbidden}: {forms:?}"
+            );
+        }
+        for token in ["id", "a", "be"] {
+            assert_eq!(inflection_variants(token), vec![token.to_owned()]);
+        }
+        for token in ["log", "deploy", "webhook_events", "org_id"] {
+            assert!(inflection_variants(token).len() <= MAX_INFLECTION_VARIANTS);
+        }
+        // Identifiers are not English words and must never be folded.
+        assert_eq!(
+            inflection_variants("webhook_events"),
+            vec!["webhook_events".to_owned()]
+        );
+    }
+
+    #[test]
+    fn folded_units_stay_one_unit_and_phrases_stay_exact() {
+        let analysis = analyze_query("card numbers in logs").unwrap();
+        let public = analysis.public();
+        assert_eq!(public.policy_version, "lexical_qualification_v2");
+        // Folding widens surface forms, never the number of content units a
+        // candidate must match.
+        assert_eq!(public.content_units.len(), analysis.units.len());
+        assert_eq!(public.required_matches, required_lexical_matches(3));
+        let logs_unit = analysis
+            .units
+            .iter()
+            .find(|unit| unit.display == "logs")
+            .expect("logs unit");
+        assert!(logs_unit.expression.contains("\"log\""));
+        assert!(logs_unit.expression.starts_with('('));
+
+        let phrase = analyze_query("\"card numbers\"").unwrap();
+        assert_eq!(phrase.units.len(), 1);
+        assert_eq!(phrase.units[0].expression, "\"card numbers\"");
     }
 
     #[test]

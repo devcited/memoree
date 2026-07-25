@@ -4,6 +4,35 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.7.0] - unreleased
+
+### Changed
+
+- Qualification is now `lexical_qualification_v2`: each free content unit also matches its own English inflections (`log`/`logs`/`logging`, `debug`/`debugging`, `autoscale`/`autoscaler`). Folding is query-side, deterministic, and bounded to six surface forms; the index, tokenizer, and `required_matches` threshold are unchanged, and a folded unit still counts exactly once. Quoted phrases and hyphenated identifiers stay exact.
+- Typo tolerance is no longer a second, weaker gate. Fuzzy qualification now counts the same content units as the lexical gate, requires every phrase group to match, and must satisfy the stricter of its own historical ratio and the lexical requirement. Previously a query's distinguishing term could be missing entirely while common words carried an unrelated claim into `presence`.
+- Recall and retrieve select the claim window from a slate four times the requested size: identical and near-identical statements collapse onto their best-ranked copy, and one source artifact may take at most two slots before another source is offered one. Claims in a conflict relation, and statements differing in any number, identifier, or negation, are never collapsed.
+- Long artifacts return the excerpt window around the match instead of the head of the document, with a new `excerpt_citation` naming exactly the shown bytes. The parent `citation` still names the whole matched span, so recall and search stay comparable.
+- Recovery evidence must share vocabulary with the routed question (`recovery_lexical_relation_v1`). Withheld spans are reported as `suppressed_references`; an unrelated fragment cannot route reasoning and can point a reader at the rejected side of a decision.
+- The claim compiler is instructed to name each statement's subject explicitly, because claims are retrieved without their source document. `remember` reports a `REMEMBER_UNNAMED_SUBJECT` review finding for statements that open with a pronoun, demonstrative, or bare role noun.
+- The canonical agent skill now tells agents to re-query with a rewording rather than pass it as `--reformulation`, which can only widen unqualified recovery evidence and can never qualify a claim.
+
+### Added
+
+- `artifact.forget` now returns `physically_erased: false` and a retention notice stating that bytes remain in the database, FTS indexes, WAL, blob store, snapshots, and backups. No version implements selective physical erasure, and a caller who believed otherwise might skip rotating a leaked credential or share a store they thought was clean. `docs/configuration.md` gains a data retention and erasure section with the whole-store destruction procedure.
+- Write-time retrieval anchors. The claim compiler emits at most six short category or synonym terms per claim — `orm` and `query builder` for a claim naming Kysely, `tenant isolation` for one about row-level security — stored as a disposable derived projection bound to that claim's exact cited spans. An anchor match promotes the claim into the candidate tier and routes recovery to its authoritative source bytes; it can never qualify `presence`, be quoted, or enter a context bundle, and anchors carrying a value, number, or negation are refused by the compiler contract. Anchors must also be rare across stored anchors before they promote anything: a category word a dozen claims share says nothing about which one answers the question. `recovery.anchor_routed_references` reports how many spans were reached this way.
+- `retrieve` runs its recovery step whenever no claim answered, not only on a bare `none`. A weak artifact match previously suppressed the entire recovery path, which is the state where routing help matters most.
+- `retrieve` returns `next_action` when nothing qualified: why the question did not match, the content units that matched nothing, and vocabulary taken only from leads that share wording with the question. It never contains an answer.
+- `retrieve` returns `claims_truncated`, so a caller can tell a complete answer from a window truncated by a heavily discussed entity.
+- `semantic enable` and `semantic enable-reranker` report `daemon_reload` when a daemon is already running. Retrieval model runtimes are initialized during startup warm-up only, so a model installed underneath a resident daemon was silently unused and every query failed open to deterministic ordering.
+
+### Known limitations
+
+- **No selective physical erasure.** `artifact.forget`, `claim.retract`, and `source.withdraw` stop retrieval; bytes remain in the database, FTS indexes, WAL, blob store, snapshots, and backups. The forget response says so and `docs/configuration.md` documents whole-store destruction as the only remediation. Do not store secrets, credentials, or data under a deletion obligation.
+- **Optional model installation has no network timeout.** `semantic enable` and `semantic enable-reranker` can block indefinitely on a degraded network; the pinned `hf-hub` sync API exposes no timeout setting. Interrupt and retry, or install from a local directory with `--from-directory`.
+- **The installer/upgrade end-to-end tests are extremely slow** — the full 13-test CLI suite takes over two hours on a developer machine, dominated by update-check timeouts. 211 library tests, the nine non-upgrade end-to-end tests, and both committed retrieval corpora pass in about a minute. A 0.6-era store with 263 artifacts and 819 claims was opened under this build, migrated without schema change, and verified clean.
+- **No task-level evidence.** Nothing here demonstrates that an agent using Memoree completes real development work better than one without it; the project's own 0.5 audit failed to show token savings at equal quality. Retrieval quality and safety are the only claims this release supports.
+- Three known retrieval misses remain where the asker's distinguishing word appears in neither the claim nor its anchors. They abstain rather than answer wrongly.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

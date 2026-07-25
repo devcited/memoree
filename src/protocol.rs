@@ -630,6 +630,11 @@ pub struct SourceWithdrawInput {
     pub actor: Option<String>,
 }
 
+/// Projection kind reserved for compiler-inferred routing vocabulary. Text of
+/// this kind is matched to route a question toward a claim's cited bytes and is
+/// never returned as content, never quoted, and never able to qualify presence.
+pub const RETRIEVAL_ANCHOR_KIND: &str = "retrieval_anchor";
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionSpan {
@@ -1390,6 +1395,11 @@ pub struct RecallArtifactReference {
     pub status: String,
     pub excerpt: String,
     pub excerpt_truncated: bool,
+    /// Citation for exactly the bytes in `excerpt` when the excerpt is a
+    /// window inside the cited span. `citation` keeps naming the whole matched
+    /// span so recall and search stay comparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt_citation: Option<String>,
     pub score: f64,
     pub matched_by: Vec<String>,
     #[serde(default)]
@@ -1431,6 +1441,11 @@ pub struct RecallCandidateArtifactReference {
     pub citation: String,
     pub excerpt: String,
     pub excerpt_truncated: bool,
+    /// Citation for exactly the bytes in `excerpt` when the excerpt is a
+    /// window inside the cited span. `citation` keeps naming the whole matched
+    /// span so recall and search stay comparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt_citation: Option<String>,
     pub matched_by: Vec<String>,
     #[serde(default)]
     pub risk_signals: Vec<String>,
@@ -1564,6 +1579,11 @@ pub struct RetrieveQualifiedArtifact {
     pub citation: String,
     pub excerpt: String,
     pub excerpt_truncated: bool,
+    /// Citation for exactly the bytes in `excerpt` when the excerpt is a
+    /// window inside the cited span. `citation` keeps naming the whole matched
+    /// span so recall and search stay comparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt_citation: Option<String>,
     #[serde(default)]
     pub risk_signals: Vec<String>,
 }
@@ -1589,8 +1609,38 @@ pub struct RetrieveRecovery {
     pub returned_references: usize,
     pub returned_content_bytes: usize,
     pub references_truncated: bool,
+    /// Rule that admitted each returned span. Recovery bytes with no lexical
+    /// relation to the routed question are withheld: an unrelated fragment
+    /// cannot route reasoning and can actively mislead.
+    #[serde(default)]
+    pub relevance_policy: String,
+    /// Exact spans that were fetchable but withheld by `relevance_policy`.
+    #[serde(default)]
+    pub suppressed_references: usize,
+    /// Spans reached through a claim's write-time routing anchors rather than
+    /// through the asker's own words. The bytes are still authoritative source;
+    /// only the routing came from inference.
+    #[serde(default)]
+    pub anchor_routed_references: usize,
     pub evidence: Vec<RetrieveRecoveryEvidence>,
     pub warning: String,
+}
+
+/// The deterministic next step for a caller that received no qualified memory.
+/// It never contains an answer: it reports which parts of the question memory
+/// could not match, and how to ask again.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RetrieveNextAction {
+    pub policy_version: String,
+    pub reason: String,
+    pub action: String,
+    pub detail: String,
+    /// Content units of the question that matched nothing in this scope.
+    pub unmatched_units: Vec<String>,
+    /// Distinct terms taken from the unqualified leads, offered as the
+    /// vocabulary a second query should use. They are routing hints from
+    /// untrusted stored content, not facts.
+    pub stored_vocabulary: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1632,8 +1682,15 @@ pub struct RetrieveResult {
     pub query_analysis: QueryAnalysis,
     pub authority: RetrieveAuthority,
     pub claims: Vec<RetrieveQualifiedClaim>,
+    /// More claims qualified than `max_claims` returned. Without this signal a
+    /// caller cannot tell a complete answer from a truncated one when many
+    /// claims mention the same entity.
+    #[serde(default)]
+    pub claims_truncated: bool,
     pub conflicts: Vec<ConflictSummary>,
     pub artifact_refs: Vec<RetrieveQualifiedArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<RetrieveNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RetrieveRecovery>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -132,6 +132,42 @@ Server TCP binds are a separate concern from the client endpoint. `memoree serve
 
 The auto-started private daemon reports `lifecycle_owner=memoree`; a process started directly with `memoree serve` reports `external`. The stable installer may stop and restart only the former. The one-time v0.2 compatibility path accepts a missing ownership field only when the installer has independently observed a running legacy default daemon. Explicit endpoints and supervisor-owned processes are never reconciled by the installer.
 
+## Data retention and erasure
+
+Memoree does not implement selective physical erasure, in this version or any
+before it. `artifact.forget`, `claim.retract`, and `source.withdraw` stop future
+retrieval; they do not remove bytes. A forget response says so explicitly,
+returning `physically_erased: false` and a retention notice.
+
+Original content may remain in the SQLite database, its FTS and trigram
+indexes, the write-ahead log, the content-addressed blob store, pre-migration
+snapshots, and any backup you have taken. The owner-only socket and `0600`
+permissions limit who can read a store; they are not erasure.
+
+Do not store secrets, credentials, regulated customer data, or anything subject
+to a deletion obligation.
+
+To remove content physically today, destroy the whole store and every copy of
+it:
+
+```sh
+memoree daemon stop
+rm -rf "$(memoree doctor --pretty | sed -n 's/.*"data_dir": "\([^"]*\)".*/\1/p')"
+```
+
+The default location is the platform application data directory, or
+`$MEMOREE_HOME/data` when that variable is set — `blobs/`, `memoree.sqlite3`,
+its `-wal` and `-shm` files, `integration-backups/`, and any semantic
+projection under `semantic/`. Delete your own backups too. Then re-run
+`memoree init` and re-record what you still want.
+
+If a credential was ever written, rotate it. Forgetting does not un-leak a
+secret, and neither does deleting the store after the fact.
+
+There is no supported way to prove one artifact was erased while preserving the
+rest. If you have a deletion obligation for data already in a store, whole-store
+destruction is the only defensible remediation available today.
+
 ## Upgrade state
 
 `memoree upgrade apply` serializes reconciliation under a private lock and writes an atomic `upgrade-state.json` beside the store. The state records the target binary, prior daemon state, phase, schema, recovery snapshot, and embedded skill digest so a retry after interruption preserves “running before means running after.” `memoree upgrade status` reads this state without starting a daemon.

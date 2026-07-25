@@ -1,6 +1,6 @@
 [package]
 name = "memoree"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.94"
 description = "Local, artifact-first memory for machine agents"
@@ -72,6 +72,23 @@ ureq = "3.3"
 assert_cmd = "2.0"
 fastembed = { version = "5.17.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 proptest = "1.9"
+
+# Keep local rebuilds useful without retaining many gigabytes of incremental
+# state and dependency debug information. Line tables preserve file/line
+# backtraces for Memoree itself; dependencies retain symbols but omit debuginfo.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"

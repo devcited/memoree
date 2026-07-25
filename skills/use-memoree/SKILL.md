@@ -21,9 +21,13 @@ For prior decisions, audits, constraints, fixes, preferences, or facts absent fr
 memoree retrieve "What did we decide about deployment rollback?"
 ```
 
-Optionally give one meaning-preserving `--reformulation`; preserve entity, role, negation, time, and every facet. Never broaden scope automatically. If unsupported, fall back to `memoree recall`; use `context build --max-bytes N` only for a bounded qualified packet.
+Retrieval is lexical. Query in the wording memory would use—entity, table, service, and command names—not only in the wording of the question. On `presence: none` or qualified claims that do not answer, read `next_action`, then **run `retrieve` again with the rewording as the query**. A second query can qualify a claim; `--reformulation` cannot—it only widens unqualified recovery evidence, so pass it only when you want more routing leads for the same abstention. Never broaden scope automatically. If unsupported, fall back to `memoree recall`; use `context build --max-bytes N` only for a bounded qualified packet.
 
-`presence` is qualified retrieval, not truth. Inspect status, conflicts, and exact citations. `recovery` is exact but `unqualified_evidence`; abstain when identity, predicate direction, state, time, negation, or facets are missing. Candidate models recover/order leads only.
+`recovery` may include spans reached through a claim's write-time anchors (`anchor_routed_references`) when your words and the stored words differ. Those bytes are authoritative source and cited, but still `unqualified_evidence`: read them, then re-query using their wording to get a qualified claim.
+
+`presence` is qualified retrieval, not truth. Inspect status, conflicts, and exact citations. `claims_truncated` means more claims qualified than were returned: raise `--max-claims` before concluding anything is absent, especially for a heavily discussed entity. `recovery` is exact but `unqualified_evidence`; abstain when identity, predicate direction, state, time, negation, or facets are missing. Candidate models recover/order leads only.
+
+Memory records only what someone wrote down. An empty result means nothing was stored under that wording, never that the fact is false.
 
 ## Write
 
@@ -33,7 +37,7 @@ Persist only durable verified decisions, constraints, preferences, reusable proc
 memoree remember --apply "Self-contained durable evidence and conclusion."
 ```
 
-Use `--file PATH --apply` for a source, `--raw --apply` when inference is unnecessary, and preview when uncertain. Never store routine progress, transcripts, chain-of-thought, credentials, secrets, or speculation. Use `checkpoint` only for a reviewed handoff; pass a write's `commit_seq` to dependent reads with `--min-commit-seq`.
+Anchors are generated for you at write time from the note's own content; they route later questions asked in category words. Name the subject in the text you remember: claims are retrieved alone, so "retention is 90 days" is unreachable while "`webhook_events` retention is 90 days" is not. Keep one note to one topic and put the conclusion first—a long note's later paragraphs are much harder to retrieve. Review `quality.findings` before applying. Use `--file PATH --apply` for a source, `--raw --apply` when inference is unnecessary, and preview when uncertain. Never store routine progress, transcripts, chain-of-thought, credentials, secrets, or speculation — forgetting stops retrieval but never removes bytes, so anything written may have to be erased by destroying the whole store. Use `checkpoint` only for a reviewed handoff; pass a write's `commit_seq` to dependent reads with `--min-commit-seq`.
 
 ## Guardrails
 

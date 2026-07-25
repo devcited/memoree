@@ -1,5 +1,6 @@
 //! Protocol operation dispatcher.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -25,11 +26,11 @@ use crate::{
         MAX_REQUEST_ID_BYTES, MAX_RETRIEVE_EVIDENCE_BYTES, MAX_RETRIEVE_LEADS,
         MAX_RETRIEVE_REFERENCES, Operation, PROTOCOL_VERSION, ProbeInput, ProbeLead,
         ProbeLocatorOrigin, ProbeResult, ProbeSourceLocator, ProjectionDropInput,
-        ProjectionListInput, ProjectionPutInput, RecallArtifactReference,
+        ProjectionListInput, ProjectionPutInput, QueryAnalysis, RecallArtifactReference,
         RecallCandidateArtifactReference, RecallCandidateClaim, RecallClaim, RecallClaimStatus,
         RecallEvidenceReference, RecallInput, RecallPresence, RecallResult, RelationListInput,
         RelationPutInput, Request, ResolvedContext, Response, RetrieveAuthority, RetrieveInput,
-        RetrieveQualifiedArtifact, RetrieveQualifiedClaim, RetrieveRecovery,
+        RetrieveNextAction, RetrieveQualifiedArtifact, RetrieveQualifiedClaim, RetrieveRecovery,
         RetrieveRecoveryEvidence, RetrieveResult, RetrieveTimingProfile, SearchHit, SearchInput,
         SearchResult, SourceCheckpointInput, SourceGetInput, SourceIngestInput,
         SourceRegisterInput, SourceWithdrawInput, Warning,
@@ -855,11 +856,40 @@ fn build_recall(
         min_commit_seq: input.min_commit_seq,
         recency: input.recency.clone(),
     };
-    let claim_search = store.search_entity_qualified(
-        ambient,
-        &search_input(input.max_claims),
-        EntityType::Claim,
-    )?;
+    // Retrieve a deeper qualified slate than the caller asked for, then spend
+    // local compute selecting which of it is worth a slot. Everything below is
+    // deterministic selection over an already-qualified set: it can reorder or
+    // drop redundant claims, never admit one that did not qualify.
+    let claim_slate = input
+        .max_claims
+        .saturating_mul(CLAIM_SLATE_MULTIPLIER)
+        .min(MAX_RECALL_CLAIMS);
+    let mut claim_search =
+        store.search_entity_qualified(ambient, &search_input(claim_slate), EntityType::Claim)?;
+    // Contradiction is expressed by two claims that read almost identically,
+    // so every claim in a conflict is exempt from redundancy collapse: hiding
+    // one side of a disagreement is the worst thing this selection could do.
+    let slate_claim_ids: Vec<String> = claim_search
+        .hits
+        .iter()
+        .map(|hit| hit.entity_id.clone())
+        .collect();
+    let conflicted_claim_ids: BTreeSet<String> = store
+        .conflicts_for_claims(ambient, input.horizon, &slate_claim_ids)?
+        .into_iter()
+        .flat_map(|conflict| {
+            [
+                conflict.relation.source_id.clone(),
+                conflict.relation.target_id.clone(),
+            ]
+        })
+        .collect();
+    let distinct_claim_count = select_claim_window(
+        &mut claim_search.hits,
+        input.max_claims,
+        &conflicted_claim_ids,
+    );
+    claim_search.truncated = claim_search.truncated || distinct_claim_count > input.max_claims;
     let artifact_search = store.search_entity_qualified(
         ambient,
         &search_input(input.max_artifact_refs),
@@ -970,11 +1000,17 @@ fn build_recall(
         .hits
         .iter()
         .map(|hit| {
-            let excerpt = truncate_utf8(&hit.excerpt, input.max_excerpt_bytes).to_owned();
+            let (start, end) = matched_window(
+                &hit.excerpt,
+                &hit.ranking.matched_terms,
+                input.max_excerpt_bytes,
+            );
+            let excerpt = hit.excerpt[start..end].to_owned();
             RecallArtifactReference {
                 artifact_id: hit.entity_id.clone(),
                 revision_id: hit.revision_id.clone(),
                 citation: hit.citation.clone(),
+                excerpt_citation: window_citation(&hit.citation, start, end, hit.excerpt.len()),
                 title: hit.title.clone(),
                 status: hit.status.clone(),
                 excerpt_truncated: excerpt.len() < hit.excerpt.len(),
@@ -1016,13 +1052,19 @@ fn build_recall(
         .iter()
         .take(input.max_candidate_artifact_refs)
         .map(|hit| {
-            let excerpt = truncate_utf8(&hit.excerpt, input.max_excerpt_bytes).to_owned();
+            let (start, end) = matched_window(
+                &hit.excerpt,
+                &hit.ranking.matched_terms,
+                input.max_excerpt_bytes,
+            );
+            let excerpt = hit.excerpt[start..end].to_owned();
             RecallCandidateArtifactReference {
                 retrieval_tier: "unqualified_candidate".into(),
                 artifact_id: hit.entity_id.clone(),
                 revision_id: hit.revision_id.clone(),
                 title: hit.title.clone(),
                 citation: hit.citation.clone(),
+                excerpt_citation: window_citation(&hit.citation, start, end, hit.excerpt.len()),
                 excerpt_truncated: excerpt.len() < hit.excerpt.len(),
                 excerpt,
                 matched_by: hit.matched_by.clone(),
@@ -1196,8 +1238,12 @@ fn build_retrieve(
     let mut probe_ms = 0.0;
     let mut citation_fetch_ms = 0.0;
     let mut recovery = None;
+    let mut anchored_evidence: Vec<String> = Vec::new();
 
-    if matches!(recall.presence, RecallPresence::None)
+    // Recovery runs whenever no claim answered, not only on a bare `none`. A
+    // weak artifact match used to suppress the entire recovery path, which is
+    // the state where routing help matters most.
+    if (matches!(recall.presence, RecallPresence::None) || recall.claims.is_empty())
         && !matches!(
             recall.query_analysis.retrieval_profile.intent_hint,
             crate::protocol::RetrievalIntentHint::CurrentSource
@@ -1269,6 +1315,42 @@ fn build_retrieve(
             }
         }
         citation_fetch_ms = fetch_started.elapsed().as_secs_f64() * 1_000.0;
+        // A span with no lexical relation to the routed question cannot route
+        // reasoning, and a short unrelated fragment can point a reader at the
+        // rejected side of a decision. Withhold those instead of shipping them.
+        let fetched_reference_count = evidence.len();
+        let vocabulary = recovery_query_vocabulary(&recall.query_analysis, routed_query);
+        // A span whose claim carries a matching write-time anchor is relevant
+        // even when the asker's words appear nowhere in it — that is exactly
+        // the vocabulary gap anchors exist to close. What is returned remains
+        // the claim's own cited source bytes, never the inferred anchor text.
+        let candidate_revisions = evidence
+            .iter()
+            .filter_map(|item| parse_artifact_citation(&item.citation).ok())
+            .map(|parsed| parsed.revision_id)
+            .collect::<Vec<_>>();
+        let anchored = store
+            .anchored_revisions(&candidate_revisions, routed_query)
+            .unwrap_or_default();
+        let is_anchored = |item: &RetrieveRecoveryEvidence| {
+            parse_artifact_citation(&item.citation)
+                .ok()
+                .is_some_and(|parsed| anchored.contains(&parsed.revision_id))
+        };
+        let anchor_routed_references = evidence.iter().filter(|item| is_anchored(item)).count();
+        evidence.retain(|item| {
+            is_anchored(item) || evidence_shares_vocabulary(&item.content, &vocabulary)
+        });
+        // Anchor-routed spans answer the question that was actually asked, so
+        // they lead the packet.
+        evidence.sort_by_key(|item| !is_anchored(item));
+        anchored_evidence = evidence
+            .iter()
+            .filter(|item| is_anchored(item))
+            .map(|item| item.content.clone())
+            .collect::<Vec<_>>();
+        let suppressed_references = fetched_reference_count - evidence.len();
+        returned_content_bytes = evidence.iter().map(|item| item.content.len()).sum();
         if probe.available_count > 0 {
             recovery = Some(RetrieveRecovery {
                 retrieval_tier: "unqualified_evidence".into(),
@@ -1278,8 +1360,11 @@ fn build_retrieve(
                 returned_references: evidence.len(),
                 returned_content_bytes,
                 references_truncated: probe.truncated
-                    || considered_references > evidence.len()
-                    || evidence.len() >= MAX_RETRIEVE_REFERENCES,
+                    || considered_references > fetched_reference_count
+                    || fetched_reference_count >= MAX_RETRIEVE_REFERENCES,
+                relevance_policy: RECOVERY_RELEVANCE_POLICY.into(),
+                suppressed_references,
+                anchor_routed_references,
                 evidence,
                 warning: "Recovery bytes come only from exact evidence attached to candidate claims. They remain unqualified routing evidence, not an answer. Check relevance against the original question; current repository/source state overrides historical memory.".into(),
             });
@@ -1325,6 +1410,15 @@ fn build_retrieve(
         inference_ms,
         breaker_open,
     });
+    let next_action = (matches!(recall.presence, RecallPresence::None) || recall.claims.is_empty())
+        .then(|| {
+            build_next_action(
+                &recall.query_analysis,
+                recovery.as_ref(),
+                &recall.presence,
+                &anchored_evidence,
+            )
+        });
     Ok(RetrieveResult {
         content_is_untrusted: true,
         presence: recall.presence,
@@ -1337,6 +1431,8 @@ fn build_retrieve(
             recovery_policy: "unqualified_exact_evidence_v1".into(),
             current_source_rule: "For questions about current code or mutable external state, inspect the authoritative repository/source; memory is historical evidence and never overrides it.".into(),
         },
+        claims_truncated: recall.claims_truncated,
+        next_action,
         claims: recall
             .claims
             .into_iter()
@@ -1362,6 +1458,7 @@ fn build_retrieve(
                 citation: artifact.citation,
                 excerpt: artifact.excerpt,
                 excerpt_truncated: artifact.excerpt_truncated,
+                excerpt_citation: artifact.excerpt_citation,
                 risk_signals: artifact.risk_signals,
             })
             .collect(),
@@ -2035,6 +2132,340 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &value[..end]
+}
+
+/// How much deeper than the caller's window the qualified claim slate is
+/// fetched before selection. Local SQLite retrieval is cheap; a window wasted
+/// on three copies of the same sentence is not.
+const CLAIM_SLATE_MULTIPLIER: usize = 4;
+/// Claims from one source artifact allowed in the window before another source
+/// gets a slot. One verbose note must not crowd out every other note.
+const MAX_CLAIMS_PER_SOURCE: usize = 2;
+/// Token-set overlap at which two qualified statements are treated as the same
+/// claim for windowing. High enough that distinct facts about one entity are
+/// kept apart.
+const NEAR_DUPLICATE_SIMILARITY: f64 = 0.8;
+/// Statements shorter than this are compared only for exact duplication;
+/// short statements collide by chance.
+const MIN_SHAPE_TOKENS: usize = 4;
+
+/// Tokens that carry a statement's value rather than its shape: numbers,
+/// identifiers, and negations. Two statements may collapse only when these
+/// agree.
+fn distinctive_values(statement: &str) -> BTreeSet<String> {
+    const NEGATIONS: [&str; 6] = ["no", "not", "never", "without", "cannot", "disallowed"];
+    statement
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .filter(|token| {
+            token.chars().any(|character| character.is_ascii_digit())
+                || token.contains('_')
+                || NEGATIONS.contains(&token.as_str())
+        })
+        .collect()
+}
+
+fn jaccard_similarity(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
+    let intersection = left.intersection(right).count();
+    if intersection == 0 {
+        return 0.0;
+    }
+    let union = left.len() + right.len() - intersection;
+    intersection as f64 / union as f64
+}
+const RECOVERY_RELEVANCE_POLICY: &str = "recovery_lexical_relation_v1";
+const NEXT_ACTION_POLICY: &str = "retrieval_next_action_v1";
+const MAX_STORED_VOCABULARY_TERMS: usize = 12;
+
+/// Reduce an already-qualified claim slate to the window the caller sees.
+///
+/// Two deterministic passes, in ranked order: identical statements collapse to
+/// their best-ranked copy, then a source cap keeps one artifact from filling
+/// the window. Returns how many distinct claims qualified, so truncation stays
+/// honest.
+fn select_claim_window(
+    hits: &mut Vec<SearchHit>,
+    window: usize,
+    conflicted_claim_ids: &BTreeSet<String>,
+) -> usize {
+    let mut seen_statements = BTreeSet::new();
+    let mut kept_shapes: Vec<BTreeSet<String>> = Vec::new();
+    let mut kept_values: Vec<BTreeSet<String>> = Vec::new();
+    let mut ordered = Vec::with_capacity(hits.len());
+    for hit in hits.drain(..) {
+        let exempt = conflicted_claim_ids.contains(&hit.entity_id);
+        let key = hit
+            .excerpt
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if !seen_statements.insert(key) && !exempt {
+            continue;
+        }
+        if exempt {
+            kept_shapes.push(BTreeSet::new());
+            kept_values.push(BTreeSet::new());
+            ordered.push(hit);
+            continue;
+        }
+        // Routine notes about one entity produce claims that differ by a single
+        // word. Exact-duplicate collapse does not catch them, and they can fill
+        // the whole window from distinct artifacts, so near-duplicates collapse
+        // onto their best-ranked representative too.
+        let shape = crate::store::content_tokens(&hit.excerpt)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let values = distinctive_values(&hit.excerpt);
+        if shape.len() >= MIN_SHAPE_TOKENS
+            && kept_shapes
+                .iter()
+                .zip(&kept_values)
+                .any(|(kept, kept_vals)| {
+                    // Two statements that differ in a number, identifier, or
+                    // negation are different facts however similar they read.
+                    *kept_vals == values
+                        && jaccard_similarity(kept, &shape) >= NEAR_DUPLICATE_SIMILARITY
+                })
+        {
+            continue;
+        }
+        kept_shapes.push(shape);
+        kept_values.push(values);
+        ordered.push(hit);
+    }
+    let distinct = ordered.len();
+    if distinct <= window {
+        *hits = ordered;
+        return distinct;
+    }
+    let mut per_source: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut selected = Vec::with_capacity(window);
+    let mut deferred = Vec::new();
+    for hit in ordered {
+        let source = claim_source_artifact(&hit).unwrap_or_else(|| hit.entity_id.clone());
+        let count = per_source.entry(source).or_insert(0);
+        if *count < MAX_CLAIMS_PER_SOURCE && selected.len() < window {
+            *count += 1;
+            selected.push(hit);
+        } else {
+            deferred.push(hit);
+        }
+    }
+    // The cap only reorders: if diversity could not fill the window, the
+    // best-ranked remaining claims take the free slots.
+    for hit in deferred {
+        if selected.len() >= window {
+            break;
+        }
+        selected.push(hit);
+    }
+    *hits = selected;
+    distinct
+}
+
+fn claim_source_artifact(hit: &SearchHit) -> Option<String> {
+    hit.provenance
+        .get("evidence")?
+        .as_array()?
+        .first()?
+        .get("artifact_id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Every surface form of the routed question's content units. Recovery spans
+/// are admitted only when they touch this vocabulary.
+fn recovery_query_vocabulary(analysis: &QueryAnalysis, routed_query: &str) -> BTreeSet<String> {
+    let mut vocabulary = BTreeSet::new();
+    let units: Vec<String> = analysis
+        .content_units
+        .iter()
+        .cloned()
+        .chain(crate::store::content_tokens(routed_query))
+        .collect();
+    for unit in units {
+        for token in unit.split_whitespace() {
+            for variant in crate::store::inflection_variants(token) {
+                vocabulary.insert(variant);
+            }
+        }
+    }
+    vocabulary
+}
+
+fn evidence_shares_vocabulary(content: &str, vocabulary: &BTreeSet<String>) -> bool {
+    if vocabulary.is_empty() {
+        return true;
+    }
+    crate::store::content_tokens(content)
+        .into_iter()
+        .any(|token| vocabulary.contains(&token))
+}
+
+/// What a caller should do next when nothing qualified. This is deterministic
+/// routing guidance, never an answer, and it deliberately points at a second
+/// query rather than at `--reformulation`, which can only widen unqualified
+/// recovery evidence.
+fn build_next_action(
+    analysis: &QueryAnalysis,
+    recovery: Option<&RetrieveRecovery>,
+    presence: &RecallPresence,
+    anchored_evidence: &[String],
+) -> RetrieveNextAction {
+    // Vocabulary is only offered when a lead actually shares wording with the
+    // question. Terms harvested from unrelated leads read as a suggestion and
+    // are worse than saying nothing.
+    let asked = analysis
+        .content_units
+        .iter()
+        .flat_map(|unit| crate::store::content_tokens(unit))
+        .collect::<BTreeSet<_>>();
+    let mut stored_vocabulary = BTreeSet::new();
+    // Anchor-routed spans are the ones written about this question in other
+    // words, so their wording is exactly what a second query should use.
+    for content in anchored_evidence {
+        for token in crate::store::content_tokens(content) {
+            if token.len() >= 4 && !asked.contains(&token) {
+                stored_vocabulary.insert(token);
+            }
+        }
+    }
+    // Deliberately nothing else. Vocabulary harvested from a lead that merely
+    // shares a common word reads as a suggestion and sends the caller after an
+    // unrelated topic; on a question memory cannot answer, the honest hint is
+    // no hint.
+    let _ = recovery;
+    let stored_vocabulary = stored_vocabulary
+        .into_iter()
+        .take(MAX_STORED_VOCABULARY_TERMS)
+        .collect::<Vec<_>>();
+    let (reason, detail) = match presence {
+        RecallPresence::None => (
+            "no_qualified_match",
+            "No stored claim matched enough of this phrasing to qualify. Retrieval is lexical: ask again using the words memory would have used — identifiers, service and table names, the vocabulary of the decision — as the query itself. Do not pass the rewording as --reformulation: that only widens unqualified recovery evidence and can never qualify a claim.",
+        ),
+        _ => (
+            "artifacts_without_claims",
+            "Source artifacts matched but no claim qualified. Read the returned artifact spans, or ask again using the identifiers and vocabulary those artifacts use.",
+        ),
+    };
+    RetrieveNextAction {
+        policy_version: NEXT_ACTION_POLICY.into(),
+        reason: reason.into(),
+        action: "requery_with_stored_vocabulary".into(),
+        detail: detail.into(),
+        unmatched_units: analysis.content_units.clone(),
+        stored_vocabulary,
+    }
+}
+
+/// The excerpt window a long artifact should show, together with the byte
+/// offsets it occupies inside `body`.
+///
+/// A head window makes a long artifact fail at the artifact tier even when the
+/// answer is in the middle of the document, so the window is centred on the
+/// densest run of the terms that qualified the hit. Selection is deterministic
+/// and uses only the already-computed lexical match terms.
+fn matched_window(body: &str, terms: &[String], max_bytes: usize) -> (usize, usize) {
+    if body.len() <= max_bytes {
+        return (0, body.len());
+    }
+    let lowercase = body.to_lowercase();
+    let mut occurrences = Vec::new();
+    for term in terms {
+        let needle = term.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0usize;
+        while let Some(found) = lowercase[from..].find(&needle) {
+            let at = from + found;
+            occurrences.push((at, needle.clone()));
+            from = at + needle.len();
+            if occurrences.len() >= 512 {
+                break;
+            }
+        }
+    }
+    if occurrences.is_empty() {
+        return (0, head_boundary(body, max_bytes));
+    }
+    occurrences.sort_by(|left, right| left.0.cmp(&right.0));
+    // Pick the window start that covers the most distinct qualifying terms,
+    // breaking ties toward the earliest position so the result is stable.
+    let mut best_start = occurrences[0].0;
+    let mut best_distinct = 0usize;
+    for (index, (position, _)) in occurrences.iter().enumerate() {
+        let window_end = position.saturating_add(max_bytes);
+        let distinct = occurrences[index..]
+            .iter()
+            .take_while(|(other, _)| *other < window_end)
+            .map(|(_, term)| term.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        if distinct > best_distinct {
+            best_distinct = distinct;
+            best_start = *position;
+        }
+    }
+    // Include a little context before the first match, then snap outward to
+    // character boundaries and inward to a word boundary where one is close.
+    let lead = max_bytes / 4;
+    let mut start = best_start.saturating_sub(lead);
+    while start > 0 && !body.is_char_boundary(start) {
+        start -= 1;
+    }
+    if start > 0
+        && let Some(offset) = body[start..(start + lead.min(body.len() - start))].find(' ')
+    {
+        let candidate = start + offset + 1;
+        if candidate <= best_start && body.is_char_boundary(candidate) {
+            start = candidate;
+        }
+    }
+    let end = head_boundary(body, (start + max_bytes).min(body.len()));
+    (start, end.max(start))
+}
+
+fn head_boundary(value: &str, mut end: usize) -> usize {
+    end = end.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Citation for exactly the shown window, or `None` when the excerpt already
+/// covers the whole cited span. The parent `citation` is left untouched so
+/// recall and search keep naming the same matched span.
+fn window_citation(citation: &str, start: usize, end: usize, body_len: usize) -> Option<String> {
+    if start == 0 && end >= body_len {
+        return None;
+    }
+    let rewritten = rewrite_citation_span(citation, start, end);
+    (rewritten != citation).then_some(rewritten)
+}
+
+/// Re-anchor an artifact citation onto the sub-range actually shown.
+fn rewrite_citation_span(citation: &str, start: usize, end: usize) -> String {
+    let Some((prefix, span)) = citation.rsplit_once('#') else {
+        return citation.to_owned();
+    };
+    let Some((from, to)) = span.split_once('-') else {
+        return citation.to_owned();
+    };
+    let (Ok(from), Ok(to)) = (from.parse::<usize>(), to.parse::<usize>()) else {
+        return citation.to_owned();
+    };
+    let absolute_start = from.saturating_add(start);
+    let absolute_end = from.saturating_add(end).min(to);
+    if absolute_start >= absolute_end {
+        return citation.to_owned();
+    }
+    format!("{prefix}#{absolute_start}-{absolute_end}")
 }
 
 /// Render every source line as a Markdown blockquote. This is not a security
@@ -3030,6 +3461,194 @@ mod tests {
         assert_eq!(
             bundle.manifest[0].provenance["evidence"][0]["revision_id"],
             "arev_source"
+        );
+    }
+
+    /// Anchors are the one place model-inferred text touches retrieval, so the
+    /// containment is asserted end to end: they route, and nothing else.
+    #[test]
+    fn write_time_anchors_route_without_qualifying_or_leaking() {
+        use crate::protocol::{
+            ProjectionPutInput, ProjectionSpan, RETRIEVAL_ANCHOR_KIND, RetrieveInput,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path()).unwrap();
+        let ambient = AmbientContext {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            task_id: None,
+            component: None,
+            pins: vec![],
+        };
+        let source = "Chose Kysely over Prisma as the query builder after benchmarking.";
+        let artifact = store
+            .artifact_put(
+                &ambient,
+                &ArtifactPutInput {
+                    kind: "decision".into(),
+                    title: "Query layer".into(),
+                    media_type: "text/plain; charset=utf-8".into(),
+                    content: ArtifactContent::Text(source.into()),
+                    provenance: Default::default(),
+                    actor: None,
+                },
+                Some("anchor-artifact"),
+                "anchor-artifact-hash",
+            )
+            .unwrap()
+            .value;
+        let claim = store
+            .claim_assert(
+                &ambient,
+                &ClaimAssertInput {
+                    claim_type: crate::protocol::ClaimType::Decision,
+                    statement: "Kysely was chosen over Prisma for building queries.".into(),
+                    confidence: None,
+                    evidence: vec![EvidenceLocator {
+                        artifact_id: artifact.artifact_id.clone(),
+                        revision_id: artifact.revision_id.clone(),
+                        start_byte: Some(0),
+                        end_byte: Some(source.len() as u64),
+                    }],
+                    valid_from: None,
+                    valid_until: None,
+                    actor: None,
+                },
+                Some("anchor-claim"),
+                "anchor-claim-hash",
+            )
+            .unwrap()
+            .value;
+        store
+            .projection_put(
+                &ambient,
+                &ProjectionPutInput {
+                    artifact_id: artifact.artifact_id.clone(),
+                    revision_id: artifact.revision_id.clone(),
+                    projection_key: "retrieval-anchor:1".into(),
+                    kind: RETRIEVAL_ANCHOR_KIND.into(),
+                    text: "orm ; unmistakableanchorterm".into(),
+                    evidence_spans: vec![ProjectionSpan {
+                        start_byte: 0,
+                        end_byte: source.len() as u64,
+                    }],
+                    generator: "memoree.remember".into(),
+                    generator_version: "test".into(),
+                    generator_digest: "digest".into(),
+                    metadata: std::collections::BTreeMap::from([(
+                        "claim_id".to_owned(),
+                        json!(claim.claim_id.clone()),
+                    )]),
+                    actor: None,
+                },
+                Some("anchor-projection"),
+                "anchor-projection-hash",
+            )
+            .unwrap();
+
+        let retrieved = build_retrieve(
+            &store,
+            &ambient,
+            &RetrieveInput {
+                query: "unmistakableanchorterm".into(),
+                reformulation: None,
+                horizon: Horizon::Ambient,
+                reason: None,
+                max_claims: 5,
+                max_artifact_refs: 3,
+                max_excerpt_bytes: 320,
+                max_recovery_leads: 8,
+                max_recovery_bytes: 12 * 1024,
+                min_commit_seq: None,
+                recency: Default::default(),
+                profile: false,
+            },
+        )
+        .unwrap();
+        // The anchor word appears in no claim and no artifact, so nothing may
+        // qualify: an inferred term must never manufacture presence.
+        assert!(matches!(retrieved.presence, RecallPresence::None));
+        assert!(retrieved.claims.is_empty());
+        let recovery = retrieved.recovery.expect("anchor routed recovery");
+        assert!(recovery.anchor_routed_references >= 1);
+        // What comes back is the claim's cited source, never the anchor text.
+        let joined = recovery
+            .evidence
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("Kysely"), "expected cited source: {joined}");
+        assert!(
+            !joined.contains("unmistakableanchorterm"),
+            "anchor text must never be returned as content: {joined}"
+        );
+
+        let search = store
+            .search_qualified(
+                &ambient,
+                &SearchInput {
+                    query: "unmistakableanchorterm".into(),
+                    horizon: Horizon::Ambient,
+                    reason: None,
+                    limit: 5,
+                    include_historical: false,
+                    min_commit_seq: None,
+                    recency: Default::default(),
+                },
+            )
+            .unwrap();
+        let bundle = build_bundle(search, 4096, Vec::new());
+        assert!(
+            !bundle.rendered_markdown.contains("unmistakableanchorterm"),
+            "anchors must never enter a context bundle"
+        );
+
+        // Forgetting the source must take its anchors out of routing too:
+        // `forget` writes only the artifacts table, so this path is asserted
+        // rather than assumed.
+        store
+            .artifact_forget(
+                &ambient,
+                &crate::protocol::ArtifactForgetInput {
+                    artifact_id: artifact.artifact_id.clone(),
+                    reason: "contains a credential".into(),
+                },
+                Some("anchor-forget"),
+                "anchor-forget-hash",
+            )
+            .unwrap();
+        let after_forget = build_retrieve(
+            &store,
+            &ambient,
+            &RetrieveInput {
+                query: "unmistakableanchorterm".into(),
+                reformulation: None,
+                horizon: Horizon::Ambient,
+                reason: None,
+                max_claims: 5,
+                max_artifact_refs: 3,
+                max_excerpt_bytes: 320,
+                max_recovery_leads: 8,
+                max_recovery_bytes: 12 * 1024,
+                min_commit_seq: None,
+                recency: Default::default(),
+                profile: false,
+            },
+        )
+        .unwrap();
+        let leaked = after_forget
+            .recovery
+            .map(|recovery| {
+                recovery
+                    .evidence
+                    .iter()
+                    .any(|item| item.content.contains("Kysely"))
+            })
+            .unwrap_or(false);
+        assert!(
+            !leaked,
+            "a forgotten artifact's bytes must not be reachable through anchors"
         );
     }
 

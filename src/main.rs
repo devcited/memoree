@@ -35,9 +35,10 @@ use memoree::{
         CitationGetInput, ClaimAssertInput, ClaimGetInput, ClaimHistoryInput, ClaimRetractInput,
         ClaimReviseInput, ClaimType, ConflictListInput, ContextBuildInput, ContextSource,
         DoctorResult, EntityType, ErrorCode, EvidenceLocator, Horizon, MAX_ARTIFACT_BYTES,
-        MAX_ENCODED_CONTENT_BYTES, Operation, ProbeInput, RecallInput, RecencyBiasInput,
-        RelationDirection, RelationListInput, RelationPutInput, RelationType, Request, Response,
-        RetrieveInput, RetrieveResult, SearchInput, Warning,
+        MAX_ENCODED_CONTENT_BYTES, Operation, ProbeInput, ProjectionPutInput, ProjectionSpan,
+        RETRIEVAL_ANCHOR_KIND, RecallInput, RecencyBiasInput, RelationDirection, RelationListInput,
+        RelationPutInput, RelationType, Request, Response, RetrieveInput, RetrieveResult,
+        SearchInput, Warning,
     },
     remember::{
         REMEMBER_SCHEMA_VERSION, ValidatedClaim, ValidatedCompilation, deterministic_title,
@@ -2488,13 +2489,23 @@ async fn semantic_command(
         return Ok(if report.passed { 0 } else { 1 });
     }
     let default_endpoint = resolve_endpoint(None, paths)?;
+    // A resident daemon initializes retrieval model runtimes once, during
+    // startup warm-up. Installing a model underneath it leaves that runtime
+    // uninitialized, and retrieval then fails open to deterministic ordering
+    // on every query without the caller ever being told.
+    let mut daemon_running = false;
     match probe_daemon(&default_endpoint).await {
         Ok(response) => {
             require_matching_daemon(&response, &default_endpoint)?;
+            daemon_running = true;
         }
         Err(error) if daemon_is_unreachable(&error) => {}
         Err(error) => return Err(error),
     }
+    let installs_model = matches!(
+        command,
+        SemanticCommands::Enable { .. } | SemanticCommands::EnableReranker { .. }
+    );
     let store = Store::open(&paths.data_dir)?;
     let output = match command {
         SemanticCommands::Enable { from_directory } => {
@@ -2516,8 +2527,34 @@ async fn semantic_command(
         SemanticCommands::RerankerStatus => serde_json::to_value(store.reranker_status()?)?,
         SemanticCommands::EvaluateReranker { .. } => unreachable!("handled above"),
     };
+    drop(store);
+    // A resident daemon initializes retrieval model runtimes only during
+    // startup warm-up. Reporting a plain success here is how a model ends up
+    // installed, believed active, and silently unused on every query.
+    let mut output = output;
+    let mut pending_reload = false;
+    if installs_model
+        && daemon_running
+        && let Some(object) = output.as_object_mut()
+    {
+        pending_reload = true;
+        object.insert("activation_state".into(), json!("pending_daemon_reload"));
+        object.insert(
+            "daemon_reload".into(),
+            json!({
+                "required": true,
+                "reason": "a resident daemon initializes retrieval model runtimes only during startup warm-up, so this model stays installed but unused until the daemon restarts",
+                "action": "run `memoree daemon restart` for the default endpoint, or restart the supervisor that owns an explicit endpoint",
+                "verify": "`memoree recall <query>` reports semantic and reranker state; `state: error` naming an uninitialized runtime means the reload has not happened",
+            }),
+        );
+    } else if installs_model && let Some(object) = output.as_object_mut() {
+        object.insert("activation_state".into(), json!("active_on_next_start"));
+    }
     print_json(&output, pretty);
-    Ok(0)
+    // Non-zero so an unattended installer or script cannot record activation
+    // that has not happened.
+    Ok(i32::from(pending_reload))
 }
 
 fn skills_command(command: SkillsCommands, paths: &AppPaths, pretty: bool) -> Result<i32> {
@@ -3416,6 +3453,59 @@ async fn remember_command(
                     )
                 })?)?;
             last_commit_seq = Some(stored_claim.commit_seq);
+
+            // Anchors are the one field the compiler infers rather than
+            // copies, so they are stored as a disposable derived projection
+            // bound to this claim's exact cited spans. They can route a
+            // question to those authoritative bytes; they can never qualify
+            // presence, be quoted, or enter a context bundle.
+            if !claim.retrieval_anchors.is_empty() {
+                let mut anchor_request = Request::new(
+                    Operation::ProjectionPut,
+                    ProjectionPutInput {
+                        artifact_id: stored_artifact.value.artifact_id.clone(),
+                        revision_id: stored_artifact.value.revision_id.clone(),
+                        projection_key: format!("retrieval-anchor:{claim_identity}"),
+                        kind: RETRIEVAL_ANCHOR_KIND.to_owned(),
+                        text: claim.retrieval_anchors.join(" ; "),
+                        evidence_spans: claim
+                            .evidence
+                            .iter()
+                            .map(|evidence| ProjectionSpan {
+                                start_byte: evidence.start_byte,
+                                end_byte: evidence.end_byte,
+                            })
+                            .collect(),
+                        generator: "memoree.remember".to_owned(),
+                        generator_version: compiler_generator_version(&compiler),
+                        generator_digest: blake3::hash(
+                            claim.retrieval_anchors.join("\u{1f}").as_bytes(),
+                        )
+                        .to_hex()
+                        .to_string(),
+                        metadata: BTreeMap::from([(
+                            "claim_id".to_owned(),
+                            json!(stored_claim.value.claim_id.clone()),
+                        )]),
+                        actor: Some(actor.clone()),
+                    },
+                )?;
+                anchor_request.context = Some(resolved.context.clone());
+                anchor_request.context_source = resolved.source.clone();
+                anchor_request.idempotency_key = Some(remember_idempotency(
+                    &logical_operation,
+                    &format!("anchors:{claim_identity}"),
+                ));
+                let anchor_response =
+                    dispatch(&endpoint, &anchor_request, autostart, paths).await?;
+                if anchor_response.ok {
+                    last_commit_seq = anchor_response.commit_seq.or(last_commit_seq);
+                } else {
+                    // Routing vocabulary is an optimization: a rejected anchor
+                    // must never fail an otherwise durable memory write.
+                    warnings.extend(anchor_response.warnings);
+                }
+            }
             stored_claims.push(stored_claim);
         }
         artifact = Some(stored_artifact);
@@ -3438,6 +3528,14 @@ async fn remember_command(
     response.warnings = warnings;
     print_json(&response, pretty);
     Ok(0)
+}
+
+/// Stable provenance for compiler-produced routing vocabulary.
+fn compiler_generator_version(compiler: &RememberCompilerReport) -> String {
+    match (&compiler.provider, &compiler.model) {
+        (Some(provider), Some(model)) => format!("{}/{model}", provider.as_str()),
+        _ => compiler.mode.clone(),
+    }
 }
 
 fn remember_source_capture(args: &RememberArgs) -> &'static str {
@@ -3478,6 +3576,22 @@ fn remember_quality(
             severity: "warning",
             message: "Observation claims created by remember have no validity window. Use explicit claim.assert with --valid-until when expiry is known, or revise, retract, or supersede them when verified state changes.",
             claim_indexes: observation_indexes,
+        });
+    }
+
+    let unnamed_subject_indexes = claims
+        .iter()
+        .enumerate()
+        .filter_map(|(index, claim)| {
+            memoree::remember::statement_omits_subject(&claim.statement).then_some(index + 1)
+        })
+        .collect::<Vec<_>>();
+    if !unnamed_subject_indexes.is_empty() {
+        findings.push(RememberQualityFinding {
+            code: "REMEMBER_UNNAMED_SUBJECT",
+            severity: "warning",
+            message: "These statements open with a subject only the source document resolves (`it`, `this`, `the gateway`). Claims are retrieved alone, so a question that names the entity cannot reach them. Re-run remember with the entity named, or assert the claim explicitly.",
+            claim_indexes: unnamed_subject_indexes,
         });
     }
 
@@ -4412,6 +4526,7 @@ mod tests {
             claim_type: ClaimType::Observation,
             statement: "Checkout terms are draft.".to_owned(),
             evidence: Vec::new(),
+            retrieval_anchors: Vec::new(),
         }];
         let quality = remember_quality("inline", false, &claims);
         assert!(quality.requires_review);

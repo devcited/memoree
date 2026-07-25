@@ -2493,6 +2493,31 @@ fn validate_artifact_refs(
             continue;
         }
         let exact = &text[start..end];
+        // A long artifact shows the window around the match rather than its
+        // head, so the excerpt is exact but not necessarily a prefix. When a
+        // window is reported it must resolve, inside the cited span, to
+        // exactly the returned bytes.
+        if let Some(window) = reference.excerpt_citation.as_deref() {
+            match parse_citation_span(window) {
+                Some((window_start, window_end))
+                    if window_start >= start
+                        && window_end <= end
+                        && text.is_char_boundary(window_start)
+                        && text.is_char_boundary(window_end)
+                        && window_start < window_end
+                        && text[window_start..window_end] == reference.excerpt =>
+                {
+                    continue;
+                }
+                _ => {
+                    failures.push(format!(
+                        "artifact excerpt citation {window} did not round-trip inside {}",
+                        reference.citation
+                    ));
+                    continue;
+                }
+            }
+        }
         if !exact.starts_with(&reference.excerpt)
             || (!reference.excerpt_truncated && exact != reference.excerpt)
         {
@@ -2503,6 +2528,13 @@ fn validate_artifact_refs(
         }
     }
     Ok(())
+}
+
+/// The byte span of a `memoree://artifact/...#start-end` citation.
+fn parse_citation_span(citation: &str) -> Option<(usize, usize)> {
+    let (_, span) = citation.rsplit_once('#')?;
+    let (start, end) = span.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
 }
 
 fn validate_candidate_refs(
@@ -2587,11 +2619,23 @@ fn validate_candidate_refs(
             ));
             continue;
         };
+        let window_round_trips = candidate
+            .excerpt_citation
+            .as_deref()
+            .and_then(parse_citation_span)
+            .is_some_and(|(window_start, window_end)| {
+                window_start >= start
+                    && window_end <= end
+                    && window_start < window_end
+                    && text.is_char_boundary(window_start)
+                    && text.is_char_boundary(window_end)
+                    && text[window_start..window_end] == candidate.excerpt
+            });
         if start >= end
             || end > text.len()
             || !text.is_char_boundary(start)
             || !text.is_char_boundary(end)
-            || !text[start..end].starts_with(&candidate.excerpt)
+            || !(window_round_trips || text[start..end].starts_with(&candidate.excerpt))
         {
             failures.push(format!(
                 "candidate artifact citation {} did not round-trip",

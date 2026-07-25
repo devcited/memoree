@@ -27,10 +27,12 @@ use crate::{
 
 pub const CODEX_REMEMBER_MODEL: &str = "gpt-5.6-luna";
 pub const CLAUDE_REMEMBER_MODEL: &str = "sonnet";
-pub const REMEMBER_SCHEMA_VERSION: u32 = 3;
+pub const REMEMBER_SCHEMA_VERSION: u32 = 4;
 pub const MAX_REMEMBER_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_REMEMBER_CLAIMS: usize = 12;
 pub const MAX_EVIDENCE_QUOTES_PER_CLAIM: usize = 4;
+pub const MAX_RETRIEVAL_ANCHORS_PER_CLAIM: usize = 6;
+pub const MAX_RETRIEVAL_ANCHOR_BYTES: usize = 64;
 const MAX_COMPILER_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_COMPILER_DIAGNOSTIC_BYTES: usize = 256 * 1024;
 const MAX_EVIDENCE_QUOTE_BYTES: usize = 16 * 1024;
@@ -61,6 +63,13 @@ pub struct ProposedClaim {
     pub statement: String,
     /// Exact, non-empty substrings copied from the supplied source.
     pub evidence_quotes: Vec<String>,
+    /// Category words a reader would plausibly ask with that the source never
+    /// writes — "ORM" for a claim about Kysely, "tenant isolation" for one
+    /// about row-level security. These are compiler inference, never evidence:
+    /// they can route a question to this claim's cited bytes and can never
+    /// qualify presence, be quoted, or enter a context bundle.
+    #[serde(default)]
+    pub retrieval_anchors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -77,6 +86,9 @@ pub struct ValidatedClaim {
     pub claim_type: ClaimType,
     pub statement: String,
     pub evidence: Vec<ValidatedEvidence>,
+    /// Validated routing vocabulary. Never evidence, never quotable.
+    #[serde(default)]
+    pub retrieval_anchors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -567,13 +579,134 @@ pub fn validate_compilation(
             });
         }
         evidence.sort_by_key(|item| (item.start_byte, item.end_byte));
+        let retrieval_anchors = validate_retrieval_anchors(index, proposed.retrieval_anchors)?;
         claims.push(ValidatedClaim {
             claim_type: proposed.claim_type,
             statement,
             evidence,
+            retrieval_anchors,
         });
     }
     Ok(ValidatedCompilation { claims })
+}
+
+/// Whether a claim statement opens with a subject that only the source
+/// document could resolve.
+///
+/// Claims are indexed and retrieved alone, so `The gateway continues to use
+/// CPU-based HPA` is unreachable by any question that names the gateway. The
+/// rule is deliberately narrow — leading pronouns, demonstratives, and bare
+/// role nouns — because broader subject detection flags well-formed claims.
+pub fn statement_omits_subject(statement: &str) -> bool {
+    const PRONOUNS: [&str; 11] = [
+        "it", "this", "that", "they", "these", "those", "such", "he", "she", "its", "their",
+    ];
+    const BARE_ROLE_NOUNS: [&str; 21] = [
+        "table", "service", "job", "policy", "rule", "team", "system", "process", "change",
+        "feature", "column", "index", "queue", "worker", "gateway", "file", "script", "command",
+        "setting", "flag", "limit",
+    ];
+    let mut words = statement.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let first_word = first
+        .trim_matches(|character: char| !character.is_alphanumeric())
+        .to_lowercase();
+    if PRONOUNS.contains(&first_word.as_str()) {
+        return true;
+    }
+    if first_word != "the" {
+        return false;
+    }
+    let Some(second) = words.next() else {
+        return false;
+    };
+    let second_word = second
+        .trim_matches(|character: char| !character.is_alphanumeric())
+        .to_lowercase();
+    let second_word = second_word
+        .strip_suffix("'s")
+        .map_or(second_word.as_str(), |base| base);
+    BARE_ROLE_NOUNS.contains(&second_word)
+}
+
+/// Anchors are bounded, deduplicated, lowercase routing terms. They are held
+/// to a strict shape because they are the one field a model contributes that
+/// is not copied from the source.
+fn validate_retrieval_anchors(index: usize, anchors: Vec<String>) -> Result<Vec<String>> {
+    if anchors.len() > MAX_RETRIEVAL_ANCHORS_PER_CLAIM {
+        return Err(reasoner(
+            format!(
+                "claim {} proposed {} retrieval anchors; the limit is {MAX_RETRIEVAL_ANCHORS_PER_CLAIM}",
+                index + 1,
+                anchors.len()
+            ),
+            false,
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::with_capacity(anchors.len());
+    for anchor in anchors {
+        let normalized = anchor.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        if normalized.len() > MAX_RETRIEVAL_ANCHOR_BYTES {
+            return Err(reasoner(
+                format!("claim {} has an oversized retrieval anchor", index + 1),
+                false,
+            ));
+        }
+        let key = normalized.to_lowercase();
+        // The prompt asks for category words only. This enforces it: an anchor
+        // that smuggles a value, a negation, or a locator would let inferred
+        // text assert something rather than merely route to it. Offending
+        // anchors are dropped, never fatal — routing vocabulary must not be
+        // able to fail a durable memory write.
+        if !is_routing_only_anchor(&key) {
+            continue;
+        }
+        if seen.insert(key.clone()) {
+            validated.push(key);
+        }
+    }
+    Ok(validated)
+}
+
+/// Whether an anchor is pure routing vocabulary.
+///
+/// Rejects digits and operators (values), explicit negation (assertions), and
+/// URL/path/identifier shapes (locators). What remains can only say "questions
+/// of this kind belong here".
+fn is_routing_only_anchor(anchor: &str) -> bool {
+    const NEGATIONS: [&str; 12] = [
+        "no",
+        "not",
+        "never",
+        "without",
+        "cannot",
+        "disallowed",
+        "denied",
+        "false",
+        "none",
+        "off",
+        "disabled",
+        "rejected",
+    ];
+    if anchor.chars().any(|character| {
+        character.is_ascii_digit()
+            || matches!(
+                character,
+                '<' | '>' | '=' | '/' | '\\' | ':' | '_' | '@' | '%' | '$' | '#' | '{' | '}'
+            )
+    }) {
+        return false;
+    }
+    const LOCATOR_WORDS: [&str; 4] = ["http", "https", "www", "file"];
+    !anchor
+        .split_whitespace()
+        .any(|word| NEGATIONS.contains(&word) || LOCATOR_WORDS.contains(&word))
 }
 
 pub fn deterministic_title(source: &str) -> String {
@@ -637,12 +770,25 @@ fn compiler_prompt(source: &str) -> Result<String> {
          Extract at most {MAX_REMEMBER_CLAIMS} durable, useful, atomic claims.\n\
          Allowed claim types are fact, decision, constraint, preference, procedure, and observation.\n\
          Each statement must be self-contained and must not add facts absent from the source.\n\
+         Self-contained means lexically self-contained: name the subject in the statement itself.\n\
+         Every claim is stored and later retrieved alone, without the source document, so replace\n\
+         `it`, `this`, `they`, `the table`, `the service`, `the job`, and every other bare or\n\
+         implied subject with the exact name the source uses for it.\n\
+         Write \"`webhook_events` retention is 90 days\", never \"Retention is 90 days\".\n\
+         A reader who sees only one statement must be able to tell what entity it is about.\n\
          Preserve every material qualifier, caveat, condition, uncertainty marker, and scope boundary in the claim statement.\n\
          Never present an estimate as verified fact, omit required optional scope from an estimate, or turn draft/current behavior into a timeless fact.\n\
          Each claim must have 1..={MAX_EVIDENCE_QUOTES_PER_CLAIM} evidence_quotes copied character-for-character from unique locations in the source.\n\
          Use multiple evidence quotes when a material qualifier is non-contiguous with the main assertion.\n\
          Prefer fewer high-value claims. Omit routine chatter, secrets, credentials, speculative inference, and temporary progress.\n\
          Do not choose scope, confidence, identifiers, relations, conflicts, supersession, deletion, or write behavior.\n\
+         For each claim also return `retrieval_anchors`: at most {MAX_RETRIEVAL_ANCHORS_PER_CLAIM} short category or\n\
+         synonym terms someone would plausibly search with that the claim itself does not contain.\n\
+         A claim naming Kysely and Prisma gets anchors like \"orm\" and \"query builder\"; one about\n\
+         row-level security and org_id gets \"tenant isolation\" and \"multi-tenancy\".\n\
+         Anchors route a question to this claim; they are never quoted and never treated as fact,\n\
+         so never put a value, number, outcome, or negation in an anchor. Return an empty array when\n\
+         the claim's own words are already the words a person would search with.\n\
          If there is no durable claim, return an empty claims array.\n\n\
          <untrusted-source-json>\n{encoded_source}\n</untrusted-source-json>\n"
     ))
@@ -819,6 +965,7 @@ mod tests {
             claim_type: ClaimType::Decision,
             statement: statement.to_owned(),
             evidence_quotes: vec![evidence_quote.to_owned()],
+            retrieval_anchors: Vec::new(),
         }
     }
 
@@ -905,6 +1052,7 @@ mod tests {
                         "The estimate is 800 hours.".to_owned(),
                         "This is a planning range, not verified actuals.".to_owned(),
                     ],
+                    retrieval_anchors: vec!["effort estimate".to_owned()],
                 }],
             },
         )
@@ -922,6 +1070,129 @@ mod tests {
         assert!(prompt.contains("Preserve every material qualifier"));
         assert!(prompt.contains("Use multiple evidence quotes"));
         assert!(prompt.contains("<untrusted-source-json>"));
+    }
+
+    #[test]
+    fn retrieval_anchors_are_bounded_normalized_and_deduplicated() {
+        let source = "Chose Kysely over Prisma as the query builder.";
+        let compiled = validate_compilation(
+            source,
+            ClaimCompilation {
+                claims: vec![ProposedClaim {
+                    claim_type: ClaimType::Decision,
+                    statement: "Kysely was chosen over Prisma.".to_owned(),
+                    evidence_quotes: vec!["Chose Kysely over Prisma".to_owned()],
+                    retrieval_anchors: vec![
+                        "  ORM  ".to_owned(),
+                        "orm".to_owned(),
+                        "Query   Builder".to_owned(),
+                        String::new(),
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.claims[0].retrieval_anchors,
+            vec!["orm".to_owned(), "query builder".to_owned()]
+        );
+
+        let too_many = validate_compilation(
+            source,
+            ClaimCompilation {
+                claims: vec![ProposedClaim {
+                    claim_type: ClaimType::Decision,
+                    statement: "Kysely was chosen over Prisma.".to_owned(),
+                    evidence_quotes: vec!["Chose Kysely over Prisma".to_owned()],
+                    retrieval_anchors: (0..MAX_RETRIEVAL_ANCHORS_PER_CLAIM + 1)
+                        .map(|index| format!("anchor{index}"))
+                        .collect(),
+                }],
+            },
+        );
+        assert!(too_many.is_err());
+
+        let oversized = validate_compilation(
+            source,
+            ClaimCompilation {
+                claims: vec![ProposedClaim {
+                    claim_type: ClaimType::Decision,
+                    statement: "Kysely was chosen over Prisma.".to_owned(),
+                    evidence_quotes: vec!["Chose Kysely over Prisma".to_owned()],
+                    retrieval_anchors: vec!["x".repeat(MAX_RETRIEVAL_ANCHOR_BYTES + 1)],
+                }],
+            },
+        );
+        assert!(oversized.is_err());
+    }
+
+    #[test]
+    fn anchors_carrying_values_negations_or_locators_are_dropped_not_fatal() {
+        let source = "Chose Kysely over Prisma as the query builder.";
+        let compiled = validate_compilation(
+            source,
+            ClaimCompilation {
+                claims: vec![ProposedClaim {
+                    claim_type: ClaimType::Decision,
+                    statement: "Kysely was chosen over Prisma.".to_owned(),
+                    evidence_quotes: vec!["Chose Kysely over Prisma".to_owned()],
+                    retrieval_anchors: vec![
+                        "orm".to_owned(),
+                        "100 rps".to_owned(),
+                        "not enabled".to_owned(),
+                        "https example.com".to_owned(),
+                        "org_id".to_owned(),
+                        "query builder".to_owned(),
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+        // The write survives; only the offending anchors are gone.
+        assert_eq!(
+            compiled.claims[0].retrieval_anchors,
+            vec!["orm".to_owned(), "query builder".to_owned()]
+        );
+        assert_eq!(
+            compiled.claims[0].statement,
+            "Kysely was chosen over Prisma."
+        );
+    }
+
+    #[test]
+    fn compiler_prompt_forbids_values_in_anchors() {
+        let prompt = compiler_prompt("note").unwrap();
+        assert!(prompt.contains("retrieval_anchors"));
+        assert!(prompt.contains("never put a value, number, outcome, or negation in an anchor"));
+    }
+
+    #[test]
+    fn subject_omission_is_narrow_and_catches_document_dependent_openings() {
+        for statement in [
+            "The gateway continues to use ordinary CPU-based Kubernetes HPA.",
+            "The system does not ship a client-side flag SDK.",
+            "It runs at six fixed replicas.",
+            "This replaces the previous behavior.",
+            "The gateway's signature verification trusts the system clock.",
+        ] {
+            assert!(
+                statement_omits_subject(statement),
+                "expected a subject-omission finding for {statement:?}"
+            );
+        }
+        for statement in [
+            "`billing-worker` runs at six fixed replicas.",
+            "Card numbers, CVV, and full expiry must never reach the servers, logs, or database.",
+            "Kysely was chosen over Prisma as the query builder.",
+            "The `webhook_events` table retains rows for 90 days.",
+            "Retention for `webhook_events` is 90 days.",
+            "The invoice PDF shows unrounded line amounts.",
+        ] {
+            assert!(
+                !statement_omits_subject(statement),
+                "unexpected subject-omission finding for {statement:?}"
+            );
+        }
     }
 
     #[test]
