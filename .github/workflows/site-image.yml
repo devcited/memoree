@@ -1,34 +1,61 @@
 name: Site image
 
+# Publishes after the GitHub release is live, never on the bare tag push. The
+# site bakes in `releases/latest.json`, whose download URLs redirect to release
+# assets; publishing the image earlier would advertise a version whose archives
+# do not exist yet. The resulting versioned image is deployed through a
+# digest-pinned GitOps change.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish the site image for (e.g. v0.7.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: site-image-${{ github.ref }}
+  group: site-image-${{ inputs.tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
   publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
           persist-credentials: false
       - name: Verify synchronized release metadata
         run: sh scripts/check-release-metadata.sh
       - name: Validate tag version
         id: version
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           test "$version" = "$manifest_version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require published release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          release="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,assets)"
+          test "$(printf '%s' "$release" | jq -r '.isDraft')" = "false"
+          for asset in memoree-release.json memoree-release.json.sig; do
+            printf '%s' "$release" |
+              jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' >/dev/null
+          done
       - uses: docker/login-action@v3
         with:
           registry: harbor.devcited.cc
