@@ -3,7 +3,8 @@ name: Site image
 # Publishes after the GitHub release is live, never on the bare tag push. The
 # site bakes in `releases/latest.json`, whose download URLs redirect to release
 # assets; publishing the image earlier would advertise a version whose archives
-# do not exist yet. Flux picks the new tag up from Harbor and rolls memoree.dev.
+# do not exist yet. The resulting versioned image is deployed through a
+# digest-pinned GitOps change.
 on:
   release:
     types: [published]
