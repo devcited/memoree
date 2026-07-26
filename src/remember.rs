@@ -167,7 +167,7 @@ impl CodexCompiler {
             })?;
         let schema_path = temporary.path().join("claim-compilation.schema.json");
         let output_path = temporary.path().join("last-message.json");
-        let schema = serde_json::to_vec_pretty(&schema_for!(ClaimCompilation))?;
+        let schema = serde_json::to_vec_pretty(&claim_compilation_schema()?)?;
         fs::write(&schema_path, schema).map_err(|error| {
             reasoner(format!("could not prepare compiler schema: {error}"), true)
         })?;
@@ -225,7 +225,7 @@ impl CodexCompiler {
             let stderr = read_bounded(stderr, MAX_COMPILER_DIAGNOSTIC_BYTES);
             tokio::try_join!(status, stdout, stderr)
         };
-        let (status, _stdout, _stderr) = timeout(self.timeout, execution)
+        let (status, stdout, stderr) = timeout(self.timeout, execution)
             .await
             .map_err(|_| {
                 reasoner(
@@ -238,12 +238,25 @@ impl CodexCompiler {
             })?
             .map_err(|error| reasoner(format!("Codex CLI execution failed: {error}"), true))?;
         if !status.success() {
+            let diagnostic = codex_failure_diagnostic(&stdout, &stderr)
+                .map(|message| format!(": {message}"))
+                .unwrap_or_default();
+            let login_failed = diagnostic.to_ascii_lowercase().contains("not logged in")
+                || diagnostic.to_ascii_lowercase().contains("401 unauthorized")
+                || diagnostic
+                    .to_ascii_lowercase()
+                    .contains("missing bearer or basic authentication");
+            let suffix = if login_failed {
+                "; run `codex login` and retry"
+            } else {
+                ""
+            };
             return Err(reasoner(
                 format!(
-                    "Codex CLI claim compilation failed with status {}; run `codex login` and retry",
-                    status
+                    "Codex CLI claim compilation failed with status {}{diagnostic}{suffix}",
+                    status,
                 ),
-                true,
+                login_failed,
             ));
         }
 
@@ -311,7 +324,7 @@ impl ClaudeCompiler {
 
     pub async fn compile(&self, source: &str) -> Result<ProviderCompilation> {
         validate_source(source)?;
-        let mut schema = serde_json::to_value(schema_for!(ClaimCompilation))?;
+        let mut schema = claim_compilation_schema()?;
         // Claude Code's bundled validator accepts the schema vocabulary but
         // rejects the draft URI emitted by schemars as an unresolved ref.
         if let Some(object) = schema.as_object_mut() {
@@ -761,6 +774,50 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     value[..boundary].trim_end()
 }
 
+fn claim_compilation_schema() -> Result<serde_json::Value> {
+    let mut schema = serde_json::to_value(schema_for!(ClaimCompilation))?;
+    let required = schema
+        .pointer_mut("/$defs/ProposedClaim/required")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            reasoner(
+                "claim compiler schema did not contain ProposedClaim.required".to_owned(),
+                false,
+            )
+        })?;
+    if !required.iter().any(|field| field == "retrieval_anchors") {
+        required.push(serde_json::Value::String("retrieval_anchors".to_owned()));
+    }
+    Ok(schema)
+}
+
+fn codex_failure_diagnostic(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let combined = format!("{stderr}\n{stdout}");
+    let code = codex_json_error_field(&combined, "\"code\":");
+    let message = codex_json_error_field(&combined, "\"message\":");
+    match (code, message) {
+        (Some(code), Some(message)) => {
+            Some(format!("{code}: {}", truncate_utf8(message.trim(), 300)))
+        }
+        (_, Some(message)) => Some(truncate_utf8(message.trim(), 300).to_owned()),
+        (Some(code), None) => Some(truncate_utf8(code.trim(), 300).to_owned()),
+        (None, None) => combined
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("ERROR:"))
+            .map(|line| truncate_utf8(line, 300).to_owned()),
+    }
+}
+
+fn codex_json_error_field(output: &str, field: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (_, value) = line.trim().split_once(field)?;
+        serde_json::from_str(value.trim().trim_end_matches(',')).ok()
+    })
+}
+
 fn compiler_prompt(source: &str) -> Result<String> {
     let encoded_source = serde_json::to_string(source)?;
     Ok(format!(
@@ -971,8 +1028,15 @@ mod tests {
 
     #[test]
     fn strict_schema_and_deserialization_reject_unknown_fields() {
-        let schema = serde_json::to_value(schema_for!(ClaimCompilation)).unwrap();
+        let schema = claim_compilation_schema().unwrap();
         assert_eq!(schema["additionalProperties"], false);
+        assert!(
+            schema["$defs"]["ProposedClaim"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "retrieval_anchors")
+        );
         assert!(
             serde_json::from_value::<ClaimCompilation>(serde_json::json!({
                 "claims": [],
@@ -1164,6 +1228,28 @@ mod tests {
         let prompt = compiler_prompt("note").unwrap();
         assert!(prompt.contains("retrieval_anchors"));
         assert!(prompt.contains("never put a value, number, outcome, or negation in an anchor"));
+    }
+
+    #[test]
+    fn codex_failure_diagnostic_extracts_error_without_echoing_the_source() {
+        let stderr = br#"OpenAI Codex v0.144.5
+user
+private source text
+ERROR: {
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_json_schema",
+    "message": "Missing 'retrieval_anchors'."
+  },
+  "status": 400
+}"#;
+        let diagnostic = codex_failure_diagnostic(&[], stderr).unwrap();
+        assert_eq!(
+            diagnostic,
+            "invalid_json_schema: Missing 'retrieval_anchors'."
+        );
+        assert!(!diagnostic.contains("private source text"));
     }
 
     #[test]

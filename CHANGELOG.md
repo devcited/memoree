@@ -4,6 +4,17 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-26
+
+### Fixed
+
+- Codex and Claude claim compilation now emits an OpenAI-compatible strict output schema in which `retrieval_anchors` is required. The field remains optional when reading older compiler output, preserving compatibility while restoring `memoree remember` for authenticated Codex/Luna and GPT-5.4 users.
+- Codex compiler failures now report a bounded provider error code and message without echoing remembered source text. Non-authentication failures no longer incorrectly instruct users to log in.
+
+### Changed
+
+- The versioned site image is now built only after its GitHub Release is published and the signed release manifest exists. Deployment documentation requires the exact Harbor tag and digest, preventing the site from advertising release assets before they are available.
+
 ## [0.7.0] - 2026-07-25
 
 ### Changed
@@ -129,7 +140,9 @@ All notable changes to Memoree are documented here. The format follows [Keep a C
 - Verification, atomic backup creation, deterministic retrieval evaluation, and a versioned machine protocol/schema.
 - Static documentation, checksummed Unix release binaries, and a no-sudo installer.
 
-[Unreleased]: https://github.com/devcited/memoree/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/devcited/memoree/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/devcited/memoree/releases/tag/v0.7.1
+[0.7.0]: https://github.com/devcited/memoree/releases/tag/v0.7.0
 [0.6.0]: https://github.com/devcited/memoree/releases/tag/v0.6.0
 [0.5.0]: https://github.com/devcited/memoree/releases/tag/v0.5.0
 [0.4.1]: https://github.com/devcited/memoree/releases/tag/v0.4.1
